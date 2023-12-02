@@ -1,0 +1,9 @@
+[submodule "src/diffcp"]
+	path = src/diffcp
+	url = git@github.com:holmesco/diffcp.git
+[submodule "src/certifiable-tools"]
+	path = src/certifiable-tools
+	url = git@github.com:utiasASRL/certifiable-tools.git
+[submodule "src/cvxpylayers"]
+	path = src/cvxpylayers
+	url = git@github.com:holmesco/cvxpylayers.git
