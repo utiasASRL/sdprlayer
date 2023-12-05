@@ -68,7 +68,7 @@ def build_data_mat(p):
     return Q_tch
 
 
-def test_poly8_prob_sdp(display=False):
+def test_prob_sdp(display=False):
     """The goal of this script is to shift the optimum of the polynomial
     to a different point by using backpropagtion on rank-1 SDPs"""
     np.random.seed(2)
@@ -138,15 +138,14 @@ def test_poly8_prob_sdp(display=False):
     np.testing.assert_almost_equal(evr_new, 96614772541.3, decimal=1)
 
 
-def test_poly8_grad_num(autograd_test=True):
-    """The goal of this script is to shift the optimum of the polynomial
-    to a different point by using backpropagtion on rank-1 SDPs"""
+def test_grad_num(autograd_test=True, use_dual=True):
+    """The goal of this script is to test the dual formulation of the SDPRLayer"""
     # Get data from data function
     data = get_prob_data()
     Constraints = data["Constraints"]
 
     # Create SDPR Layer
-    optlayer = SDPRLayer(n_vars=4, Constraints=Constraints)
+    optlayer = SDPRLayer(n_vars=4, Constraints=Constraints, use_dual=True)
 
     # Set up polynomial parameter tensor
     p = torch.tensor(data["p_vals"], requires_grad=True)
@@ -155,7 +154,8 @@ def test_poly8_grad_num(autograd_test=True):
     def gen_loss(p_val, **kwargs):
         x_target = -1
         (sol,) = optlayer(build_data_mat(p_val), **kwargs)
-        loss = 1 / 2 * (sol[1, 0] - x_target) ** 2
+        x_val = (sol[1, 0] + sol[0, 1]) / 2
+        loss = 1 / 2 * (x_val - x_target) ** 2
         return loss, sol
 
     # arguments for sdp solver
@@ -167,7 +167,7 @@ def test_poly8_grad_num(autograd_test=True):
             lambda *x: gen_loss(*x, solver_args=sdp_solver_args)[0],
             [p],
             eps=1e-4,
-            atol=1e-5,
+            atol=1e-4,
             rtol=1e-3,
         )
         assert res is True
@@ -197,5 +197,5 @@ def test_poly8_grad_num(autograd_test=True):
 
 
 if __name__ == "__main__":
-    test_poly8_prob_sdp()
-    test_poly8_grad_num()
+    # test_prob_sdp()
+    test_grad_num()

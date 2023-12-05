@@ -11,7 +11,7 @@ class SDPRLayer(CvxpyLayer):
         Constraints,
         local_solver=None,
         certifier=None,
-        use_primal=True,
+        use_dual=False,
     ):
         # Store information
         self.local_solver = local_solver
@@ -21,7 +21,7 @@ class SDPRLayer(CvxpyLayer):
         Q = self.init_cost_mat(n_vars)
         m = len(Constraints)
         # Primal vs Dual
-        if use_primal:
+        if not use_dual:
             # NOTE: CVXPY adds new constraints when canonicalizing if
             # the problem is defined using the primal form.
             X = cp.Variable((n_vars, n_vars), symmetric=True)
@@ -30,22 +30,26 @@ class SDPRLayer(CvxpyLayer):
                 constraints += [cp.trace(A @ X) == b]
             objective = cp.Minimize(cp.trace(Q @ X))
             problem = cp.Problem(objective=objective, constraints=constraints)
+
             variables = [X]
+            constraints_ = []
         else:
             y = cp.Variable(shape=(m,))
-            As, bs = zip()
+            As, bs = zip(*Constraints)
             b = np.concatenate([np.atleast_1d(b) for b in bs])
             objective = cp.Maximize(b @ y)
             LHS = cp.sum([y[i] * Ai for (i, Ai) in enumerate(As)])
-            constraint = LHS << Q
-            problem = cp.Problem(objective, [constraint])
-            variables = [y]
+            constraints = LHS << Q
+            problem = cp.Problem(objective, [constraints])
+            variables = []
+            constraints_ = [constraints]
         assert problem.is_dpp()
 
         # Call CvxpyLayers init
         super(SDPRLayer, self).__init__(
             problem=problem,
             variables=variables,
+            constraints=constraints_,
             parameters=[Q],
         )
 

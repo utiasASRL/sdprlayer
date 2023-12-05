@@ -7,3 +7,6 @@
 [submodule "src/cvxpylayers"]
 	path = src/cvxpylayers
 	url = git@github.com:holmesco/cvxpylayers.git
+[submodule "src/cvxpy"]
+	path = src/cvxpy
+	url = git@github.com:holmesco/cvxpy.git
