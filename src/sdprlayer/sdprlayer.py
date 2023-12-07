@@ -10,18 +10,32 @@ class SDPRLayer(CvxpyLayer):
         n_vars,
         Constraints,
         local_solver=None,
+        local_args={},
         certifier=None,
         use_dual=False,
     ):
         # Store information
         self.local_solver = local_solver
+        self.local_args = local_args
         self.certifier = certifier
         self.Constraints = Constraints
         # SET UP CVXPY PROGRAM
         Q = self.init_cost_mat(n_vars)
         m = len(Constraints)
-        # Primal vs Dual
-        if not use_dual:
+        # Dual vs Primal Formulation
+        if use_dual or local_solver is not None:
+            # If using local solver then must use dual formulation to avoid
+            # definition of extra slacks by CVXPY
+            y = cp.Variable(shape=(m,))
+            As, bs = zip(*Constraints)
+            b = np.concatenate([np.atleast_1d(b) for b in bs])
+            objective = cp.Maximize(b @ y)
+            LHS = cp.sum([y[i] * Ai for (i, Ai) in enumerate(As)])
+            constraints = LHS << Q
+            problem = cp.Problem(objective, [constraints])
+            variables = []
+            constraints_ = [constraints]
+        else:
             # NOTE: CVXPY adds new constraints when canonicalizing if
             # the problem is defined using the primal form.
             X = cp.Variable((n_vars, n_vars), symmetric=True)
@@ -33,16 +47,6 @@ class SDPRLayer(CvxpyLayer):
 
             variables = [X]
             constraints_ = []
-        else:
-            y = cp.Variable(shape=(m,))
-            As, bs = zip(*Constraints)
-            b = np.concatenate([np.atleast_1d(b) for b in bs])
-            objective = cp.Maximize(b @ y)
-            LHS = cp.sum([y[i] * Ai for (i, Ai) in enumerate(As)])
-            constraints = LHS << Q
-            problem = cp.Problem(objective, [constraints])
-            variables = []
-            constraints_ = [constraints]
         assert problem.is_dpp()
 
         # Call CvxpyLayers init
@@ -63,23 +67,23 @@ class SDPRLayer(CvxpyLayer):
     def forward(self, Q: torch.tensor, **kwargs):
         # Check if local solution methods have been defined.
         if self.local_solver is not None and self.certifier is not None:
-            if "local_args" not in kwargs:
-                raise ValueError("Local solver requires dictionary of local_args")
             # Run Local Solver
-            local_soln = self.local_solver(**kwargs["local_args"])
+            local_soln = self.local_solver(**self.local_args)
             # Certify Local Solution
             Q_detach = Q.cpu().detach().double().numpy()
             local_cert = self.certifier(
                 Q=Q_detach, Constraints=self.Constraints, x_cand=local_soln
             )
-            # add solver args
-            solver_args = dict(
+            # Update the solver arguments
+            new_solver_args = dict(
                 solve_method="local_cert", local_soln=local_soln, local_cert=local_cert
             )
-            # Call cvxpylayers forward function
-            res = super().forward(Q, solver_args=solver_args, **kwargs)
-        else:
-            # Call cvxpylayers forward function without args.
-            res = super().forward(Q, **kwargs)
+            if "solver_args" in kwargs:
+                kwargs["solver_args"].update(new_solver_args)
+            else:
+                kwargs["solver_args"] = new_solver_args
+
+        # Call cvxpylayers forward function
+        res = super().forward(Q, **kwargs)
 
         return res

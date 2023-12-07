@@ -8,6 +8,8 @@ import cvxpy as cp
 import torch
 from cvxpylayers.torch import CvxpyLayer
 from sdprlayer import SDPRLayer
+from cert_tools.eopt_solvers import solve_eopt, opts_cut_dflt
+
 
 root_dir = os.path.abspath(os.path.dirname(__file__) + "/../")
 
@@ -66,6 +68,40 @@ def build_data_mat(p):
     Q_tch[3, 3] = p[6]
 
     return Q_tch
+
+
+def local_solver(p: torch.Tensor, x_init=0.0):
+    # Detach parameters
+    p_vals = p.cpu().detach().double().numpy()
+    # Simple gradient descent solver
+    grad_tol = 1e-12
+    max_iters = 200
+    n_iter = 0
+    alpha = 1e-2
+    grad_sq = np.inf
+    x = x_init
+    while grad_sq > grad_tol and n_iter < max_iters:
+        # compute polynomial gradient
+        p_deriv = np.array([p * i for i, p in enumerate(p_vals)])[1:]
+        grad = np.polyval(p_deriv[::-1], x)
+        grad_sq = grad**2
+        # Descend
+        x = x - alpha * grad
+    # Convert to expected vector form
+    x_hat = np.array([1, x, x**2, x**3])[:, None]
+    return x_hat
+
+
+def certifier(Q, Constraints, x_cand):
+    opts = opts_cut_dflt
+    method = "sbm"
+    _, output = solve_eopt(
+        Q=Q, Constraints=Constraints, x_cand=x_cand, opts=opts, method=method
+    )
+    if not output["status"] == "POS_LB":
+        raise ValueError("Unable to certify solution")
+    # diffcp assumes the form:  H = Q - A*mult
+    return output["H"], -output["mults"]
 
 
 def test_prob_sdp(display=False):
@@ -144,11 +180,12 @@ def test_grad_num(autograd_test=True, use_dual=True):
     data = get_prob_data()
     Constraints = data["Constraints"]
 
-    # Create SDPR Layer
-    optlayer = SDPRLayer(n_vars=4, Constraints=Constraints, use_dual=True)
-
     # Set up polynomial parameter tensor
     p = torch.tensor(data["p_vals"], requires_grad=True)
+
+    # Create SDPR Layer
+    sdpr_args = dict(n_vars=4, Constraints=Constraints, use_dual=use_dual)
+    optlayer = SDPRLayer(**sdpr_args)
 
     # Define loss
     def gen_loss(p_val, **kwargs):
@@ -188,7 +225,7 @@ def test_grad_num(autograd_test=True, use_dual=True):
         delta_p = np.zeros(p_val_init.shape)
         delta_p[i] = stepsize
         p_val = torch.tensor(p_val_init + delta_p, requires_grad=True)
-        loss, sol = gen_loss(torch.tensor(p_val), solver_args=sdp_solver_args)
+        loss, sol = gen_loss(p_val, solver_args=sdp_solver_args)
         loss_curr = loss.detach().numpy().copy()
         delta_loss[i] = loss_curr - loss_init
     grad_num = delta_loss / stepsize
@@ -196,6 +233,74 @@ def test_grad_num(autograd_test=True, use_dual=True):
     np.testing.assert_allclose(grad_computed, grad_num, atol=1e-3, rtol=0)
 
 
+def test_grad_local(autograd_test=True):
+    """This test function compares the local version of SDPRLayer with the
+    SDP version. Local refers to the fact that the forward pass uses a local
+    solver and the reverse pass uses the certificate."""
+    # Get data from data function
+    data = get_prob_data()
+    Constraints = data["Constraints"]
+
+    # Set up polynomial parameter tensor
+    p = torch.tensor(data["p_vals"], requires_grad=True)
+
+    # Create SDPR Layer (SDP version)
+    sdpr_args = dict(n_vars=4, Constraints=Constraints, use_dual=True)
+    optlayer_sdp = SDPRLayer(**sdpr_args)
+    # Create SDPR Layer (Local version)
+    sdpr_args["local_solver"] = local_solver
+    sdpr_args["certifier"] = certifier
+    sdpr_args["local_args"] = dict(p=p, x_init=-1.5)
+    optlayer_local = SDPRLayer(**sdpr_args)
+
+    # Define loss
+    def gen_loss_sdp(p_val, **kwargs):
+        x_target = -1
+        (sol,) = optlayer_sdp(build_data_mat(p_val), **kwargs)
+        x_val = (sol[1, 0] + sol[0, 1]) / 2
+        loss = 1 / 2 * (x_val - x_target) ** 2
+        return loss, sol
+
+    def gen_loss_local(p_val, **kwargs):
+        x_target = -1
+        (sol,) = optlayer_local(build_data_mat(p_val), **kwargs)
+        x_val = (sol[1, 0] + sol[0, 1]) / 2
+        loss = 1 / 2 * (x_val - x_target) ** 2
+        return loss, sol
+
+    # arguments for sdp solver
+    sdp_solver_args = {"eps": 1e-9}
+
+    # SDP VERSION
+    # Compute Loss
+    loss, sol = gen_loss_sdp(p, solver_args=sdp_solver_args)
+    loss_sdp = loss.detach().numpy().copy()
+    # Compute gradient
+    loss.backward()
+    grad_sdp = p.grad.numpy().copy()
+    # LOCAL SOLVER VERSION
+    loss, sol = gen_loss_local(p, solver_args=sdp_solver_args)
+    loss_local = loss.detach().numpy().copy()
+    # Compute gradient
+    loss.backward()
+    grad_local = p.grad.numpy().copy()
+
+    np.testing.assert_allclose(loss_local, loss_sdp, atol=1e-3, rtol=0)
+    np.testing.assert_allclose(grad_local, grad_sdp, atol=1e-3, rtol=0)
+
+    # Check gradient w.r.t. parameter p
+    if autograd_test:
+        res = torch.autograd.gradcheck(
+            lambda *x: gen_loss_local(*x, solver_args=sdp_solver_args)[0],
+            [p],
+            eps=1e-4,
+            atol=1e-4,
+            rtol=1e-3,
+        )
+        assert res is True
+
+
 if __name__ == "__main__":
     # test_prob_sdp()
-    test_grad_num()
+    # test_grad_num()
+    test_grad_local()
