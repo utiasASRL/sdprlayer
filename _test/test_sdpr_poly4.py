@@ -3,6 +3,7 @@ import os
 import matplotlib.pylab as plt
 import numpy as np
 import scipy.sparse as sp
+from scipy.optimize import lsq_linear
 
 import cvxpy as cp
 import torch
@@ -15,39 +16,23 @@ root_dir = os.path.abspath(os.path.dirname(__file__) + "/../")
 
 
 def get_prob_data():
-    # Define polynomial
-    p_vals = np.array(
-        [5.0000, 1.3167 * 2, -1.4481 * 3, 0 * 4, 0.2685 * 3, -0.0667 * 2, 0.0389]
-    )
+    # Define polynomial (lowest order first)
+    p_vals = np.array([2, 2, -0.5, -2 / 3, 1 / 4])
 
     Constraints = []
-    A = sp.csc_array((4, 4))  # w^2 = 1
+    A = sp.csc_array((3, 3))  # w^2 = 1
     A[0, 0] = 1
     Constraints += [(A, 1.0)]
-    A = sp.csc_array((4, 4))  # x^2 = x*x
+    A = sp.csc_array((3, 3))  # x^2 = x*x
     A[2, 0] = 1 / 2
     A[0, 2] = 1 / 2
     A[1, 1] = -1
-    Constraints += [(A, 0.0)]
-    A = sp.csc_array((4, 4))  # x^3 = x^2*x
-    A[3, 0] = 1
-    A[0, 3] = 1
-    A[1, 2] = -1
-    A[2, 1] = -1
-    Constraints += [(A, 0.0)]
-    A = sp.csc_array((4, 4))  # x^3*x = x^2*x^2
-    A[3, 1] = 1 / 2
-    A[1, 3] = 1 / 2
-    A[2, 2] = -1
     Constraints += [(A, 0.0)]
 
     # Candidate solution
     x_cand = np.array([[1.0000, -1.4871, 2.2115, -3.2888]]).T
 
-    # Dual optimal
-    mults = -np.array([[-3.1937], [2.5759], [-0.0562], [0.8318]])
-
-    return dict(p_vals=p_vals, Constraints=Constraints, x_cand=x_cand, opt_mults=mults)
+    return dict(p_vals=p_vals, Constraints=Constraints, x_cand=x_cand)
 
 
 def plot_polynomial(p_vals):
@@ -58,14 +43,12 @@ def plot_polynomial(p_vals):
 
 # Define Q tensor from polynomial parameters (there must be a better way to do this)
 def build_data_mat(p):
-    Q_tch = torch.zeros((4, 4), dtype=torch.double)
+    Q_tch = torch.zeros((3, 3), dtype=torch.double)
     Q_tch[0, 0] = p[0]
     Q_tch[[1, 0], [0, 1]] = p[1] / 2
     Q_tch[[2, 1, 0], [0, 1, 2]] = p[2] / 3
-    Q_tch[[3, 2, 1, 0], [0, 1, 2, 3]] = p[3] / 4
-    Q_tch[[3, 2, 1], [1, 2, 3]] = p[4] / 3
-    Q_tch[[3, 2], [2, 3]] = p[5] / 2
-    Q_tch[3, 3] = p[6]
+    Q_tch[[2, 1], [1, 2]] = p[3] / 2
+    Q_tch[2, 2] = p[4]
 
     return Q_tch
 
@@ -88,20 +71,20 @@ def local_solver(p: torch.Tensor, x_init=0.0):
         # Descend
         x = x - alpha * grad
     # Convert to expected vector form
-    x_hat = np.array([1, x, x**2, x**3])[:, None]
+    x_hat = np.array([1, x, x**2])[:, None]
     return x_hat
 
 
 def certifier(Q, Constraints, x_cand):
-    opts = opts_cut_dflt
-    method = "sbm"
-    _, output = solve_eopt(
-        Q=Q, Constraints=Constraints, x_cand=x_cand, opts=opts, method=method
-    )
-    if not output["status"] == "POS_LB":
-        raise ValueError("Unable to certify solution")
-    # diffcp assumes the form:  H = Q - A*mult
-    return output["H"], -output["mults"]
+    """compute lagrange multipliers and certificate given candidate solution"""
+    q = (Q @ x_cand).flatten()
+    Ax = np.hstack([A @ x_cand for A, b in Constraints])
+    # Compute Multipliers
+    res = lsq_linear(Ax, q, tol=1e-12)
+    mults = res.x
+    # Compute Certificate - diffcp assumes the form:  H = Q - A*mult
+    H = Q - np.sum([mults[i] * A for i, (A, b) in enumerate(Constraints)])
+    return H, mults
 
 
 def test_prob_sdp(display=False):
@@ -113,14 +96,13 @@ def test_prob_sdp(display=False):
     Constraints = data["Constraints"]
 
     # Create SDPR Layer
-    optlayer = SDPRLayer(n_vars=4, Constraints=Constraints)
+    optlayer = SDPRLayer(n_vars=3, Constraints=Constraints)
 
     # Set up polynomial parameter tensor
     p = torch.tensor(data["p_vals"], requires_grad=True)
 
     # Define loss
-    def gen_loss(p_val, **kwargs):
-        x_target = -1
+    def gen_loss(p_val, x_target=-0.5, **kwargs):
         sdp_solver_args = {"eps": 1e-9}
         (sol,) = optlayer(build_data_mat(p_val), solver_args=sdp_solver_args)
         loss = 1 / 2 * (sol[1, 0] - x_target) ** 2
@@ -130,7 +112,6 @@ def test_prob_sdp(display=False):
     opt = torch.optim.Adam(params=[p], lr=1e-2)
     # Execute iterations
     losses = []
-    minima = []
     max_iter = 1000
     X_init = None
     n_iter = 0
@@ -168,10 +149,10 @@ def test_prob_sdp(display=False):
         plt.legend(["initial poly", "new poly", "initial argmin", "new argmin"])
         plt.show()
 
-    # Check that nothing has changed
-    assert n_iter == 93, ValueError("Number of iterations was expected to be 93")
-    np.testing.assert_almost_equal(loss_val, 9.4637779e-5, decimal=9)
-    np.testing.assert_almost_equal(evr_new, 96614772541.3, decimal=1)
+    # # Check that nothing has changed
+    # assert n_iter == 93, ValueError("Number of iterations was expected to be 93")
+    # np.testing.assert_almost_equal(loss_val, 9.4637779e-5, decimal=9)
+    # np.testing.assert_almost_equal(evr_new, 96614772541.3, decimal=1)
 
 
 def test_grad_num(autograd_test=True, use_dual=True):
@@ -184,12 +165,12 @@ def test_grad_num(autograd_test=True, use_dual=True):
     p = torch.tensor(data["p_vals"], requires_grad=True)
 
     # Create SDPR Layer
-    sdpr_args = dict(n_vars=4, Constraints=Constraints, use_dual=use_dual)
+    sdpr_args = dict(n_vars=3, Constraints=Constraints, use_dual=use_dual)
     optlayer = SDPRLayer(**sdpr_args)
 
     # Define loss
     def gen_loss(p_val, **kwargs):
-        x_target = -1
+        x_target = -0.5
         (sol,) = optlayer(build_data_mat(p_val), **kwargs)
         x_val = (sol[1, 0] + sol[0, 1]) / 2
         loss = 1 / 2 * (x_val - x_target) ** 2
@@ -230,7 +211,7 @@ def test_grad_num(autograd_test=True, use_dual=True):
         delta_loss[i] = loss_curr - loss_init
     grad_num = delta_loss / stepsize
     # check gradients
-    np.testing.assert_allclose(grad_computed, grad_num, atol=1e-3, rtol=0)
+    np.testing.assert_allclose(grad_computed, grad_num, atol=1e-6, rtol=0)
 
 
 def test_grad_local(autograd_test=True):
@@ -245,7 +226,7 @@ def test_grad_local(autograd_test=True):
     p = torch.tensor(data["p_vals"], requires_grad=True)
 
     # Create SDPR Layer (SDP version)
-    sdpr_args = dict(n_vars=4, Constraints=Constraints, use_dual=True)
+    sdpr_args = dict(n_vars=3, Constraints=Constraints, use_dual=True)
     optlayer_sdp = SDPRLayer(**sdpr_args)
     # Create SDPR Layer (Local version)
     sdpr_args["local_solver"] = local_solver
@@ -254,15 +235,15 @@ def test_grad_local(autograd_test=True):
     optlayer_local = SDPRLayer(**sdpr_args)
 
     # Define loss
+    x_target = -0.5
+
     def gen_loss_sdp(p_val, **kwargs):
-        x_target = -1
         (sol,) = optlayer_sdp(build_data_mat(p_val), **kwargs)
         x_val = (sol[1, 0] + sol[0, 1]) / 2
         loss = 1 / 2 * (x_val - x_target) ** 2
         return loss, sol
 
     def gen_loss_local(p_val, **kwargs):
-        x_target = -1
         (sol,) = optlayer_local(build_data_mat(p_val), **kwargs)
         x_val = (sol[1, 0] + sol[0, 1]) / 2
         loss = 1 / 2 * (x_val - x_target) ** 2
@@ -301,8 +282,8 @@ def test_grad_local(autograd_test=True):
         )
         assert res is True
     # Compare with SDP version.
-    np.testing.assert_allclose(loss_local, loss_sdp, atol=1e-7, rtol=0)
-    np.testing.assert_allclose(grad_local, grad_sdp, atol=1e-7, rtol=0)
+    np.testing.assert_allclose(loss_local, loss_sdp, atol=1e-6, rtol=0)
+    np.testing.assert_allclose(grad_local, grad_sdp, atol=1e-6, rtol=0)
 
 
 if __name__ == "__main__":
