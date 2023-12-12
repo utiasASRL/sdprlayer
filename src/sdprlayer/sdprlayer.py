@@ -2,6 +2,7 @@ import numpy as np
 import cvxpy as cp
 import torch
 from cvxpylayers.torch import CvxpyLayer
+from diffcp import cones
 
 
 class SDPRLayer(CvxpyLayer):
@@ -68,20 +69,24 @@ class SDPRLayer(CvxpyLayer):
         # Check if local solution methods have been defined.
         if self.local_solver is not None and self.certifier is not None:
             # Run Local Solver
-            local_soln = self.local_solver(**self.local_args)
+            x_cand = self.local_solver(**self.local_args)
             # Certify Local Solution
             Q_detach = Q.cpu().detach().double().numpy()
-            local_cert = self.certifier(
-                Q=Q_detach, Constraints=self.Constraints, x_cand=local_soln
+            H, mults = self.certifier(
+                Q=Q_detach, Constraints=self.Constraints, x_cand=x_cand
             )
-            # Update the solver arguments
-            new_solver_args = dict(
-                solve_method="local_cert", local_soln=local_soln, local_cert=local_cert
+            # Set variables to inject
+            ext_vars = dict(
+                x=mults,
+                y=cones.vec_symm(x_cand @ x_cand.T),
+                s=cones.vec_symm(H),
             )
+            # Update solver arguments
+            solver_args = dict(solve_method="external", ext_vars=ext_vars)
             if "solver_args" in kwargs:
-                kwargs["solver_args"].update(new_solver_args)
+                kwargs["solver_args"].update(solver_args)
             else:
-                kwargs["solver_args"] = new_solver_args
+                kwargs["solver_args"] = solver_args
 
         # Call cvxpylayers forward function
         res = super().forward(Q, **kwargs)
