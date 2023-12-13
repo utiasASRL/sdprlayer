@@ -244,6 +244,7 @@ def test_grad_local(autograd_test=True):
         return loss, sol
 
     def gen_loss_local(p_val, **kwargs):
+        kwargs.update(dict(solver_args=dict(solve_method="local")))
         (sol,) = optlayer_local(build_data_mat(p_val), **kwargs)
         x_val = (sol[1, 0] + sol[0, 1]) / 2
         loss = 1 / 2 * (x_val - x_target) ** 2

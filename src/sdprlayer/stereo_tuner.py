@@ -2,6 +2,7 @@
 # boilerplate
 import numpy as np
 import matplotlib.pyplot as plt
+import warnings
 
 # SDPRlayer import
 from sdprlayer import SDPRLayer
@@ -49,7 +50,7 @@ class Camera:
         # pixel measurements
         ul = c.f_u * x + c.c_u + c.sigma_u * noise[0, :]
         vl = c.f_v * y + c.c_v + c.sigma_v * noise[1, :]
-        ur = ul - c.f_u * c.b + c.sigma_u * noise[2, :]
+        ur = ul - c.f_u * c.b / z + c.sigma_u * noise[2, :]
         vr = vl + c.sigma_v * noise[3, :]
 
         return ul, vl, ur, vr
@@ -76,9 +77,10 @@ class Camera:
         Sigma[2, 0] = c.sigma_u**2
 
         # compute euclidean measurement coordinates
-        z = (1 / d) * c.f_u * c.b
-        x = (ul / c.f_u - c.c_u) * z
-        y = (vl / c.f_v - c.c_v) * z
+        ratio = c.b / d
+        x = (ul - c.c_u) * ratio
+        y = (vl - c.c_v) * ratio * c.f_u / c.f_v
+        z = ratio * c.f_u
         if use_torch:
             meas = torch.vstack([x, y, z])
         else:
@@ -96,6 +98,9 @@ class Camera:
 
             # Covariance matrix
             Cov = G @ Sigma @ G.T
+            if torch.linalg.matrix_rank(Cov) < 3:
+                warnings.warn("Covariance matrix is not full rank")
+                Cov = torch.eye(3)
             if use_torch:
                 W = torch.linalg.inv(Cov)
 
@@ -110,9 +115,9 @@ def get_gt_setup(
     traj_type="clusters",  # Trajectory format [clusters,circle]
     Np=1,  # Number of poses
     Nm=10,  # number of landmarks
-    offs=np.array([[0, 0, 3]]).T,  # offset between poses and landmarks
+    offs=np.array([[0, 0, 1]]).T,  # offset between poses and landmarks
     n_turns=0.5,  # (circle) number of turns around the cluster
-    lm_bound=1.0,  # Bounding box of uniform landmark distribution.
+    lm_bound=0.9,  # Bounding box of uniform landmark distribution.
 ):
     """Used to generate a trajectory of ground truth pose data"""
 
@@ -194,6 +199,11 @@ def get_data_mat(cam_torch: Camera, r_l, pixel_meas):
         Qs += [Q_e]
     Q = torch.stack(Qs)
     Q = torch.sum(Q, dim=0)
+    # TODO Find out why this is required (it should not be)
+    Q = (Q.T + Q) / 2
+    # Rescale
+    Q[0, 0] = 0.0
+    Q = Q / torch.norm(Q, p="fro")
 
     return Q
 
@@ -241,7 +251,7 @@ def tune_stereo_params(cam_torch: Camera, r_p, C_p0, r_l, pixel_meas):
         opt.zero_grad()
         # build loss
         Q = get_data_mat(cam_torch, r_l, pixel_meas)
-        solver_args = {"solve_method": "Clarabel"}
+        solver_args = {"solve_method": "mosek"}
         X = sdpr_layer(Q, solver_args=solver_args)[0]
         loss = get_loss(X, r_p, C_p0)
         loss_stored += [loss.item()]

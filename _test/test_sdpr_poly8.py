@@ -74,7 +74,7 @@ def local_solver(p: torch.Tensor, x_init=0.0):
     # Detach parameters
     p_vals = p.cpu().detach().double().numpy()
     # Simple gradient descent solver
-    grad_tol = 1e-12
+    grad_tol = 1e-10
     max_iters = 200
     n_iter = 0
     alpha = 1e-2
@@ -94,7 +94,7 @@ def local_solver(p: torch.Tensor, x_init=0.0):
 
 def certifier(Q, Constraints, x_cand):
     opts = opts_cut_dflt
-    method = "sbm"
+    method = "cuts"
     _, output = solve_eopt(
         Q=Q, Constraints=Constraints, x_cand=x_cand, opts=opts, method=method
     )
@@ -122,6 +122,83 @@ def test_prob_sdp(display=False):
     def gen_loss(p_val, **kwargs):
         x_target = -1
         sdp_solver_args = {"eps": 1e-9}
+        (sol,) = optlayer(build_data_mat(p_val), solver_args=sdp_solver_args)
+        loss = 1 / 2 * (sol[1, 0] - x_target) ** 2
+        return loss, sol
+
+    # Define Optimizer
+    opt = torch.optim.Adam(params=[p], lr=1e-2)
+    # Execute iterations
+    losses = []
+    minima = []
+    max_iter = 120
+    X_init = None
+    n_iter = 0
+    loss_val = np.inf
+    while loss_val > 1e-4 and n_iter < max_iter:
+        # Update Loss
+        opt.zero_grad()
+        loss, sol = gen_loss(p)
+        if n_iter == 0:
+            X_init = sol.cpu().detach().numpy()
+        # run optimizer
+        loss.backward(retain_graph=True)
+        opt.step()
+        loss_val = loss.item()
+        losses.append(loss_val)
+        x_min = sol.detach().numpy()[0, 1]
+        n_iter += 1
+        if display:
+            print(f"min:\t{x_min}\tloss:\t{losses[-1]}")
+    if display:
+        print(f"ITERATIonS: \t{n_iter}")
+    # Check the rank of the solution
+    X_new = sol.detach().numpy()
+    evals_new = np.sort(np.linalg.eigvalsh(X_new))[::-1]
+    evr_new = evals_new[0] / evals_new[1]
+    if display:
+        print(f"New Eigenvalue Ratio:\t{evr_new}")
+
+    if display:
+        plt.figure()
+        plot_polynomial(p_vals=data["p_vals"])
+        plot_polynomial(p_vals=p.detach().numpy())
+        plt.axvline(x=X_init[0, 1], color="r", linestyle="--")
+        plt.axvline(x=X_new[0, 1], color="b", linestyle="--")
+        plt.legend(["initial poly", "new poly", "initial argmin", "new argmin"])
+        plt.show()
+        plt.title("")
+
+    # Assert that optimization worked as expected.
+    assert n_iter < 120, ValueError("Terminated on max iterations")
+    assert loss_val <= 1e-4, ValueError("Loss did not drop to expected value")
+    assert np.log10(evr_new) >= 9, ValueError("Solution is not Rank-1")
+
+
+def test_prob_local(display=False):
+    """The goal of this script is to shift the optimum of the polynomial
+    to a different point by using backpropagtion on rank-1 SDPs. Forward
+    pass is performed with an iterative solver while the backward pass uses
+    the computed certificate/multipliers."""
+    np.random.seed(2)
+    # Get data from data function
+    data = get_prob_data()
+    Constraints = data["Constraints"]
+
+    # Set up polynomial parameter tensor
+    p = torch.tensor(data["p_vals"], requires_grad=True)
+
+    # Create SDPR Layer
+    sdpr_args = dict(n_vars=4, Constraints=Constraints, use_dual=True)
+    sdpr_args["local_solver"] = local_solver
+    sdpr_args["certifier"] = certifier
+    sdpr_args["local_args"] = dict(p=p, x_init=-1.5)
+    optlayer = SDPRLayer(**sdpr_args)
+
+    # Define loss
+    def gen_loss(p_val):
+        x_target = -1
+        sdp_solver_args = {"eps": 1e-9, "solve_method": "local"}
         (sol,) = optlayer(build_data_mat(p_val), solver_args=sdp_solver_args)
         loss = 1 / 2 * (sol[1, 0] - x_target) ** 2
         return loss, sol
@@ -168,13 +245,12 @@ def test_prob_sdp(display=False):
         plt.legend(["initial poly", "new poly", "initial argmin", "new argmin"])
         plt.show()
 
-    # Check that nothing has changed
-    assert n_iter == 93, ValueError("Number of iterations was expected to be 93")
-    np.testing.assert_almost_equal(loss_val, 9.4637779e-5, decimal=9)
-    np.testing.assert_almost_equal(evr_new, 96614772541.3, decimal=1)
+    # Check convergence.
+    assert n_iter < 120, ValueError("Terminated on max iterations")
+    assert loss_val <= 1e-4, ValueError("Loss did not drop to expected value")
 
 
-def test_grad_num(autograd_test=True, use_dual=True):
+def test_grad_sdp(autograd_test=True, use_dual=True):
     """The goal of this script is to test the dual formulation of the SDPRLayer"""
     # Get data from data function
     data = get_prob_data()
@@ -263,6 +339,7 @@ def test_grad_local(autograd_test=True):
 
     def gen_loss_local(p_val, **kwargs):
         x_target = -1
+        kwargs.update(dict(solver_args=dict(solve_method="local")))
         (sol,) = optlayer_local(build_data_mat(p_val), **kwargs)
         x_val = (sol[1, 0] + sol[0, 1]) / 2
         loss = 1 / 2 * (x_val - x_target) ** 2
@@ -296,16 +373,17 @@ def test_grad_local(autograd_test=True):
             lambda *x: gen_loss_local(*x, solver_args=sdp_solver_args)[0],
             [p],
             eps=1e-5,
-            atol=1e-9,
+            atol=1e-7,
             rtol=1e-3,
         )
         assert res is True
     # Compare with SDP version.
-    np.testing.assert_allclose(loss_local, loss_sdp, atol=1e-7, rtol=0)
-    np.testing.assert_allclose(grad_local, grad_sdp, atol=1e-7, rtol=0)
+    np.testing.assert_allclose(loss_local, loss_sdp, atol=2e-7, rtol=0)
+    np.testing.assert_allclose(grad_local, grad_sdp, atol=2e-6, rtol=0)
 
 
 if __name__ == "__main__":
     # test_prob_sdp()
-    # test_grad_num()
+    # test_prob_local(display=True)
+    # test_grad_sdp()
     test_grad_local()

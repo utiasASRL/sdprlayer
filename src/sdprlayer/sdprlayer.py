@@ -4,6 +4,16 @@ import torch
 from cvxpylayers.torch import CvxpyLayer
 from diffcp import cones
 
+mosek_params_dflt = {
+    "MSK_IPAR_INTPNT_MAX_ITERATIONS": 500,
+    "MSK_DPAR_INTPNT_CO_TOL_PFEAS": 1e-8,
+    "MSK_DPAR_INTPNT_CO_TOL_REL_GAP": 1e-8,
+    "MSK_DPAR_INTPNT_CO_TOL_MU_RED": 1e-10,
+    "MSK_DPAR_INTPNT_CO_TOL_INFEAS": 1e-8,
+    "MSK_DPAR_INTPNT_CO_TOL_DFEAS": 1e-8,
+    "MSK_IPAR_INTPNT_SOLVE_FORM": "MSK_SOLVE_DUAL",
+}
+
 
 class SDPRLayer(CvxpyLayer):
     def __init__(
@@ -13,13 +23,14 @@ class SDPRLayer(CvxpyLayer):
         local_solver=None,
         local_args={},
         certifier=None,
-        use_dual=False,
+        use_dual=True,
     ):
         # Store information
         self.local_solver = local_solver
         self.local_args = local_args
         self.certifier = certifier
         self.Constraints = Constraints
+        self.use_dual = use_dual
         # SET UP CVXPY PROGRAM
         Q = self.init_cost_mat(n_vars)
         m = len(Constraints)
@@ -36,6 +47,7 @@ class SDPRLayer(CvxpyLayer):
             problem = cp.Problem(objective, [constraints])
             variables = []
             constraints_ = [constraints]
+            self.H = Q - LHS
         else:
             # NOTE: CVXPY adds new constraints when canonicalizing if
             # the problem is defined using the primal form.
@@ -49,7 +61,9 @@ class SDPRLayer(CvxpyLayer):
             variables = [X]
             constraints_ = []
         assert problem.is_dpp()
-
+        # store problem and parameters
+        self.problem = problem
+        self.Q = Q
         # Call CvxpyLayers init
         super(SDPRLayer, self).__init__(
             problem=problem,
@@ -66,27 +80,50 @@ class SDPRLayer(CvxpyLayer):
         return Q
 
     def forward(self, Q: torch.tensor, **kwargs):
-        # Check if local solution methods have been defined.
-        if self.local_solver is not None and self.certifier is not None:
-            # Run Local Solver
-            x_cand = self.local_solver(**self.local_args)
-            # Certify Local Solution
-            Q_detach = Q.cpu().detach().double().numpy()
-            H, mults = self.certifier(
-                Q=Q_detach, Constraints=self.Constraints, x_cand=x_cand
-            )
-            # Set variables to inject
-            ext_vars = dict(
-                x=mults,
-                y=cones.vec_symm(x_cand @ x_cand.T),
-                s=cones.vec_symm(H),
-            )
-            # Update solver arguments
-            solver_args = dict(solve_method="external", ext_vars=ext_vars)
-            if "solver_args" in kwargs:
-                kwargs["solver_args"].update(solver_args)
-            else:
-                kwargs["solver_args"] = solver_args
+        if "solver_args" in kwargs and "solve_method" in kwargs["solver_args"]:
+            method = kwargs["solver_args"]["solve_method"]
+            if method == "mosek":
+                mosek_params = kwargs["solver_args"]
+                mosek_params.pop("solve_method")
+                verbose = mosek_params.pop("verbose", None)
+                self.Q.value = Q.cpu().detach().double().numpy()
+                self.problem.solve(
+                    solver=cp.MOSEK, verbose=verbose, mosek_params=mosek_params_dflt
+                )
+                # Set variables to inject
+                if self.use_dual:
+                    X = self.problem.constraints[0].dual_value
+                    H = np.array(self.H.value)
+                    mults = self.problem.variables()[0].value
+                else:
+                    raise NotImplementedError
+
+            elif method == "local":
+                # Check if local solution methods have been defined.
+                assert self.local_solver is not None, "Local solver not defined."
+                assert self.certifier is not None, "Certifier not defined."
+                # Run Local Solver
+                x_cand = self.local_solver(**self.local_args)
+                X = x_cand @ x_cand.T
+                # Certify Local Solution
+                Q_detach = Q.cpu().detach().double().numpy()
+                H, mults = self.certifier(
+                    Q=Q_detach, Constraints=self.Constraints, x_cand=x_cand
+                )
+
+            if method == "local" or method == "mosek":
+                # Set variables to inject
+                ext_vars = dict(
+                    x=mults,
+                    y=cones.vec_symm(X),
+                    s=cones.vec_symm(H),
+                )
+                # Update solver arguments
+                solver_args = dict(solve_method="external", ext_vars=ext_vars)
+                if "solver_args" in kwargs:
+                    kwargs["solver_args"].update(solver_args)
+                else:
+                    kwargs["solver_args"] = solver_args
 
         # Call cvxpylayers forward function
         res = super().forward(Q, **kwargs)
