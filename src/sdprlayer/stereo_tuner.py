@@ -3,6 +3,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import warnings
+import pandas as pd
 
 # SDPRlayer import
 from sdprlayer import SDPRLayer
@@ -57,7 +58,6 @@ class Camera:
 
     def inverse(c, ul, vl, ur, vr):
         use_torch = torch.is_tensor(c.f_u)
-
         # compute disparity
         d = ul - ur
         assert all(d > 0), "Negative disparity in data"
@@ -66,7 +66,7 @@ class Camera:
             d = torch.tensor(d)
             ul = torch.tensor(ul)
             vl = torch.tensor(vl)
-            Sigma = torch.zeros((3, 3))
+            Sigma = torch.zeros((3, 3), dtype=torch.double)
         else:
             Sigma = np.zeros((3, 3))
         # Define pixel covariance
@@ -88,7 +88,7 @@ class Camera:
         # compute weights
         weights = []
         for i in range(len(ul)):
-            G = torch.zeros((3, 3))
+            G = torch.zeros((3, 3), dtype=torch.double)
             # Define G
             G[0, 0] = z[i] / c.f_u
             G[1, 1] = z[i] / c.f_v
@@ -100,10 +100,10 @@ class Camera:
             Cov = G @ Sigma @ G.T
             if torch.linalg.matrix_rank(Cov) < 3:
                 warnings.warn("Covariance matrix is not full rank")
-                Cov = torch.eye(3)
+                Cov = torch.eye(3, dtype=torch.double)
+            # weights
             if use_torch:
                 W = torch.linalg.inv(Cov)
-
             else:
                 W += np.linalg.inv(Cov)
             weights += [0.5 * (W + W.T)]
@@ -112,12 +112,12 @@ class Camera:
 
 
 def get_gt_setup(
-    traj_type="clusters",  # Trajectory format [clusters,circle]
+    traj_type="circle",  # Trajectory format [clusters,circle]
     Np=1,  # Number of poses
     Nm=10,  # number of landmarks
-    offs=np.array([[0, 0, 1]]).T,  # offset between poses and landmarks
-    n_turns=0.5,  # (circle) number of turns around the cluster
-    lm_bound=0.9,  # Bounding box of uniform landmark distribution.
+    offs=np.array([[0, 0, 2]]).T,  # offset between poses and landmarks
+    n_turns=0.25,  # (circle) number of turns around the cluster
+    lm_bound=1.0,  # Bounding box of uniform landmark distribution.
 ):
     """Used to generate a trajectory of ground truth pose data"""
 
@@ -141,8 +141,8 @@ def get_gt_setup(
         if Np > 1:
             delta_phi = n_turns * 2 * np.pi / (Np - 1)
         else:
-            delta_phi = 0.0
-        phi = 0.0
+            delta_phi = n_turns
+        phi = delta_phi
         for i in range(Np):
             # Location
             r = radius * np.array([[np.cos(phi), np.sin(phi), 0]]).T
@@ -174,7 +174,7 @@ def get_prob_data(camera=Camera(), Nm=30):
 def get_data_mat(cam_torch: Camera, r_l, pixel_meas):
     # Get euclidean measurements from pixels
     meas, weights = cam_torch.inverse(*pixel_meas)
-    y = meas.float()
+    y = meas.double()
     # Indices
     h = [0]
     c = slice(1, 10)
@@ -182,83 +182,97 @@ def get_data_mat(cam_torch: Camera, r_l, pixel_meas):
     Qs = []
     for i in range(meas.shape[1]):
         W_ij = weights[i].contiguous()
-        m_j0_0 = torch.tensor(r_l[i], dtype=torch.float32).contiguous()
+        m_j0_0 = torch.tensor(r_l[i], dtype=torch.double).contiguous()
         y_ji_i = y[:, [i]]
         # Define matrix
-        Q_e = torch.zeros(13, 13)
+        Q_e = torch.zeros(13, 13, dtype=torch.double)
+        # Diagonals
         Q_e[c, c] = torch.kron(m_j0_0 @ m_j0_0.T, W_ij)
-        Q_e[c, t] = -torch.kron(m_j0_0, W_ij)
-        Q_e[t, c] = -torch.kron(m_j0_0, W_ij).T
-        Q_e[c, h] = -torch.kron(m_j0_0, W_ij @ y_ji_i)
-        Q_e[h, c] = -torch.kron(m_j0_0, W_ij @ y_ji_i).T
         Q_e[t, t] = W_ij
-        Q_e[t, h] = W_ij @ y_ji_i
-        Q_e[h, t] = (W_ij @ y_ji_i).T
         Q_e[h, h] = y_ji_i.T @ W_ij @ y_ji_i
+        # Off Diagonals
+        Q_e[c, t] = -torch.kron(m_j0_0, W_ij)
+        Q_e[t, c] = Q_e[c, t].T
+        Q_e[c, h] = -torch.kron(m_j0_0, W_ij @ y_ji_i)
+        Q_e[h, c] = Q_e[c, h].T
+        Q_e[t, h] = W_ij @ y_ji_i
+        Q_e[h, t] = Q_e[t, h].T
+
         # Add to overall matrix
         Qs += [Q_e]
     Q = torch.stack(Qs)
     Q = torch.sum(Q, dim=0)
-    # TODO Find out why this is required (it should not be)
-    Q = (Q.T + Q) / 2
     # Rescale
     Q[0, 0] = 0.0
     Q = Q / torch.norm(Q, p="fro")
-
+    Q[0, 0] = 1.0
+    # TODO seems like assymetry is introduced by the sum. Fix this.
+    Q = (Q.T + Q) / 2
     return Q
 
 
 # Loss Function
-def get_loss(X, r_p_in0, C_p0):
+def get_loss_from_sol(X, r_p_in0, C_p0):
+    assert np.linalg.matrix_rank(X.detach().numpy(), tol=1e-5) == 1, "X is not rank-1"
     # Convert to tensors
-    C_p0 = torch.tensor(C_p0[0], dtype=torch.float32)
-    r_p_in0 = torch.tensor(r_p_in0[0], dtype=torch.float32)
+    C_p0 = torch.tensor(C_p0[0], dtype=torch.float64)
+    r_p_in0 = torch.tensor(r_p_in0[0], dtype=torch.float64)
     # Extract solution (assume Rank-1)
-    r = X[10:, [0]]
-    C_vec = X[1:10, [0]]
-    C = C_vec.reshape((3, 3))
-    # Define loss as difference to ground truth
-    loss = torch.norm(r - r_p_in0) + torch.norm(C.T @ C_p0 - torch.eye(3), p="fro")
+    r = (X[10:, [0]] + X[[0], 10:].T) / 2.0
+    C_vec = (X[1:10, [0]] + X[[0], 1:10].T) / 2.0
+    C = C_vec.reshape((3, 3)).T
+    loss = (
+        torch.norm(r - C_p0 @ r_p_in0) ** 2
+        + torch.norm(C.T @ C_p0 - torch.eye(3), p="fro") ** 2
+    )
     return loss
 
 
-def tune_stereo_params(cam_torch: Camera, r_p, C_p0, r_l, pixel_meas):
+def tune_stereo_params(
+    cam_torch: Camera, params, tune_params, r_p, C_p0, r_l, pixel_meas, verbose=False
+):
     # Define a localization class to get the constraints
     prob = Localization(r_p, C_p0, r_l)
     prob.generate_constraints()
     prob.generate_redun_constraints()
     constraints = prob.constraints + prob.constraints_r
-
     constraints_list = [(c.A.get_matrix(prob.var_list), c.b) for c in constraints]
-
     # Build Layer
-    sdpr_layer = SDPRLayer(13, Constraints=constraints_list, use_dual=True)
-
+    sdpr_layer = SDPRLayer(13, constraints=constraints_list, use_dual=False)
     # Define optimizer
-    params = [cam_torch.b]
-    opt = torch.optim.SGD(params=params, lr=1)
-
-    torch.autograd.set_detect_anomaly(True)
-
+    opt = torch.optim.SGD(params=params, lr=tune_params["lr"])
     # Optimization loop
-    max_iter = 200
-    tol_grad_sq = 1e-10
+    max_iter = 20000
+    tol_grad_sq = tune_params["tol_grad_sq"]
     grad_sq = np.inf
     n_iter = 0
     loss_stored = []
+    iter_info = []
     while grad_sq > tol_grad_sq and n_iter < max_iter:
         # zero grad
         opt.zero_grad()
         # build loss
         Q = get_data_mat(cam_torch, r_l, pixel_meas)
-        solver_args = {"solve_method": "mosek"}
+        solver_args = {"solve_method": "SCS", "eps": 1e-9}
         X = sdpr_layer(Q, solver_args=solver_args)[0]
-        loss = get_loss(X, r_p, C_p0)
+        loss = get_loss_from_sol(X, r_p, C_p0)
         loss_stored += [loss.item()]
         # Back prop and update
         loss.backward()
         grad = np.vstack([p.grad for p in params])
         grad_sq = np.sum([g**2 for g in grad])
         opt.step()
-        print(f"Iter:\t{n_iter}\tLoss:\t{loss_stored[-1]}")
+        if verbose:
+            print(f"Iter:\t{n_iter}\tLoss:\t{loss_stored[-1]}\tgrad_sq:\t{grad_sq}")
+            print(f"Params:\t{params}")
+        iter_info += [
+            dict(
+                params=np.stack([p.detach().numpy() for p in params]),
+                loss=loss_stored[-1],
+                grad_sq=grad_sq,
+                n_iter=n_iter,
+            )
+        ]
         n_iter += 1
+
+    return pd.DataFrame(iter_info)

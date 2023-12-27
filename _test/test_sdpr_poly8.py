@@ -9,9 +9,14 @@ import torch
 from cvxpylayers.torch import CvxpyLayer
 from sdprlayer import SDPRLayer
 from cert_tools.eopt_solvers import solve_eopt, opts_cut_dflt
-
+import unittest
 
 root_dir = os.path.abspath(os.path.dirname(__file__) + "/../")
+
+
+class testSDPRPoly8(unittest.TestCase):
+    def __init__(self, *args, **kwargs):
+        super(testSDPRPoly8, self).__init__(*args, **kwargs)
 
 
 def get_prob_data():
@@ -276,14 +281,13 @@ def test_grad_sdp(autograd_test=True, use_dual=True):
 
     # Check gradient w.r.t. parameter p
     if autograd_test:
-        res = torch.autograd.gradcheck(
+        torch.autograd.gradcheck(
             lambda *x: gen_loss(*x, solver_args=sdp_solver_args)[0],
             [p],
             eps=1e-4,
-            atol=1e-4,
-            rtol=1e-3,
+            atol=1e-5,
+            rtol=1e-6,
         )
-        assert res is True
 
     # Manually compute and compare gradients
     stepsize = 1e-6
@@ -307,6 +311,52 @@ def test_grad_sdp(autograd_test=True, use_dual=True):
     grad_num = delta_loss / stepsize
     # check gradients
     np.testing.assert_allclose(grad_computed, grad_num, atol=1e-3, rtol=0)
+
+
+def test_grad_sdp_mosek(use_dual=True):
+    """Test SDPRLayer with MOSEK as the solver"""
+    # Get data from data function
+    data = get_prob_data()
+    Constraints = data["Constraints"]
+
+    # Set up polynomial parameter tensor
+    p = torch.tensor(data["p_vals"], requires_grad=True)
+
+    # Create SDPR Layer
+    sdpr_args = dict(n_vars=4, Constraints=Constraints, use_dual=use_dual)
+    optlayer = SDPRLayer(**sdpr_args)
+
+    # Define loss
+    def gen_loss(p_val, **kwargs):
+        x_target = -1
+        (sol,) = optlayer(build_data_mat(p_val), **kwargs)
+        x_val = (sol[1, 0] + sol[0, 1]) / 2
+        loss = 1 / 2 * (x_val - x_target) ** 2
+        return loss, sol
+
+    # arguments for sdp solver
+    mosek_params = {
+        "MSK_IPAR_INTPNT_MAX_ITERATIONS": 500,
+        "MSK_DPAR_INTPNT_CO_TOL_PFEAS": 1e-9,
+        "MSK_DPAR_INTPNT_CO_TOL_REL_GAP": 1e-9,
+        "MSK_DPAR_INTPNT_CO_TOL_MU_RED": 1e-9,
+        "MSK_DPAR_INTPNT_CO_TOL_INFEAS": 1e-9,
+        "MSK_DPAR_INTPNT_CO_TOL_DFEAS": 1e-9,
+    }
+    sdp_solver_args = {
+        "solve_method": "mosek",
+        "mosek_params": mosek_params,
+        "verbose": True,
+    }
+
+    # Check gradient w.r.t. parameter p
+    torch.autograd.gradcheck(
+        lambda *x: gen_loss(*x, solver_args=sdp_solver_args)[0],
+        [p],
+        eps=1e-4,
+        atol=1e-3,
+        rtol=0.0,
+    )
 
 
 def test_grad_local(autograd_test=True):
@@ -385,5 +435,6 @@ def test_grad_local(autograd_test=True):
 if __name__ == "__main__":
     # test_prob_sdp()
     # test_prob_local(display=True)
-    # test_grad_sdp()
-    test_grad_local()
+    test_grad_sdp()
+    # test_grad_sdp_mosek()
+    # test_grad_local()
