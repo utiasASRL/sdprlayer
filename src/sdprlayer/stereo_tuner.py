@@ -171,6 +171,14 @@ def get_prob_data(camera=Camera(), Nm=30):
     return r_p, C_p0, r_l, pixel_meas
 
 
+def get_data_mats(cam_torch: Camera, r_ls, pixel_meass):
+    Qs = []
+    for i in range(len(r_ls)):
+        Qs += [get_data_mat(cam_torch, r_ls[i], pixel_meass[i])]
+    Q_all = torch.stack(Qs, dim=0)
+    return Q_all
+
+
 def get_data_mat(cam_torch: Camera, r_l, pixel_meas):
     # Get euclidean measurements from pixels
     meas, weights = cam_torch.inverse(*pixel_meas)
@@ -179,7 +187,7 @@ def get_data_mat(cam_torch: Camera, r_l, pixel_meas):
     h = [0]
     c = slice(1, 10)
     t = slice(10, 13)
-    Qs = []
+    Q_es = []
     for i in range(meas.shape[1]):
         W_ij = weights[i].contiguous()
         m_j0_0 = torch.tensor(r_l[i], dtype=torch.double).contiguous()
@@ -199,8 +207,8 @@ def get_data_mat(cam_torch: Camera, r_l, pixel_meas):
         Q_e[h, t] = Q_e[t, h].T
 
         # Add to overall matrix
-        Qs += [Q_e]
-    Q = torch.stack(Qs)
+        Q_es += [Q_e]
+    Q = torch.stack(Q_es)
     Q = torch.sum(Q, dim=0)
     # Rescale
     Q[0, 0] = 0.0
@@ -212,11 +220,24 @@ def get_data_mat(cam_torch: Camera, r_l, pixel_meas):
 
 
 # Loss Function
+def get_loss_from_sols(Xs, r_p_in0, C_p0):
+    "Get ground truth loss over multiple solutions"
+    if Xs.ndim == 2:
+        Xs = Xs.unsqueeze(0)
+    losses = []
+    for i in range(Xs.shape[0]):
+        losses += [get_loss_from_sol(Xs[i], r_p_in0[i], C_p0[i])]
+    loss = torch.stack(losses).sum()
+    return loss
+
+
 def get_loss_from_sol(X, r_p_in0, C_p0):
+    "Get ground truth loss from solution"
+    # Check rank
     assert np.linalg.matrix_rank(X.detach().numpy(), tol=1e-5) == 1, "X is not rank-1"
     # Convert to tensors
-    C_p0 = torch.tensor(C_p0[0], dtype=torch.float64)
-    r_p_in0 = torch.tensor(r_p_in0[0], dtype=torch.float64)
+    C_p0 = torch.tensor(C_p0, dtype=torch.float64)
+    r_p_in0 = torch.tensor(r_p_in0, dtype=torch.float64)
     # Extract solution (assume Rank-1)
     r = (X[10:, [0]] + X[[0], 10:].T) / 2.0
     C_vec = (X[1:10, [0]] + X[[0], 1:10].T) / 2.0
@@ -228,40 +249,121 @@ def get_loss_from_sol(X, r_p_in0, C_p0):
     return loss
 
 
+term_crit_def = {
+    "max_iter": 500,
+    "tol_grad_sq": 1e-14,
+    "tol_loss": 1e-12,
+}  # Optimization termination criteria
+
+
 def tune_stereo_params(
-    cam_torch: Camera, params, tune_params, r_p, C_p0, r_l, pixel_meas, verbose=False
+    cam_torch: Camera,
+    params,
+    opt,
+    r_p,
+    C_p0,
+    r_l,
+    pixel_meas,
+    term_crit=term_crit_def,
+    verbose=False,
 ):
     # Define a localization class to get the constraints
-    prob = Localization(r_p, C_p0, r_l)
+    prob = Localization([r_p[0]], [C_p0[0]], r_l[0])
     prob.generate_constraints()
     prob.generate_redun_constraints()
     constraints = prob.constraints + prob.constraints_r
     constraints_list = [(c.A.get_matrix(prob.var_list), c.b) for c in constraints]
     # Build Layer
     sdpr_layer = SDPRLayer(13, constraints=constraints_list, use_dual=False)
-    # Define optimizer
-    opt = torch.optim.SGD(params=params, lr=tune_params["lr"])
+
+    # define closure
+    def closure_fcn():
+        # zero grad
+        opt.zero_grad()
+        # generate loss
+        Q = get_data_mats(cam_torch, r_l, pixel_meas)
+        solver_args = {"solve_method": "SCS", "eps": 1e-10}
+        Xs = sdpr_layer(Q, solver_args=solver_args)[0]
+        loss = get_loss_from_sols(Xs, r_p, C_p0)
+        # backprop
+        loss.backward()
+        return loss
+
     # Optimization loop
-    max_iter = 20000
-    tol_grad_sq = tune_params["tol_grad_sq"]
+    max_iter = term_crit["max_iter"]
+    tol_grad_sq = term_crit["tol_grad_sq"]
+    tol_loss = term_crit["tol_loss"]
     grad_sq = np.inf
     n_iter = 0
     loss_stored = []
     iter_info = []
-    while grad_sq > tol_grad_sq and n_iter < max_iter:
-        # zero grad
-        opt.zero_grad()
-        # build loss
-        Q = get_data_mat(cam_torch, r_l, pixel_meas)
-        solver_args = {"solve_method": "SCS", "eps": 1e-9}
-        X = sdpr_layer(Q, solver_args=solver_args)[0]
-        loss = get_loss_from_sol(X, r_p, C_p0)
+    loss = torch.tensor(np.inf)
+    while grad_sq > tol_grad_sq and n_iter < max_iter and loss > tol_loss:
+        loss = opt.step(closure_fcn)
         loss_stored += [loss.item()]
-        # Back prop and update
-        loss.backward()
         grad = np.vstack([p.grad for p in params])
         grad_sq = np.sum([g**2 for g in grad])
-        opt.step()
+        if verbose:
+            print(f"Iter:\t{n_iter}\tLoss:\t{loss_stored[-1]}\tgrad_sq:\t{grad_sq}")
+            print(f"Params:\t{params}")
+        iter_info += [
+            dict(
+                params=np.stack([p.detach().numpy() for p in params]),
+                loss=loss_stored[-1],
+                grad_sq=grad_sq,
+                n_iter=n_iter,
+            )
+        ]
+        n_iter += 1
+
+    return pd.DataFrame(iter_info)
+
+
+def tune_stereo_params_no_opt(
+    cam_torch: Camera,
+    params,
+    opt,
+    r_ps,
+    C_p0s,
+    r_ls,
+    pixel_meass,
+    term_crit=term_crit_def,
+    verbose=False,
+):
+    # define closure
+    def closure_fcn():
+        # zero grad
+        opt.zero_grad()
+        # generate loss based on landmarks
+        meas, weights = cam_torch.inverse(*pixel_meass[0])
+        # Check that measurements are correct (should be exact with no noise)
+        meas_gt = torch.tensor(C_p0s[0] @ (np.hstack(r_ls[0]) - r_ps[0]))
+        losses = []
+        for i in range(meas.shape[1]):
+            losses += [
+                (meas[:, [i]] - meas_gt[:, [i]]).T
+                @ weights[i]
+                @ (meas[:, [i]] - meas_gt[:, [i]])
+            ]
+        loss = torch.stack(losses).sum()
+        # backprop
+        loss.backward()
+        return loss
+
+    # Optimization loop
+    max_iter = term_crit["max_iter"]
+    tol_grad_sq = term_crit["tol_grad_sq"]
+    tol_loss = term_crit["tol_loss"]
+    grad_sq = np.inf
+    n_iter = 0
+    loss_stored = []
+    iter_info = []
+    loss = torch.tensor(np.inf)
+    while grad_sq > tol_grad_sq and n_iter < max_iter and loss > tol_loss:
+        loss = opt.step(closure_fcn)
+        loss_stored += [loss.item()]
+        grad = np.vstack([p.grad for p in params])
+        grad_sq = np.sum([g**2 for g in grad])
         if verbose:
             print(f"Iter:\t{n_iter}\tLoss:\t{loss_stored[-1]}\tgrad_sq:\t{grad_sq}")
             print(f"Params:\t{params}")
