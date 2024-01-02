@@ -35,7 +35,7 @@ class TestStereoTune(unittest.TestCase):
         # Generate problem
         t.cam_gt.sigma_v = 0.0
         t.cam_gt.sigma_u = 0.0
-        r_p, C_p0, r_l, pixel_meas = st.get_prob_data(camera=t.cam_gt, Nm=7)
+        r_p, C_p0, r_l, pixel_meas = st.get_prob_data(camera=t.cam_gt, N_map=7)
 
         # generate parameterized camera
         cam_torch = st.Camera(
@@ -77,7 +77,7 @@ class TestStereoTune(unittest.TestCase):
         np.random.seed(0)
         torch.manual_seed(0)
         # Generate problem
-        r_p, C_p0, r_l, pixel_meas = st.get_prob_data(camera=t.cam_gt, Nm=7)
+        r_p, C_p0, r_l, pixel_meas = st.get_prob_data(camera=t.cam_gt, N_map=7)
 
         # generate parameterized camera
         cam_torch = st.Camera(
@@ -120,7 +120,7 @@ class TestStereoTune(unittest.TestCase):
         np.random.seed(0)
         torch.manual_seed(0)
 
-        r_p, C_p0, r_l, pixel_meas = st.get_prob_data(camera=t.cam_gt, Nm=50)
+        r_p, C_p0, r_l, pixel_meas = st.get_prob_data(camera=t.cam_gt, N_map=50)
 
         # generate parameterized camera
         cam_torch = st.Camera(
@@ -162,7 +162,7 @@ class TestStereoTune(unittest.TestCase):
         # Generate problem
         np.random.seed(0)
         torch.manual_seed(0)
-        r_p, C_p0, r_l, pixel_meas = st.get_prob_data(camera=t.cam_gt, Nm=5)
+        r_p, C_p0, r_l, pixel_meas = st.get_prob_data(camera=t.cam_gt, N_map=5)
 
         # Camera parameters
         params = (
@@ -205,7 +205,7 @@ class TestStereoTune(unittest.TestCase):
         # Generate problem
         np.random.seed(0)
         torch.manual_seed(0)
-        r_p, C_p0, r_l, pixel_meas = st.get_prob_data(camera=t.cam_gt, Nm=5)
+        r_p, C_p0, r_l, pixel_meas = st.get_prob_data(camera=t.cam_gt, N_map=5)
 
         # Camera parameters
         params = (
@@ -234,7 +234,7 @@ class TestStereoTune(unittest.TestCase):
         np.random.seed(0)
         torch.manual_seed(0)
 
-        r_p, C_p0, r_l, pixel_meas = st.get_prob_data(camera=t.cam_gt, Nm=5)
+        r_p, C_p0, r_l, pixel_meas = st.get_prob_data(camera=t.cam_gt, N_map=5)
 
         # Camera parameters
         params = (
@@ -319,7 +319,7 @@ class TestStereoTune(unittest.TestCase):
         np.random.seed(0)
         torch.manual_seed(0)
 
-        r_p, C_p0, r_l, pixel_meas = st.get_prob_data(camera=t.cam_gt, Nm=5)
+        r_p, C_p0, r_l, pixel_meas = st.get_prob_data(camera=t.cam_gt, N_map=5)
 
         # Camera parameters
         params = (
@@ -381,7 +381,7 @@ class TestStereoTune(unittest.TestCase):
             "b": dict(offs=0.2, lr=5e-3, tol_grad_sq=1e-10, atol=2e-3),
         }
         # Generate problem
-        r_p, C_p0, r_l, pixel_meas = st.get_prob_data(camera=t.cam_gt, Nm=20)
+        r_p, C_p0, r_l, pixel_meas = st.get_prob_data(camera=t.cam_gt, N_map=20)
 
         # generate parameterized camera
         cam_torch = st.Camera(
@@ -476,7 +476,7 @@ class TestStereoTune(unittest.TestCase):
             ),
         }
         # Generate problem
-        r_p, C_p0, r_l, pixel_meas = st.get_prob_data(camera=t.cam_gt, Nm=20)
+        r_p, C_p0, r_l, pixel_meas = st.get_prob_data(camera=t.cam_gt, N_map=20)
 
         # generate parameterized camera
         cam_torch = st.Camera(
@@ -540,7 +540,9 @@ class TestStereoTune(unittest.TestCase):
                     atol=tune_params["atol"],
                 )
 
-    def test_tune_params(t, plot=False, optim="Adam", no_noise=True, N_data=1):
+    def test_tune_params(
+        t, plot=True, optim="LBFGS", no_noise=False, N_map=20, N_pose=5
+    ):
         """Test offsets for all parameters simultaneously. Use default noise level"""
         set_seed(0)
         if no_noise:
@@ -555,13 +557,13 @@ class TestStereoTune(unittest.TestCase):
         # dictionary of paramter test values
         param_dict = {
             "f_u": dict(
-                offs=100,
-                atol=5,
+                offs=10,
+                atol=2,
                 atol_nonoise=1e-2,
             ),
-            "f_v": dict(offs=100, atol=5, atol_nonoise=1e-2),
-            "c_u": dict(offs=100, atol=5, atol_nonoise=1e-2),
-            "c_v": dict(offs=100, atol=5, atol_nonoise=1e-2),
+            "f_v": dict(offs=10, atol=2, atol_nonoise=1e-2),
+            "c_u": dict(offs=10, atol=2, atol_nonoise=1e-2),
+            "c_v": dict(offs=10, atol=2, atol_nonoise=1e-2),
             "b": dict(
                 offs=0.1,
                 atol=5e-3,
@@ -571,8 +573,8 @@ class TestStereoTune(unittest.TestCase):
 
         # Generate problems
         r_ps, C_p0s, r_ls, pixel_meass = [], [], [], []
-        for i in range(N_data):
-            r_p, C_p0, r_l, pixel_meas = st.get_prob_data(camera=t.cam_gt, Nm=10)
+        for i in range(N_pose):
+            r_p, C_p0, r_l, pixel_meas = st.get_prob_data(camera=t.cam_gt, N_map=N_map)
             r_ps += r_p
             C_p0s += C_p0
             r_ls += [r_l]
@@ -595,17 +597,25 @@ class TestStereoTune(unittest.TestCase):
             getattr(cam_torch, key).data += tune_params["offs"]
             # Create optimizer
             params += [getattr(cam_torch, key)]
+        # Set up optimizer
         if optim == "Adam":
             opt = torch.optim.Adam(params[:-1], lr=10)
             opt.add_param_group({"params": [params[-1]], "lr": 1e-1})
             # opt = torch.optim.Adam(params=params)
         elif optim == "LBFGS":
-            opt = torch.optim.LBFGS(params, line_search_fn="strong_wolfe")
+            opt = torch.optim.LBFGS(
+                params,
+                tolerance_change=1e-16,
+                tolerance_grad=1e-16,
+                lr=10,
+                max_iter=1,
+                line_search_fn="strong_wolfe",
+            )
         elif optim == "SGD":
             opt = torch.optim.SGD(params[:-1], lr=1e-3)
             opt.add_param_group({"params": [params[-1]], "lr": 1e-4})
         # Termination criteria
-        term_crit = {"max_iter": 2000, "tol_grad_sq": 1e-15, "tol_loss": 1e-12}
+        term_crit = {"max_iter": 2000, "tol_grad_sq": 1e-12, "tol_loss": 1e-12}
 
         # Run Tuner
         iter_info = st.tune_stereo_params(
@@ -639,7 +649,9 @@ class TestStereoTune(unittest.TestCase):
                     atol=tune_params["atol"],
                 )
 
-    def test_tune_params_no_opt(t, plot=False, optim="Adam", no_noise=False, N_data=1):
+    def test_tune_params_no_opt(
+        t, plot=False, optim="Adam", no_noise=False, N_map=20, N_pose=5
+    ):
         """Tune all parameters without using the optimization layer. That is,
         the ground truth is used to map the landmarks into the camera frame and
         the loss on landmark locations is used to tune the camera parameters."""
@@ -671,8 +683,8 @@ class TestStereoTune(unittest.TestCase):
         }
         # Generate problems
         r_ps, C_p0s, r_ls, pixel_meass = [], [], [], []
-        for i in range(N_data):
-            r_p, C_p0, r_l, pixel_meas = st.get_prob_data(camera=t.cam_gt, Nm=50)
+        for i in range(N_pose):
+            r_p, C_p0, r_l, pixel_meas = st.get_prob_data(camera=t.cam_gt, N_map=N_map)
             r_ps += r_p
             C_p0s += C_p0
             r_ls += [r_l]
@@ -699,7 +711,14 @@ class TestStereoTune(unittest.TestCase):
             opt = torch.optim.Adam(params[:-1], lr=10)
             opt.add_param_group({"params": [params[-1]], "lr": 1e-1})
         elif optim == "LBFGS":
-            opt = torch.optim.LBFGS(params, line_search_fn="strong_wolfe")
+            opt = torch.optim.LBFGS(
+                params,
+                tolerance_change=1e-12,
+                tolerance_grad=1e-12,
+                lr=100,
+                max_iter=1,
+                line_search_fn="strong_wolfe",
+            )
         elif optim == "SGD":
             opt = torch.optim.SGD(params[:-1], lr=1e-3)
             opt.add_param_group({"params": [params[-1]], "lr": 1e-4})
@@ -741,5 +760,4 @@ class TestStereoTune(unittest.TestCase):
 if __name__ == "__main__":
     # unittest.main()
     test = TestStereoTune()
-
-    test.test_tune_params(plot=True)
+    test.test_tune_params(plot=True, optim="LBFGS", no_noise=False, N_map=50, N_pose=10)

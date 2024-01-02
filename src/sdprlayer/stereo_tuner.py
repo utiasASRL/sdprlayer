@@ -46,6 +46,7 @@ class Camera:
         z = p_inC[2, :]
         x = p_inC[0, :] / z
         y = p_inC[1, :] / z
+        assert all(z > 0), "Negative depth in data"
         # noise
         noise = np.random.randn(4, len(x))
         # pixel measurements
@@ -114,7 +115,7 @@ class Camera:
 def get_gt_setup(
     traj_type="circle",  # Trajectory format [clusters,circle]
     Np=1,  # Number of poses
-    Nm=10,  # number of landmarks
+    N_map=10,  # number of landmarks
     offs=np.array([[0, 0, 2]]).T,  # offset between poses and landmarks
     n_turns=0.25,  # (circle) number of turns around the cluster
     lm_bound=1.0,  # Bounding box of uniform landmark distribution.
@@ -123,7 +124,7 @@ def get_gt_setup(
 
     # Ground Truth Map Points
     # Cluster at the origin
-    r_l = lm_bound * (np.random.rand(3, Nm) - 0.5)
+    r_l = lm_bound * (np.random.rand(3, N_map) - 0.5)
     # Ground Truth Poses
     r_p = []
     C_p0 = []
@@ -160,9 +161,9 @@ def get_gt_setup(
     return r_p, C_p0, r_l
 
 
-def get_prob_data(camera=Camera(), Nm=30):
+def get_prob_data(camera=Camera(), N_map=30):
     # get ground truth information
-    r_p, C_p0, r_l = get_gt_setup(Nm=Nm)
+    r_p, C_p0, r_l = get_gt_setup(N_map=N_map)
 
     # generate measurements
     r_l_inC = [C_p0[0] @ (r_l_i - r_p[0]) for r_l_i in r_l]
@@ -282,7 +283,7 @@ def tune_stereo_params(
         opt.zero_grad()
         # generate loss
         Q = get_data_mats(cam_torch, r_l, pixel_meas)
-        solver_args = {"solve_method": "SCS", "eps": 1e-10}
+        solver_args = {"solve_method": "SCS", "eps": 1e-9}
         Xs = sdpr_layer(Q, solver_args=solver_args)[0]
         loss = get_loss_from_sols(Xs, r_p, C_p0)
         # backprop
@@ -334,17 +335,20 @@ def tune_stereo_params_no_opt(
     def closure_fcn():
         # zero grad
         opt.zero_grad()
-        # generate loss based on landmarks
-        meas, weights = cam_torch.inverse(*pixel_meass[0])
-        # Check that measurements are correct (should be exact with no noise)
-        meas_gt = torch.tensor(C_p0s[0] @ (np.hstack(r_ls[0]) - r_ps[0]))
         losses = []
-        for i in range(meas.shape[1]):
-            losses += [
-                (meas[:, [i]] - meas_gt[:, [i]]).T
-                @ weights[i]
-                @ (meas[:, [i]] - meas_gt[:, [i]])
-            ]
+        # Loop over instances
+        for i, pixel_meas in enumerate(pixel_meass):
+            # generate loss based on landmarks
+            meas, weights = cam_torch.inverse(*pixel_meas)
+            # Check that measurements are correct (should be exact with no noise)
+            meas_gt = torch.tensor(C_p0s[i] @ (np.hstack(r_ls[i]) - r_ps[i]))
+
+            for k in range(meas.shape[1]):
+                losses += [
+                    (meas[:, [k]] - meas_gt[:, [k]]).T
+                    @ weights[k]
+                    @ (meas[:, [k]] - meas_gt[:, [k]])
+                ]
         loss = torch.stack(losses).sum()
         # backprop
         loss.backward()
