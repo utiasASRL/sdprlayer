@@ -168,6 +168,10 @@ def run_sdpr_cal(r_ps, C_p0s, r_ls, pixel_meass):
 
     print("Done")
 
+def run_theseus_cal(r_ps, C_p0s, r_ls, pixel_meass):
+    
+    
+
 
 if __name__ == "__main__":
     # Generate data

@@ -9,6 +9,9 @@ import pandas as pd
 from sdprlayer import SDPRLayer
 import torch
 
+# Theseus
+import theseus as th
+
 # Stereo problem imports
 from mwcerts.stereo_problems import (
     Localization,
@@ -42,7 +45,6 @@ class Camera:
 
     def forward(c, p_inC):
         """forward camera model, points to pixels"""
-        p_inC = np.hstack(p_inC)
         z = p_inC[2, :]
         x = p_inC[0, :] / z
         y = p_inC[1, :] / z
@@ -57,19 +59,21 @@ class Camera:
 
         return ul, vl, ur, vr
 
-    def inverse(c, ul, vl, ur, vr):
-        use_torch = torch.is_tensor(c.f_u)
+    def inverse(c, pixel_meass: torch.Tensor):
+        """inverse camera model, pixels to points. Assumes inputs are torch tensors.
+        Output meas is a torch tensor of shape (N_batch, 3, N) where N is the number of measurements.
+        Output weights is a torch tensor of shape (N_batch, 3, 3, N) where N is the number of measurements.
+        """
+        # unpack pixel measurements
+        ul = pixel_meass[:, 0, :]
+        vl = pixel_meass[:, 1, :]
+        ur = pixel_meass[:, 2, :]
+        vr = pixel_meass[:, 3, :]
+
         # compute disparity
         d = ul - ur
-        assert all(d > 0), "Negative disparity in data"
-        # If using torch then convert measurements to tensors.
-        if use_torch:
-            d = torch.tensor(d)
-            ul = torch.tensor(ul)
-            vl = torch.tensor(vl)
-            Sigma = torch.zeros((3, 3), dtype=torch.double)
-        else:
-            Sigma = np.zeros((3, 3))
+        assert torch.all(d > 0), "Negative disparity in data"
+        Sigma = torch.zeros((3, 3))
         # Define pixel covariance
         Sigma[0, 0] = c.sigma_u**2
         Sigma[1, 1] = c.sigma_v**2
@@ -82,42 +86,39 @@ class Camera:
         x = (ul - c.c_u) * ratio
         y = (vl - c.c_v) * ratio * c.f_u / c.f_v
         z = ratio * c.f_u
-        if use_torch:
-            meas = torch.vstack([x, y, z])
-        else:
-            meas = np.vstack([x, y, z])
+        meas = torch.stack([x, y, z], dim=1)
         # compute weights
-        weights = []
-        for i in range(len(ul)):
-            G = torch.zeros((3, 3), dtype=torch.double)
-            # Define G
-            G[0, 0] = z[i] / c.f_u
-            G[1, 1] = z[i] / c.f_v
-            G[0, 2] = -x[i] * z[i] / c.f_u / c.b
-            G[1, 2] = -y[i] * z[i] / c.f_v / c.b
-            G[2, 2] = -z[i] ** 2 / c.f_u / c.b
+        G = torch.zeros((ul.size(0), ul.size(1), 3, 3), dtype=torch.double)
+        # Define G
+        G[:, :, 0, 0] = z / c.f_u
+        G[:, :, 1, 1] = z / c.f_v
+        G[:, :, 0, 2] = -x * z / c.f_u / c.b
+        G[:, :, 1, 2] = -y * z / c.f_v / c.b
+        G[:, :, 2, 2] = -(z**2) / c.f_u / c.b
 
-            # Covariance matrix
-            Cov = G @ Sigma @ G.T
-            if torch.linalg.matrix_rank(Cov) < 3:
-                warnings.warn("Covariance matrix is not full rank")
-                Cov = torch.eye(3, dtype=torch.double)
-            # weights
-            if use_torch:
-                W = torch.linalg.inv(Cov)
-            else:
-                W += np.linalg.inv(Cov)
-            weights += [0.5 * (W + W.T)]
+        # Covariance matrix (matrix mult last two dims)
+        Sigma = Sigma.expand((ul.size(0), ul.size(1), 3, 3))
+        Cov = torch.einsum("bnij,bnjk,bnlj->bnil", G, Sigma, G)
+
+        # Check if any of the matrices are not full rank
+        ranks = torch.linalg.matrix_rank(Cov)
+        if torch.any(ranks < 3):
+            warnings.warn("At least one covariance matrix is not full rank")
+            Cov = torch.eye(3, dtype=torch.double).expand_as(Cov)
+        # Compute weights by inverting covariance matrices
+        W = torch.linalg.inv(Cov)
+        # Symmetrize
+        weights = 0.5 * (W + W.transpose(-2, -1))
 
         return meas, weights
 
 
 def get_gt_setup(
     traj_type="circle",  # Trajectory format [clusters,circle]
-    Np=1,  # Number of poses
+    N_batch=1,  # Number of poses
     N_map=10,  # number of landmarks
     offs=np.array([[0, 0, 2]]).T,  # offset between poses and landmarks
-    n_turns=0.25,  # (circle) number of turns around the cluster
+    n_turns=0.1,  # (circle) number of turns around the cluster
     lm_bound=1.0,  # Bounding box of uniform landmark distribution.
 ):
     """Used to generate a trajectory of ground truth pose data"""
@@ -126,50 +127,58 @@ def get_gt_setup(
     # Cluster at the origin
     r_l = lm_bound * (np.random.rand(3, N_map) - 0.5)
     # Ground Truth Poses
-    r_p = []
-    C_p0 = []
+    r_ps = []
+    C_p0s = []
     if traj_type == "clusters":
         # Ground Truth Poses
-        for i in range(Np):
-            r_p += [0.1 * np.random.randn(3, 1)]
-            C_p0 += [sm.roty(0.1 * np.random.randn(1)[0])]
+        for i in range(N_batch):
+            r_ps += [0.1 * np.random.randn(3, 1)]
+            C_p0s += [sm.roty(0.1 * np.random.randn(1)[0])]
         # Offset from the origin
         r_l = r_l + offs
     elif traj_type == "circle":
         # GT poses equally spaced along n turns of a circle
         radius = np.linalg.norm(offs)
         assert radius > 0.2, "Radius of trajectory circle should be larger"
-        if Np > 1:
-            delta_phi = n_turns * 2 * np.pi / (Np - 1)
+        if N_batch > 1:
+            delta_phi = n_turns * 2 * np.pi / (N_batch - 1)
         else:
             delta_phi = n_turns
         phi = delta_phi
-        for i in range(Np):
+        for i in range(N_batch):
             # Location
             r = radius * np.array([[np.cos(phi), np.sin(phi), 0]]).T
-            r_p += [r]
+            r_ps += [r]
             # Z Axis points at origin
             z = -r / np.linalg.norm(r)
             x = np.array([[0.0, 0.0, 1.0]]).T
             y = skew(z) @ x
-            C_p0 += [np.hstack([x, y, z]).T]
+            C_p0s += [np.hstack([x, y, z]).T]
             # Update angle
             phi = (phi + delta_phi) % (2 * np.pi)
+    r_ps = np.stack(r_ps)
+    C_p0s = np.stack(C_p0s)
 
-    r_l = np.expand_dims(r_l.T, axis=2)
-
-    return r_p, C_p0, r_l
+    return r_ps, C_p0s, r_l
 
 
-def get_prob_data(camera=Camera(), N_map=30):
+def get_prob_data(camera=Camera(), N_map=30, N_batch=1):
     # get ground truth information
-    r_p, C_p0, r_l = get_gt_setup(N_map=N_map)
+    r_ps, C_p0s, r_l = get_gt_setup(N_map=N_map, N_batch=N_batch)
 
     # generate measurements
-    r_l_inC = [C_p0[0] @ (r_l_i - r_p[0]) for r_l_i in r_l]
-    pixel_meas = camera.forward(r_l_inC)
+    pixel_meass = []
+    r_ls = []
+    for i in range(N_batch):
+        r_p = r_ps[i]
+        C_p0 = C_p0s[i]
+        r_ls += [r_l]
+        r_l_inC = C_p0 @ (r_l - r_p)
+        pixel_meass += [camera.forward(r_l_inC)]
+    pixel_meass = np.stack(pixel_meass)
+    r_ls = np.stack(r_ls)
 
-    return r_p, C_p0, r_l, pixel_meas
+    return r_ps, C_p0s, r_ls, pixel_meass
 
 
 def get_data_mats(cam_torch: Camera, r_ls, pixel_meass):
@@ -180,44 +189,56 @@ def get_data_mats(cam_torch: Camera, r_ls, pixel_meass):
     return Q_all
 
 
-def get_data_mat(cam_torch: Camera, r_l, pixel_meas):
+def kron(A, B):
+    # kronecker workaround for matrices
+    # https://github.com/pytorch/pytorch/issues/74442
+    return (A[:, None, :, None] * B[None, :, None, :]).reshape(
+        A.shape[0] * B.shape[0], A.shape[1] * B.shape[1]
+    )
+
+
+def get_data_mat(cam_torch: Camera, r_ls, pixel_meass):
+    """Get a batch of data matrices for stereo calibration problem."""
+    if not isinstance(pixel_meass, torch.Tensor):
+        pixel_meass = torch.tensor(pixel_meass)
     # Get euclidean measurements from pixels
-    meas, weights = cam_torch.inverse(*pixel_meas)
-    y = meas.double()
+    meas, weights = cam_torch.inverse(pixel_meass)
+    N_batch = meas.shape[0]
     # Indices
     h = [0]
     c = slice(1, 10)
     t = slice(10, 13)
-    Q_es = []
-    for i in range(meas.shape[1]):
-        W_ij = weights[i].contiguous()
-        m_j0_0 = torch.tensor(r_l[i], dtype=torch.double).contiguous()
-        y_ji_i = y[:, [i]]
-        # Define matrix
-        Q_e = torch.zeros(13, 13, dtype=torch.double)
-        # Diagonals
-        Q_e[c, c] = torch.kron(m_j0_0 @ m_j0_0.T, W_ij)
-        Q_e[t, t] = W_ij
-        Q_e[h, h] = y_ji_i.T @ W_ij @ y_ji_i
-        # Off Diagonals
-        Q_e[c, t] = -torch.kron(m_j0_0, W_ij)
-        Q_e[t, c] = Q_e[c, t].T
-        Q_e[c, h] = -torch.kron(m_j0_0, W_ij @ y_ji_i)
-        Q_e[h, c] = Q_e[c, h].T
-        Q_e[t, h] = W_ij @ y_ji_i
-        Q_e[h, t] = Q_e[t, h].T
+    Q_batch = []
+    for b in range(N_batch):
+        Q_es = []
+        for i in range(meas.shape[-1]):
+            W_ij = weights[b, i]
+            m_j0_0 = torch.tensor(r_ls[b, :, [i]].T)
+            y_ji_i = meas[b, :, [i]]
+            # Define matrix
+            Q_e = torch.zeros(13, 13, dtype=torch.double)
+            # Diagonals
+            Q_e[c, c] = kron(m_j0_0 @ m_j0_0.T, W_ij)
+            Q_e[t, t] = W_ij
+            Q_e[h, h] = y_ji_i.T @ W_ij @ y_ji_i
+            # Off Diagonals
+            Q_e[c, t] = -kron(m_j0_0, W_ij)
+            Q_e[t, c] = Q_e[c, t].T
+            Q_e[c, h] = -kron(m_j0_0, W_ij @ y_ji_i)
+            Q_e[h, c] = Q_e[c, h].T
+            Q_e[t, h] = W_ij @ y_ji_i
+            Q_e[h, t] = Q_e[t, h].T
 
-        # Add to overall matrix
-        Q_es += [Q_e]
-    Q = torch.stack(Q_es)
-    Q = torch.sum(Q, dim=0)
-    # Rescale
-    Q[0, 0] = 0.0
-    Q = Q / torch.norm(Q, p="fro")
-    Q[0, 0] = 1.0
-    # TODO seems like assymetry is introduced by the sum. Fix this.
-    Q = (Q.T + Q) / 2
-    return Q
+            # Add to overall matrix
+            Q_es += [Q_e]
+        Q = torch.stack(Q_es).sum(dim=0)
+        # Rescale
+        Q[0, 0] = 0.0
+        Q = Q / torch.norm(Q, p="fro")
+        Q[0, 0] = 1.0
+        Q_batch += [Q]
+
+    return torch.stack(Q_batch)
 
 
 # Loss Function
@@ -257,7 +278,7 @@ term_crit_def = {
 }  # Optimization termination criteria
 
 
-def tune_stereo_params(
+def tune_stereo_params_sdpr(
     cam_torch: Camera,
     params,
     opt,
@@ -286,6 +307,129 @@ def tune_stereo_params(
         solver_args = {"solve_method": "SCS", "eps": 1e-9}
         Xs = sdpr_layer(Q, solver_args=solver_args)[0]
         loss = get_loss_from_sols(Xs, r_p, C_p0)
+        # backprop
+        loss.backward()
+        return loss
+
+    # Optimization loop
+    max_iter = term_crit["max_iter"]
+    tol_grad_sq = term_crit["tol_grad_sq"]
+    tol_loss = term_crit["tol_loss"]
+    grad_sq = np.inf
+    n_iter = 0
+    loss_stored = []
+    iter_info = []
+    loss = torch.tensor(np.inf)
+    while grad_sq > tol_grad_sq and n_iter < max_iter and loss > tol_loss:
+        loss = opt.step(closure_fcn)
+        loss_stored += [loss.item()]
+        grad = np.vstack([p.grad for p in params])
+        grad_sq = np.sum([g**2 for g in grad])
+        if verbose:
+            print(f"Iter:\t{n_iter}\tLoss:\t{loss_stored[-1]}\tgrad_sq:\t{grad_sq}")
+            print(f"Params:\t{params}")
+        iter_info += [
+            dict(
+                params=np.stack([p.detach().numpy() for p in params]),
+                loss=loss_stored[-1],
+                grad_sq=grad_sq,
+                n_iter=n_iter,
+            )
+        ]
+        n_iter += 1
+
+    return pd.DataFrame(iter_info)
+
+
+def build_theseus_layer(cam_torch: Camera, N_m, N_batch=1):
+    """Build theseus layer for stereo problem
+
+    Args:
+        cam_torch (Camera): _description_
+        r_l (_type_): _description_
+        pixel_meas (_type_): _description_
+    """
+    # Optimization variables
+    C_p0 = th.SO3(name="C_p0")
+    r_p0 = th.Vector(dof=3, name="r_p0")
+    # Auxillary (data) variables (pixel measurements and landmarks)
+    pixel_meas = th.Variable(torch.zeros(N_batch, 4, N_m), name="pixel_meas")
+    r_l = th.Variable(torch.zeros(N_batch, 3, N_m), name="r_l")
+
+    # Define cost function
+    def error_fn(optim_vars, aux_vars):
+        C_p0, r_p0 = optim_vars
+        pixel_meas, r_l = aux_vars
+        # run inverse cam model on pixels
+        for i in range(N_batch):
+            pixel_meas_i = pixel_meas[i, :, :]
+            meas, weights = cam_torch.inverse(*pixel_meas_i)
+
+        # construct errors
+        errors = []
+        for j in range(meas.shape[1]):
+            # get measurement
+            meas_j = meas[:, [j]]
+            # get weight
+            W_ij = weights[j]
+            W_ij_half = torch.linalg.cholesky(W_ij)
+            # get landmark
+            # get measurement in camera frame
+            err = meas_j - C_p0.tensor @ (r_l.tensor[:, [j]] - r_p0.tensor.T)
+            # get error
+            weight_err = W_ij_half @ err
+            errors += [weight_err.T]
+        error_stack = torch.cat(errors, dim=1)
+        return error_stack
+
+    objective = th.Objective()
+    optim_vars = [C_p0, r_p0]
+    aux_vars = [pixel_meas, r_l]
+    cost_function = th.AutoDiffCostFunction(
+        optim_vars=optim_vars,
+        dim=N_m * 3,
+        err_fn=error_fn,
+        aux_vars=aux_vars,
+        cost_weight=th.ScaleCostWeight(1.0),
+        name="registration_cost",
+    )
+    objective.add(cost_function)
+
+    layer = th.TheseusLayer(th.GaussNewton(objective, max_iterations=10))
+
+    return layer
+
+
+def tune_stereo_params_theseus(
+    cam_torch: Camera,
+    params,
+    opt,
+    r_ps,
+    C_p0s,
+    r_ls,
+    pixel_meass,
+    term_crit=term_crit_def,
+    verbose=False,
+):
+    # define closure
+    def closure_fcn():
+        # zero grad
+        opt.zero_grad()
+        losses = []
+        # Loop over instances
+        for i, pixel_meas in enumerate(pixel_meass):
+            # generate loss based on landmarks
+            meas, weights = cam_torch.inverse(*pixel_meas)
+            # Check that measurements are correct (should be exact with no noise)
+            meas_gt = torch.tensor(C_p0s[i] @ (np.hstack(r_ls[i]) - r_ps[i]))
+
+            for k in range(meas.shape[1]):
+                losses += [
+                    (meas[:, [k]] - meas_gt[:, [k]]).T
+                    @ weights[k]
+                    @ (meas[:, [k]] - meas_gt[:, [k]])
+                ]
+        loss = torch.stack(losses).sum()
         # backprop
         loss.backward()
         return loss

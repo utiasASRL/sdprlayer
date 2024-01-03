@@ -76,61 +76,71 @@ class SDPRLayer(CvxpyLayer):
         kwargs_new = deepcopy(kwargs)
         if "solver_args" in kwargs and "solve_method" in kwargs["solver_args"]:
             method = kwargs["solver_args"]["solve_method"]
-            if method == "mosek":
-                # Get data matrix
-                Q_val = Q.cpu().detach().double().numpy()
-                Q_val_symm = (Q_val + Q_val.T) / 2
-                self.Q.value = Q_val_symm
-                # Get parameters for mosek
-                verbose = kwargs["solver_args"].get("verbose", False)
-                mosek_params = kwargs["solver_args"].get(
-                    "mosek_params", mosek_params_dflt
-                )
-                self.problem.solve(
-                    solver=cp.MOSEK, verbose=verbose, mosek_params=mosek_params
-                )
-                # Solver check
-                if not self.problem.status == "optimal":
-                    raise ValueError("MOSEK did not converge")
-                # Set variables to inject
-                if self.use_dual:
-                    X = np.array(self.problem.constraints[0].dual_value)
-                    H = np.array(self.H.value)
-                    mults = self.problem.variables()[0].value
-                else:
-                    X = np.array(self.problem.variables()[0].value)
-                    H = np.array(self.problem.constraints[0].dual_value)
-                    mults = np.stack(
-                        [c.dual_value for c in self.problem.constraints[1:]]
-                    ).flatten()
-
-            elif method == "local":
-                # Check if local solution methods have been defined.
-                assert self.local_solver is not None, "Local solver not defined."
-                assert self.certifier is not None, "Certifier not defined."
-                # Run Local Solver
-                x_cand = self.local_solver(**self.local_args)
-                X = x_cand @ x_cand.T
-                # Get detach version of Q
-                Q_detach = Q.cpu().detach().double().numpy()
-                # Certify Local Solution
-                H, mults = self.certifier(
-                    Q=Q_detach, constraints=self.constraints, x_cand=x_cand
-                )
-                # TODO add in a check here to make sure H is PSD
-
+            # Check if we are injecting a solution
             if method == "local" or method == "mosek":
-                # Set variables to inject
-                if self.use_dual:
-                    ext_vars = dict(
-                        x=mults,
-                        y=cones.vec_symm(X),
-                        s=cones.vec_symm(H),
-                    )
-                else:
-                    NotImplementedError("Primal not implemented yet")
+                # Check if Q is not batched
+                Qs = Q.cpu().detach().double().numpy()
+                if Qs.ndim == 2:
+                    Qs = Qs.unsqueeze(0)
+
+                ext_vars_list = []
+                for i in range(Qs.shape[0]):
+                    if method == "mosek":
+                        assert "MOSEK" in cp.installed_solvers(), "MOSEK not installed"
+
+                        # Get data matrix and make sure its symmetric
+                        Q_val = Qs[i]
+                        assert np.allclose(Q_val, Q_val.T), "Q must be symmetric"
+                        self.Q.value = Q_val
+                        # Get parameters for mosek
+                        verbose = kwargs["solver_args"].get("verbose", False)
+                        mosek_params = kwargs["solver_args"].get(
+                            "mosek_params", mosek_params_dflt
+                        )
+                        self.problem.solve(
+                            solver=cp.MOSEK, verbose=verbose, mosek_params=mosek_params
+                        )
+                        # Solver check
+                        if not self.problem.status == "optimal":
+                            raise ValueError("MOSEK did not converge")
+                        # Extract primal and dual variables
+                        X = np.array(self.problem.constraints[0].dual_value)
+                        H = np.array(self.H.value)
+                        mults = self.problem.variables()[0].value
+
+                    elif method == "local":
+                        # Check if local solution methods have been defined.
+                        assert (
+                            self.local_solver is not None
+                        ), "Local solver not defined."
+                        assert self.certifier is not None, "Certifier not defined."
+                        assert (
+                            self.use_dual
+                        ), "Primal not implemented. Set use_dual=True"
+
+                        # TODO set up batched version of local solver
+
+                        # Run Local Solver
+                        x_cand = self.local_solver(**self.local_args)
+                        X = x_cand @ x_cand.T
+                        # Get detach version of Q
+                        Q_detach = Q.cpu().detach().double().numpy()
+                        # Certify Local Solution
+                        H, mults = self.certifier(
+                            Q=Q_detach, constraints=self.constraints, x_cand=x_cand
+                        )
+                        # TODO add in a check here to make sure H is PSD
+
+                    # Add to list of solutions
+                    ext_vars_list += [
+                        dict(
+                            x=mults,
+                            y=cones.vec_symm(X),
+                            s=cones.vec_symm(H),
+                        )
+                    ]
                 # Update solver arguments (copy required here)
-                solver_args = dict(solve_method="external", ext_vars=ext_vars)
+                solver_args = dict(solve_method="external", ext_vars_list=ext_vars_list)
                 if "solver_args" in kwargs_new:
                     kwargs_new["solver_args"].update(solver_args)
                 else:
@@ -138,5 +148,6 @@ class SDPRLayer(CvxpyLayer):
 
         # Call cvxpylayers forward function
         res = super().forward(Q, **kwargs_new)
-
+        # TODO If using mosek or local then overwrite the results for
+        # better accuracy.
         return res
