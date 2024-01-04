@@ -181,14 +181,6 @@ def get_prob_data(camera=Camera(), N_map=30, N_batch=1):
     return r_ps, C_p0s, r_ls, pixel_meass
 
 
-def get_data_mats(cam_torch: Camera, r_ls, pixel_meass):
-    Qs = []
-    for i in range(len(r_ls)):
-        Qs += [get_data_mat(cam_torch, r_ls[i], pixel_meass[i])]
-    Q_all = torch.stack(Qs, dim=0)
-    return Q_all
-
-
 def kron(A, B):
     # kronecker workaround for matrices
     # https://github.com/pytorch/pytorch/issues/74442
@@ -256,7 +248,8 @@ def get_loss_from_sols(Xs, r_p_in0, C_p0):
 def get_loss_from_sol(X, r_p_in0, C_p0):
     "Get ground truth loss from solution"
     # Check rank
-    assert np.linalg.matrix_rank(X.detach().numpy(), tol=1e-5) == 1, "X is not rank-1"
+    sorted_eigs = np.sort(np.linalg.eigvalsh(X.detach().numpy()))
+    assert sorted_eigs[-1] / sorted_eigs[-2] > 1e4, "X is not rank-1"
     # Convert to tensors
     C_p0 = torch.tensor(C_p0, dtype=torch.float64)
     r_p_in0 = torch.tensor(r_p_in0, dtype=torch.float64)
@@ -278,35 +271,48 @@ term_crit_def = {
 }  # Optimization termination criteria
 
 
-def tune_stereo_params_sdpr(
-    cam_torch: Camera,
-    params,
-    opt,
-    r_p,
-    C_p0,
-    r_l,
-    pixel_meas,
-    term_crit=term_crit_def,
-    verbose=False,
-):
-    # Define a localization class to get the constraints
-    prob = Localization([r_p[0]], [C_p0[0]], r_l[0])
+def get_constraints(r_ps, C_p0s, r_ls):
+    """Generate constraints for problem"""
+    r_ls_b = [r_ls[0, :, [i]] for i in range(r_ls.shape[2])]
+    prob = Localization([r_ps[0]], [C_p0s[0]], r_ls_b)
     prob.generate_constraints()
     prob.generate_redun_constraints()
     constraints = prob.constraints + prob.constraints_r
     constraints_list = [(c.A.get_matrix(prob.var_list), c.b) for c in constraints]
+    return constraints_list
+
+
+def tune_stereo_params_sdpr(
+    cam_torch: Camera,
+    params,
+    opt,
+    r_ps,
+    C_p0s,
+    r_ls,
+    pixel_meass,
+    term_crit=term_crit_def,
+    verbose=False,
+    solver="SCS",
+):
+    # Define a localization class to get the constraints
+    constraints_list = get_constraints(r_ps, C_p0s, r_ls)
     # Build Layer
-    sdpr_layer = SDPRLayer(13, constraints=constraints_list, use_dual=False)
+    sdpr_layer = SDPRLayer(13, constraints=constraints_list, use_dual=True)
 
     # define closure
     def closure_fcn():
         # zero grad
         opt.zero_grad()
         # generate loss
-        Q = get_data_mats(cam_torch, r_l, pixel_meas)
-        solver_args = {"solve_method": "SCS", "eps": 1e-9}
+        Q = get_data_mat(cam_torch, r_ls, pixel_meass)
+        if solver == "SCS":
+            solver_args = {"solve_method": "SCS", "eps": 1e-9}
+        elif solver == "mosek":
+            solver_args = {"solve_method": "mosek"}
+        else:
+            raise ValueError("Invalid solver")
         Xs = sdpr_layer(Q, solver_args=solver_args)[0]
-        loss = get_loss_from_sols(Xs, r_p, C_p0)
+        loss = get_loss_from_sols(Xs, r_ps, C_p0s)
         # backprop
         loss.backward()
         return loss
@@ -475,23 +481,25 @@ def tune_stereo_params_no_opt(
     term_crit=term_crit_def,
     verbose=False,
 ):
+    pixel_meass = torch.tensor(pixel_meass)
+
     # define closure
     def closure_fcn():
         # zero grad
         opt.zero_grad()
         losses = []
+        # generate loss based on landmarks
+        meas, weights = cam_torch.inverse(pixel_meass)
         # Loop over instances
-        for i, pixel_meas in enumerate(pixel_meass):
-            # generate loss based on landmarks
-            meas, weights = cam_torch.inverse(*pixel_meas)
-            # Check that measurements are correct (should be exact with no noise)
-            meas_gt = torch.tensor(C_p0s[i] @ (np.hstack(r_ls[i]) - r_ps[i]))
+        for i in range(meas.shape[0]):
+            # Get ground truth landmark measurements
+            meas_gt = torch.tensor(C_p0s[i] @ (r_ls[i] - r_ps[i]))
 
-            for k in range(meas.shape[1]):
+            for k in range(meas.shape[-1]):
                 losses += [
-                    (meas[:, [k]] - meas_gt[:, [k]]).T
-                    @ weights[k]
-                    @ (meas[:, [k]] - meas_gt[:, [k]])
+                    (meas[i, :, [k]] - meas_gt[:, [k]]).T
+                    @ weights[i, k, :, :]
+                    @ (meas[i, :, [k]] - meas_gt[:, [k]])
                 ]
         loss = torch.stack(losses).sum()
         # backprop

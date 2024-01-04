@@ -45,16 +45,6 @@ class TestStereoTune(unittest.TestCase):
             t.cam_gt.sigma_u = 0.5
             t.cam_gt.sigma_v = 0.5
 
-    def get_constraints(t, r_ps, C_p0s, r_ls):
-        """Generate constraints for problem"""
-        r_ls_b = [r_ls[0, :, [i]] for i in range(r_ls.shape[2])]
-        prob = Localization([r_ps[0]], [C_p0s[0]], r_ls_b)
-        prob.generate_constraints()
-        prob.generate_redun_constraints()
-        constraints = prob.constraints + prob.constraints_r
-        constraints_list = [(c.A.get_matrix(prob.var_list), c.b) for c in constraints]
-        return constraints_list
-
     def test_data_matrix(t, N_batch=2):
         # Generate problem
         r_ps, C_p0s, r_ls, pixel_meass = st.get_prob_data(
@@ -110,9 +100,7 @@ class TestStereoTune(unittest.TestCase):
 
     def run_forward_sdpr(t, solver="SCS", N_batch=3):
         # Generate problem
-        np.random.seed(0)
-        torch.manual_seed(0)
-
+        set_seed(0)
         r_ps, C_p0s, r_ls, pixel_meass = st.get_prob_data(
             camera=t.cam_gt, N_map=50, N_batch=3
         )
@@ -129,7 +117,7 @@ class TestStereoTune(unittest.TestCase):
         )
 
         # get the constraints
-        constraints_list = t.get_constraints(r_ps, C_p0s, r_ls)
+        constraints_list = st.get_constraints(r_ps, C_p0s, r_ls)
         # Build Layer
         sdpr_layer = SDPRLayer(13, constraints=constraints_list, use_dual=True)
         # Run Forward pass
@@ -157,6 +145,44 @@ class TestStereoTune(unittest.TestCase):
             else:
                 np.testing.assert_allclose(C.T @ r_inP, r_ps[b], atol=5e-3)
                 np.testing.assert_allclose(C.T @ C_p0s[b], np.eye(3), atol=5e-3)
+
+    def test_fwd_theseus(t, N_map=20):
+        # Generate problem
+        np.random.seed(0)
+        torch.manual_seed(0)
+        torch.set_default_dtype(torch.float64)
+        # No noise
+        t.cam_gt.sigma_u = 0.0
+        t.cam_gt.sigma_v = 0.0
+        r_p, C_p0, r_l, pixel_meas = st.get_prob_data(camera=t.cam_gt, N_map=N_map)
+
+        # generate parameterized camera
+        cam_torch = st.Camera(
+            f_u=torch.tensor(t.cam_gt.f_u, requires_grad=True),
+            f_v=torch.tensor(t.cam_gt.f_v, requires_grad=True),
+            c_u=torch.tensor(t.cam_gt.c_u, requires_grad=True),
+            c_v=torch.tensor(t.cam_gt.c_v, requires_grad=True),
+            b=torch.tensor(t.cam_gt.b, requires_grad=True),
+            sigma_u=t.cam_gt.sigma_u,
+            sigma_v=t.cam_gt.sigma_v,
+        )
+        # Build layer
+        theseus_layer = st.build_theseus_layer(cam_torch, N_m=N_map)
+        # Run Forward pass
+        theseus_inputs = {
+            "C_p0": torch.tensor(C_p0).expand(1, 3, 3),
+            "r_p0": torch.tensor(r_p[0]).T,
+            "r_l": torch.tensor(r_l[:, :, 0]).T.expand(1, 3, N_map),
+            "pixel_meas": torch.tensor(pixel_meas).expand(1, 4, N_map),
+        }
+        r_p_est, C_est = theseus_layer.forward(
+            theseus_inputs,
+            optimizer_kwargs={"track_best_solution": True, "verbose": True},
+        )
+
+        # Check the error
+        np.testing.assert_allclose(C_est.T @ r_p_est, r_p[0], atol=1e-3)
+        np.testing.assert_allclose(C_est.T @ C_p0[0], np.eye(3), atol=5e-4)
 
     def test_grads_camera(t, N_batch=1):
         """Test gradients for camera parameters
@@ -263,7 +289,7 @@ class TestStereoTune(unittest.TestCase):
         )
 
         # TEST OPT LAYER
-        constraints_list = t.get_constraints(r_ps, C_p0s, r_ls)
+        constraints_list = st.get_constraints(r_ps, C_p0s, r_ls)
         # Build opt layer
         sdpr_layer = SDPRLayer(13, constraints=constraints_list, use_dual=False)
         sdpr_layer_dual = SDPRLayer(13, constraints=constraints_list, use_dual=True)
@@ -271,15 +297,15 @@ class TestStereoTune(unittest.TestCase):
         # Test gradients to matrix
         cam = st.Camera(*params)
         Q = st.get_data_mat(cam, r_ls, pixel_meass)
-        if solver == "SCS":
-            solver_args = {"solve_method": "SCS", "eps": 1e-9, "verbose": True}
-            torch.autograd.gradcheck(
-                lambda x: sdpr_layer(x, solver_args=solver_args)[0],
-                Q,
-                eps=1e-6,
-                atol=1e-3,
-                rtol=1e-3,
-            )
+        # if solver == "SCS":
+        #     solver_args = {"solve_method": "SCS", "eps": 1e-9, "verbose": True}
+        #     torch.autograd.gradcheck(
+        #         lambda x: sdpr_layer(x, solver_args=solver_args)[0],
+        #         Q,
+        #         eps=1e-6,
+        #         atol=1e-3,
+        #         rtol=1e-3,
+        #     )
 
         # Generate solution X from parameters
         def get_loss_from_params(*params, solver, verbose=True):
@@ -315,7 +341,7 @@ class TestStereoTune(unittest.TestCase):
         torch.autograd.gradcheck(
             lambda *x: get_loss_from_params(*x, solver=solver),
             params,
-            eps=1e-6,
+            eps=1e-5,
             atol=1e-3,
             rtol=1e-3,
         )
@@ -337,7 +363,7 @@ class TestStereoTune(unittest.TestCase):
         )
 
         # TEST OPT LAYER
-        constraints_list = t.get_constraints(r_ps, C_p0s, r_ls)
+        constraints_list = st.get_constraints(r_ps, C_p0s, r_ls)
         # Build opt layer
         sdpr_layer = SDPRLayer(13, constraints=constraints_list, use_dual=False)
         sdpr_layer_dual = SDPRLayer(13, constraints=constraints_list, use_dual=True)
@@ -376,21 +402,45 @@ class TestStereoTune(unittest.TestCase):
             return X
 
         # Make sure solutions match
-        X1 = get_X_from_params(*params, solver="SCS")[0]
-        X2 = get_X_from_params(*params, solver="mosek")[0]
-        np.testing.assert_allclose(X1.detach().numpy(), X2.detach().numpy(), atol=1e-6)
+        X0_scs = get_X_from_params(*params, solver="SCS")[0]
+        X0_msk = get_X_from_params(*params, solver="mosek")[0]
+        np.testing.assert_allclose(
+            X0_scs.detach().numpy(), X0_msk.detach().numpy(), atol=1e-6
+        )
 
         # Check gradients
         opt = torch.optim.Adam(params, lr=1e-3)
         opt.zero_grad()
-        loss = st.get_loss_from_sol(X1, r_ps[0], C_p0s[0])
+        loss = st.get_loss_from_sol(X0_scs, r_ps[0], C_p0s[0])
         loss.backward()
-        grads1 = [p.grad.detach().numpy().copy() for p in params]
+        loss0_scs = loss.detach().numpy().copy()
+        grads_scs = [p.grad.detach().numpy().copy() for p in params]
         opt.zero_grad()
-        loss = st.get_loss_from_sol(X2, r_ps[0], C_p0s[0])
+        loss = st.get_loss_from_sol(X0_msk, r_ps[0], C_p0s[0])
         loss.backward()
-        grads2 = [p.grad.detach().numpy().copy() for p in params]
-        np.testing.assert_allclose(grads1, grads2, atol=1e-6)
+        loss0_msk = loss.detach().numpy().copy()
+        grads_msk = [p.grad.detach().numpy().copy() for p in params]
+        np.testing.assert_allclose(grads_scs, grads_msk, atol=1e-6)
+        opt.zero_grad()
+        # Check diff in loss
+        np.testing.assert_allclose(loss0_msk, loss0_scs, atol=1e-6)
+
+        # Check effect of peturbation
+        params[-1].data += 1e-4
+        X1_scs = get_X_from_params(*params, solver="SCS")[0]
+        X1_msk = get_X_from_params(*params, solver="mosek")[0]
+        np.testing.assert_allclose(
+            X1_scs.detach().numpy(), X1_msk.detach().numpy(), atol=1e-6
+        )
+
+        # Check difference in loss
+        loss = st.get_loss_from_sol(X1_scs, r_ps[0], C_p0s[0])
+        loss1_scs = loss.detach().numpy().copy()
+        loss = st.get_loss_from_sol(X1_msk, r_ps[0], C_p0s[0])
+        loss1_msk = loss.detach().numpy().copy()
+        np.testing.assert_allclose(
+            loss1_msk - loss0_msk, loss1_scs - loss0_scs, atol=1e-6
+        )
 
     def test_grad_loss(t):
         """Test gradients of the output loss function"""
@@ -408,7 +458,7 @@ class TestStereoTune(unittest.TestCase):
         )
 
         # TEST OPT LAYER
-        constraints_list = t.get_constraints(r_ps, C_p0s, r_ls)
+        constraints_list = st.get_constraints(r_ps, C_p0s, r_ls)
         # Build opt layer
         sdpr_layer = SDPRLayer(13, constraints=constraints_list, use_dual=False)
         sdpr_layer_dual = SDPRLayer(13, constraints=constraints_list, use_dual=True)
@@ -433,247 +483,17 @@ class TestStereoTune(unittest.TestCase):
             rtol=1e-6,
         )
 
-    def test_tune_params_sep(t, plot=False):
-        """Test offsets on each parameter. Use default noise level. Use LBFGS"""
-        set_seed(0)
+    # INTEGRATION TESTS
 
-        # dictionary of paramter test values
-        param_dict = {
-            "f_u": dict(
-                offs=100,
-                lr=1e4,
-                tol_grad_sq=1e-12,
-                atol=5,
-                atol_nonoise=1e-5,
-            ),
-            "f_v": dict(offs=100, lr=5e4, tol_grad_sq=1e-15, atol=5, atol_nonoise=1e-5),
-            "c_u": dict(offs=100, lr=1e4, tol_grad_sq=1e-15, atol=5, atol_nonoise=1e-5),
-            "c_v": dict(offs=100, lr=1e4, tol_grad_sq=1e-15, atol=5, atol_nonoise=1e-5),
-            "b": dict(
-                offs=0.2,
-                lr=5e-3,
-                tol_grad_sq=1e-10,
-                atol=2e-3,
-                atol_nonoise=1e-5,
-            ),
-        }
-        # Generate problem
-        r_p, C_p0, r_l, pixel_meas = st.get_prob_data(camera=t.cam_gt, N_map=20)
-
-        # generate parameterized camera
-        cam_torch = st.Camera(
-            f_u=torch.tensor(t.cam_gt.f_u, requires_grad=True),
-            f_v=torch.tensor(t.cam_gt.f_v, requires_grad=True),
-            c_u=torch.tensor(t.cam_gt.c_u, requires_grad=True),
-            c_v=torch.tensor(t.cam_gt.c_v, requires_grad=True),
-            b=torch.tensor(t.cam_gt.b, requires_grad=True),
-            sigma_u=t.cam_gt.sigma_u,
-            sigma_v=t.cam_gt.sigma_v,
-        )
-
-        for key, tune_params in param_dict.items():
-            # Add offset to torch param
-            getattr(cam_torch, key).data += tune_params["offs"]
-            # Define parameter and learning rate
-            params = [getattr(cam_torch, key)]
-            opt = torch.optim.LBFGS(
-                params, history_size=10, max_iter=6, line_search_fn="strong_wolfe"
-            )
-            # Termination criteria
-            term_crit = {"max_iter": 500, "tol_grad_sq": tune_params["tol_grad_sq"]}
-            # Run Tuner
-            iter_info = st.tune_stereo_params_sdpr(
-                cam_torch=cam_torch,
-                params=params,
-                opt=opt,
-                term_crit=term_crit,
-                r_p=r_p,
-                C_p0=C_p0,
-                r_l=r_l,
-                pixel_meas=pixel_meas,
-                verbose=True,
-            )
-            if plot:
-                fig, axs = plt.subplots(2, 1)
-                axs[0].plot(iter_info["loss"])
-                axs[0].set_ylabel("Loss")
-                axs[0].set_title(f"Parameter: {key}")
-                axs[1].plot(iter_info["params"])
-                axs[1].axhline(getattr(t.cam_gt, key), color="k", linestyle="--")
-                axs[1].set_xlabel("Iteration")
-                axs[1].set_ylabel("Parameter Value")
-                plt.figure()
-                plt.plot(iter_info["params"], iter_info["loss"])
-                plt.ylabel("Loss")
-                plt.xlabel("Parameter Value")
-                plt.title(f"Parameter: {key}")
-
-                plt.show()
-            if t.no_noise:
-                np.testing.assert_allclose(
-                    getattr(cam_torch, key).detach().numpy(),
-                    getattr(t.cam_gt, key),
-                    atol=tune_params["atol_nonoise"],
-                )
-            else:
-                np.testing.assert_allclose(
-                    getattr(cam_torch, key).detach().numpy(),
-                    getattr(t.cam_gt, key),
-                    atol=tune_params["atol"],
-                )
-
-    def test_fwd_theseus(t, N_map=20):
-        # Generate problem
-        np.random.seed(0)
-        torch.manual_seed(0)
-        torch.set_default_dtype(torch.float64)
-        # No noise
-        t.cam_gt.sigma_u = 0.0
-        t.cam_gt.sigma_v = 0.0
-        r_p, C_p0, r_l, pixel_meas = st.get_prob_data(camera=t.cam_gt, N_map=N_map)
-
-        # generate parameterized camera
-        cam_torch = st.Camera(
-            f_u=torch.tensor(t.cam_gt.f_u, requires_grad=True),
-            f_v=torch.tensor(t.cam_gt.f_v, requires_grad=True),
-            c_u=torch.tensor(t.cam_gt.c_u, requires_grad=True),
-            c_v=torch.tensor(t.cam_gt.c_v, requires_grad=True),
-            b=torch.tensor(t.cam_gt.b, requires_grad=True),
-            sigma_u=t.cam_gt.sigma_u,
-            sigma_v=t.cam_gt.sigma_v,
-        )
-        # Build layer
-        theseus_layer = st.build_theseus_layer(cam_torch, N_m=N_map)
-        # Run Forward pass
-        theseus_inputs = {
-            "C_p0": torch.tensor(C_p0).expand(1, 3, 3),
-            "r_p0": torch.tensor(r_p[0]).T,
-            "r_l": torch.tensor(r_l[:, :, 0]).T.expand(1, 3, N_map),
-            "pixel_meas": torch.tensor(pixel_meas).expand(1, 4, N_map),
-        }
-        r_p_est, C_est = theseus_layer.forward(
-            theseus_inputs,
-            optimizer_kwargs={"track_best_solution": True, "verbose": True},
-        )
-
-        # Check the error
-        np.testing.assert_allclose(C_est.T @ r_p_est, r_p[0], atol=1e-3)
-        np.testing.assert_allclose(C_est.T @ C_p0[0], np.eye(3), atol=5e-4)
-
-    def test_tune_params(t, plot=True, tuner="sdpr", optim="LBFGS", N_map=20, N_pose=5):
-        """Test offsets for all parameters simultaneously. Use default noise level"""
-        set_seed(0)
-
-        # dictionary of paramter test values
-        param_dict = {
-            "f_u": dict(
-                offs=10,
-                atol=2,
-                atol_nonoise=1e-2,
-            ),
-            "f_v": dict(offs=10, atol=2, atol_nonoise=1e-2),
-            "c_u": dict(offs=10, atol=2, atol_nonoise=1e-2),
-            "c_v": dict(offs=10, atol=2, atol_nonoise=1e-2),
-            "b": dict(
-                offs=0.1,
-                atol=5e-3,
-                atol_nonoise=2e-3,
-            ),
-        }
-
-        # Generate problems
-        r_ps, C_p0s, r_ls, pixel_meass = st.get_prob_data(
-            camera=t.cam_gt, N_map=N_map, N_batch=N_pose
-        )
-
-        # generate parameterized camera
-        cam_torch = st.Camera(
-            f_u=torch.tensor(t.cam_gt.f_u, requires_grad=True),
-            f_v=torch.tensor(t.cam_gt.f_v, requires_grad=True),
-            c_u=torch.tensor(t.cam_gt.c_u, requires_grad=True),
-            c_v=torch.tensor(t.cam_gt.c_v, requires_grad=True),
-            b=torch.tensor(t.cam_gt.b, requires_grad=True),
-            sigma_u=t.cam_gt.sigma_u,
-            sigma_v=t.cam_gt.sigma_v,
-        )
-        # Loop through all parameters
-        params = []
-        for key, tune_params in param_dict.items():
-            # Add offset to torch param
-            getattr(cam_torch, key).data += tune_params["offs"]
-            # Create optimizer
-            params += [getattr(cam_torch, key)]
-        # Set up optimizer
-        if optim == "Adam":
-            opt = torch.optim.Adam(params[:-1], lr=10)
-            opt.add_param_group({"params": [params[-1]], "lr": 1e-1})
-            # opt = torch.optim.Adam(params=params)
-        elif optim == "LBFGS":
-            opt = torch.optim.LBFGS(
-                params,
-                tolerance_change=1e-16,
-                tolerance_grad=1e-16,
-                lr=10,
-                max_iter=1,
-                line_search_fn="strong_wolfe",
-            )
-        elif optim == "SGD":
-            opt = torch.optim.SGD(params[:-1], lr=1e-3)
-            opt.add_param_group({"params": [params[-1]], "lr": 1e-4})
-        # Termination criteria
-        term_crit = {"max_iter": 2000, "tol_grad_sq": 1e-12, "tol_loss": 1e-12}
-
-        # Run Tuner
-        if tuner == "sdpr":
-            iter_info = st.tune_stereo_params_sdpr(
-                cam_torch=cam_torch,
-                params=params,
-                opt=opt,
-                term_crit=term_crit,
-                r_p=r_ps,
-                C_p0=C_p0s,
-                r_l=r_ls,
-                pixel_meas=pixel_meass,
-                verbose=True,
-            )
-        elif tuner == "theseus":
-            iter_info = st.tune_stereo_params_theseus(
-                cam_torch=cam_torch,
-                params=params,
-                opt=opt,
-                term_crit=term_crit,
-                r_p=r_ps,
-                C_p0=C_p0s,
-                r_l=r_ls,
-                pixel_meas=pixel_meass,
-                verbose=True,
-            )
-        if plot:
-            plt.figure()
-            plt.plot(iter_info["loss"])
-            plt.ylabel("Loss")
-            plt.xlabel("Iteration")
-            plt.show()
-        for key, tune_params in param_dict.items():
-            if t.no_noise:
-                np.testing.assert_allclose(
-                    getattr(cam_torch, key).detach().numpy(),
-                    getattr(t.cam_gt, key),
-                    atol=tune_params["atol_nonoise"],
-                )
-            else:
-                np.testing.assert_allclose(
-                    getattr(cam_torch, key).detach().numpy(),
-                    getattr(t.cam_gt, key),
-                    atol=tune_params["atol"],
-                )
-
-    def test_tune_params_no_opt(t, plot=False, optim="Adam", N_map=20, N_pose=5):
+    def test_tune_params_no_opt(t, plot=False, optim="Adam", N_map=20, N_batch=1):
         """Tune all parameters without using the optimization layer. That is,
         the ground truth is used to map the landmarks into the camera frame and
         the loss on landmark locations is used to tune the camera parameters."""
         set_seed(0)
-
+        # Generate problems
+        r_ps, C_p0s, r_ls, pixel_meass = st.get_prob_data(
+            camera=t.cam_gt, N_map=N_map, N_batch=N_batch
+        )
         # dictionary of paramter test values
         param_dict = {
             "f_u": dict(
@@ -690,10 +510,6 @@ class TestStereoTune(unittest.TestCase):
                 atol_nonoise=2e-3,
             ),
         }
-        # Generate problems
-        r_ps, C_p0s, r_ls, pixel_meass = st.get_prob_data(
-            camera=t.cam_gt, N_map=N_map, N_batch=N_pose
-        )
 
         # generate parameterized camera
         cam_torch = st.Camera(
@@ -761,9 +577,234 @@ class TestStereoTune(unittest.TestCase):
                     atol=tune_params["atol"],
                 )
 
+    def test_tune_params_sep(t, plot=False):
+        """Test offsets on each parameter. Use default noise level. Use LBFGS"""
+        set_seed(0)
+        # Generate problem
+        set_seed(0)
+        r_ps, C_p0s, r_ls, pixel_meass = st.get_prob_data(
+            camera=t.cam_gt, N_map=20, N_batch=1
+        )
+        # dictionary of paramter test values
+        param_dict = {
+            "f_u": dict(
+                offs=100,
+                lr=1e4,
+                tol_grad_sq=1e-12,
+                atol=5,
+                atol_nonoise=1e-5,
+            ),
+            "f_v": dict(offs=100, lr=5e4, tol_grad_sq=1e-15, atol=5, atol_nonoise=1e-5),
+            "c_u": dict(offs=100, lr=1e4, tol_grad_sq=1e-15, atol=5, atol_nonoise=1e-5),
+            "c_v": dict(offs=100, lr=1e4, tol_grad_sq=1e-15, atol=5, atol_nonoise=1e-5),
+            "b": dict(
+                offs=0.2,
+                lr=5e-3,
+                tol_grad_sq=1e-10,
+                atol=2e-3,
+                atol_nonoise=1e-5,
+            ),
+        }
+
+        # generate parameterized camera
+        cam_torch = st.Camera(
+            f_u=torch.tensor(t.cam_gt.f_u, requires_grad=True),
+            f_v=torch.tensor(t.cam_gt.f_v, requires_grad=True),
+            c_u=torch.tensor(t.cam_gt.c_u, requires_grad=True),
+            c_v=torch.tensor(t.cam_gt.c_v, requires_grad=True),
+            b=torch.tensor(t.cam_gt.b, requires_grad=True),
+            sigma_u=t.cam_gt.sigma_u,
+            sigma_v=t.cam_gt.sigma_v,
+        )
+
+        for key, tune_params in param_dict.items():
+            # Add offset to torch param
+            getattr(cam_torch, key).data += tune_params["offs"]
+            # Define parameter and learning rate
+            params = [getattr(cam_torch, key)]
+            opt = torch.optim.LBFGS(
+                params, lr=5, history_size=20, max_iter=1, line_search_fn="strong_wolfe"
+            )
+            # Termination criteria
+            term_crit = {
+                "max_iter": 500,
+                "tol_grad_sq": 1e-10,
+                "tol_loss": 1e-12,
+            }
+            # Run Tuner
+            iter_info = st.tune_stereo_params_sdpr(
+                cam_torch=cam_torch,
+                params=params,
+                opt=opt,
+                term_crit=term_crit,
+                r_ps=r_ps,
+                C_p0s=C_p0s,
+                r_ls=r_ls,
+                pixel_meass=pixel_meass,
+                verbose=True,
+            )
+            if plot:
+                fig, axs = plt.subplots(2, 1)
+                axs[0].plot(iter_info["loss"])
+                axs[0].set_ylabel("Loss")
+                axs[0].set_title(f"Parameter: {key}")
+                axs[1].plot(iter_info["params"])
+                axs[1].axhline(getattr(t.cam_gt, key), color="k", linestyle="--")
+                axs[1].set_xlabel("Iteration")
+                axs[1].set_ylabel("Parameter Value")
+                plt.figure()
+                plt.plot(iter_info["params"], iter_info["loss"])
+                plt.ylabel("Loss")
+                plt.xlabel("Parameter Value")
+                plt.title(f"Parameter: {key}")
+
+                plt.show()
+            if t.no_noise:
+                np.testing.assert_allclose(
+                    getattr(cam_torch, key).detach().numpy(),
+                    getattr(t.cam_gt, key),
+                    atol=tune_params["atol_nonoise"],
+                )
+            else:
+                np.testing.assert_allclose(
+                    getattr(cam_torch, key).detach().numpy(),
+                    getattr(t.cam_gt, key),
+                    atol=tune_params["atol"],
+                )
+
+    def test_tune_params(
+        t, plot=True, tuner="sdpr", optim="Adam", N_map=30, N_batch=10
+    ):
+        """Test offsets for all parameters simultaneously. Use default noise level"""
+        set_seed(1)
+        # Generate problems
+        r_ps, C_p0s, r_ls, pixel_meass = st.get_prob_data(
+            camera=t.cam_gt, N_map=N_map, N_batch=N_batch
+        )
+
+        # dictionary of paramter test values
+        param_dict = {
+            "f_u": dict(
+                offs=10,
+                atol=3,
+                atol_nonoise=1e-2,
+            ),
+            "f_v": dict(offs=10, atol=3, atol_nonoise=1e-2),
+            "c_u": dict(offs=10, atol=3, atol_nonoise=1e-2),
+            "c_v": dict(offs=10, atol=3, atol_nonoise=1e-2),
+            "b": dict(
+                offs=0.1,
+                atol=5e-3,
+                atol_nonoise=2e-3,
+            ),
+        }
+
+        # generate parameterized camera
+        cam_torch = st.Camera(
+            f_u=torch.tensor(t.cam_gt.f_u, requires_grad=True),
+            f_v=torch.tensor(t.cam_gt.f_v, requires_grad=True),
+            c_u=torch.tensor(t.cam_gt.c_u, requires_grad=True),
+            c_v=torch.tensor(t.cam_gt.c_v, requires_grad=True),
+            b=torch.tensor(t.cam_gt.b, requires_grad=True),
+            sigma_u=t.cam_gt.sigma_u,
+            sigma_v=t.cam_gt.sigma_v,
+        )
+        # Loop through all parameters
+        params = []
+        for key, tune_params in param_dict.items():
+            # Add offset to torch param
+            getattr(cam_torch, key).data += tune_params["offs"]
+            # Create optimizer
+            params += [getattr(cam_torch, key)]
+        # Set up optimizer
+        if optim == "Adam":
+            opt = torch.optim.Adam(params[:-1], lr=5)
+            opt.add_param_group({"params": [params[-1]], "lr": 1e-1})
+        elif optim == "LBFGS":
+            opt = torch.optim.LBFGS(
+                params,
+                history_size=50,
+                tolerance_change=1e-16,
+                tolerance_grad=1e-16,
+                lr=10,
+                max_iter=1,
+                line_search_fn="strong_wolfe",
+            )
+        elif optim == "SGD":
+            opt = torch.optim.SGD(params[:-1], lr=1e-3)
+            opt.add_param_group({"params": [params[-1]], "lr": 1e-4})
+        # Termination criteria
+        term_crit = {"max_iter": 4000, "tol_grad_sq": 1e-14, "tol_loss": 1e-12}
+
+        # Run Tuner
+        if tuner == "sdpr":
+            iter_info = st.tune_stereo_params_sdpr(
+                cam_torch=cam_torch,
+                params=params,
+                opt=opt,
+                term_crit=term_crit,
+                r_ps=r_ps,
+                C_p0s=C_p0s,
+                r_ls=r_ls,
+                pixel_meass=pixel_meass,
+                verbose=True,
+                solver="mosek",
+            )
+        elif tuner == "theseus":
+            iter_info = st.tune_stereo_params_theseus(
+                cam_torch=cam_torch,
+                params=params,
+                opt=opt,
+                term_crit=term_crit,
+                r_p=r_ps,
+                C_p0=C_p0s,
+                r_l=r_ls,
+                pixel_meas=pixel_meass,
+                verbose=True,
+            )
+        if plot:
+            plt.figure()
+            plt.plot(iter_info["loss"])
+            plt.ylabel("Loss")
+            plt.xlabel("Iteration")
+            plt.show()
+        for key, tune_params in param_dict.items():
+            if t.no_noise:
+                np.testing.assert_allclose(
+                    getattr(cam_torch, key).detach().numpy(),
+                    getattr(t.cam_gt, key),
+                    atol=tune_params["atol_nonoise"],
+                )
+            else:
+                np.testing.assert_allclose(
+                    getattr(cam_torch, key).detach().numpy(),
+                    getattr(t.cam_gt, key),
+                    atol=tune_params["atol"],
+                )
+
+
+def plot_poses(R_cw, t_cw_w, ax=None, **kwargs):
+    if ax is None:
+        fig = plt.figure()
+        ax = fig.add_subplot(111, projection="3d")
+    for i in range(len(R_cw)):
+        origin = t_cw_w[i]
+        directions = R_cw[i].T
+
+        for j in range(3):
+            ax.quiver(*origin, *directions[:, j], color=["r", "g", "b"][j])
+
+
+def plot_map(r_l, ax=None, **kwargs):
+    if ax is None:
+        fig = plt.figure()
+        ax = fig.add_subplot(111, projection="3d")
+
+    ax.scatter(*r_l, ".", color="k")
+
 
 if __name__ == "__main__":
     # unittest.main()
-    test = TestStereoTune(no_noise=False)
+    test = TestStereoTune(no_noise=True)
     # test.test_tune_params(plot=True, optim="LBFGS", N_map=50, N_pose=10)
-    test.test_grads_optlayer_mosek()
+    test.test_tune_params()

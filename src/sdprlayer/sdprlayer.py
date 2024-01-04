@@ -6,12 +6,12 @@ from diffcp import cones
 from copy import deepcopy
 
 mosek_params_dflt = {
-    "MSK_IPAR_INTPNT_MAX_ITERATIONS": 500,
-    "MSK_DPAR_INTPNT_CO_TOL_PFEAS": 1e-12,
-    "MSK_DPAR_INTPNT_CO_TOL_REL_GAP": 1e-12,
-    "MSK_DPAR_INTPNT_CO_TOL_MU_RED": 1e-14,
-    "MSK_DPAR_INTPNT_CO_TOL_INFEAS": 1e-12,
-    "MSK_DPAR_INTPNT_CO_TOL_DFEAS": 1e-12,
+    "MSK_IPAR_INTPNT_MAX_ITERATIONS": 1000,
+    "MSK_DPAR_INTPNT_CO_TOL_PFEAS": 1e-10,
+    "MSK_DPAR_INTPNT_CO_TOL_REL_GAP": 1e-10,
+    "MSK_DPAR_INTPNT_CO_TOL_MU_RED": 1e-12,
+    "MSK_DPAR_INTPNT_CO_TOL_INFEAS": 1e-10,
+    "MSK_DPAR_INTPNT_CO_TOL_DFEAS": 1e-10,
 }
 
 
@@ -29,17 +29,17 @@ class SDPRLayer(CvxpyLayer):
         self.local_solver = local_solver
         self.local_args = local_args
         self.certifier = certifier
-        self.constraints = constraints
+        self.constraints_p = constraints
         self.use_dual = use_dual
         # SET UP CVXPY PROGRAM
         Q = cp.Parameter((n_vars, n_vars), symmetric=True)
-        m = len(self.constraints)
+        m = len(self.constraints_p)
         # Dual vs Primal Formulation
         if use_dual or local_solver is not None:
             # If using local solver then must use dual formulation to avoid
             # definition of extra slacks by CVXPY
             y = cp.Variable(shape=(m,))
-            As, bs = zip(*self.constraints)
+            As, bs = zip(*self.constraints_p)
             b = np.concatenate([np.atleast_1d(b) for b in bs])
             objective = cp.Maximize(b @ y)
             LHS = cp.sum([y[i] * Ai for (i, Ai) in enumerate(As)])
@@ -53,7 +53,7 @@ class SDPRLayer(CvxpyLayer):
             # the problem is defined using the primal form.
             X = cp.Variable((n_vars, n_vars), symmetric=True)
             constraints = [X >> 0]
-            for i, (A, b) in enumerate(self.constraints):
+            for i, (A, b) in enumerate(self.constraints_p):
                 constraints += [cp.trace(A @ X) == b]
             objective = cp.Minimize(cp.trace(Q @ X))
             problem = cp.Problem(objective=objective, constraints=constraints)
@@ -78,6 +78,8 @@ class SDPRLayer(CvxpyLayer):
             method = kwargs["solver_args"]["solve_method"]
             # Check if we are injecting a solution
             if method == "local" or method == "mosek":
+                assert self.use_dual, "Primal not implemented. Set use_dual=True"
+
                 # Check if Q is not batched
                 Qs = Q.cpu().detach().double().numpy()
                 if Qs.ndim == 2:
@@ -114,9 +116,6 @@ class SDPRLayer(CvxpyLayer):
                             self.local_solver is not None
                         ), "Local solver not defined."
                         assert self.certifier is not None, "Certifier not defined."
-                        assert (
-                            self.use_dual
-                        ), "Primal not implemented. Set use_dual=True"
 
                         # TODO set up batched version of local solver
 
@@ -127,7 +126,7 @@ class SDPRLayer(CvxpyLayer):
                         Q_detach = Q.cpu().detach().double().numpy()
                         # Certify Local Solution
                         H, mults = self.certifier(
-                            Q=Q_detach, constraints=self.constraints, x_cand=x_cand
+                            Q=Q_detach, constraints=self.constraints_p, x_cand=x_cand
                         )
                         # TODO add in a check here to make sure H is PSD
 
