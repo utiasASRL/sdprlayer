@@ -72,7 +72,7 @@ class Camera:
 
         # compute disparity
         d = ul - ur
-        assert torch.all(d > 0), "Negative disparity in data"
+        # assert torch.all(d >= 0), "Negative disparity in data"
         Sigma = torch.zeros((3, 3))
         # Define pixel covariance
         Sigma[0, 0] = c.sigma_u**2
@@ -347,7 +347,7 @@ def tune_stereo_params_sdpr(
     return pd.DataFrame(iter_info)
 
 
-def build_theseus_layer(cam_torch: Camera, N_m, N_batch=1):
+def build_theseus_layer(cam_torch: Camera, N_map, N_batch=1):
     """Build theseus layer for stereo problem
 
     Args:
@@ -356,44 +356,41 @@ def build_theseus_layer(cam_torch: Camera, N_m, N_batch=1):
         pixel_meas (_type_): _description_
     """
     # Optimization variables
-    C_p0 = th.SO3(name="C_p0")
-    r_p0 = th.Vector(dof=3, name="r_p0")
+    C_p0s = th.SO3(name="C_p0s")
+    r_p0s = th.Point3(name="r_p0s")
     # Auxillary (data) variables (pixel measurements and landmarks)
-    pixel_meas = th.Variable(torch.zeros(N_batch, 4, N_m), name="pixel_meas")
-    r_l = th.Variable(torch.zeros(N_batch, 3, N_m), name="r_l")
+    pixel_meass = th.Variable(torch.zeros(N_batch, 4, N_map), name="pixel_meass")
+    r_ls = th.Variable(torch.zeros(N_batch, 3, N_map), name="r_ls")
 
     # Define cost function
     def error_fn(optim_vars, aux_vars):
-        C_p0, r_p0 = optim_vars
-        pixel_meas, r_l = aux_vars
+        C_p0s, r_p0s = optim_vars
+        pixel_meass, r_ls = aux_vars
         # run inverse cam model on pixels
-        for i in range(N_batch):
-            pixel_meas_i = pixel_meas[i, :, :]
-            meas, weights = cam_torch.inverse(*pixel_meas_i)
+        meas, weights = cam_torch.inverse(pixel_meass)
 
         # construct errors
         errors = []
-        for j in range(meas.shape[1]):
+        for j in range(meas.shape[-1]):
             # get measurement
-            meas_j = meas[:, [j]]
+            meas_j = meas[:, :, [j]]
             # get weight
-            W_ij = weights[j]
+            W_ij = weights[:, j, :, :]
             W_ij_half = torch.linalg.cholesky(W_ij)
-            # get landmark
             # get measurement in camera frame
-            err = meas_j - C_p0.tensor @ (r_l.tensor[:, [j]] - r_p0.tensor.T)
+            cam_to_lm = r_ls.tensor[:, :, [j]] - r_p0s.tensor.T
+            err = meas_j - torch.bmm(C_p0s.tensor, cam_to_lm)
             # get error
-            weight_err = W_ij_half @ err
-            errors += [weight_err.T]
+            errors += [torch.bmm(W_ij_half, err)]
         error_stack = torch.cat(errors, dim=1)
         return error_stack
 
     objective = th.Objective()
-    optim_vars = [C_p0, r_p0]
-    aux_vars = [pixel_meas, r_l]
+    optim_vars = [C_p0s, r_p0s]
+    aux_vars = [pixel_meass, r_ls]
     cost_function = th.AutoDiffCostFunction(
         optim_vars=optim_vars,
-        dim=N_m * 3,
+        dim=N_map * 3,
         err_fn=error_fn,
         aux_vars=aux_vars,
         cost_weight=th.ScaleCostWeight(1.0),

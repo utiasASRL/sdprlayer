@@ -146,15 +146,13 @@ class TestStereoTune(unittest.TestCase):
                 np.testing.assert_allclose(C.T @ r_inP, r_ps[b], atol=5e-3)
                 np.testing.assert_allclose(C.T @ C_p0s[b], np.eye(3), atol=5e-3)
 
-    def test_fwd_theseus(t, N_map=20):
+    def test_fwd_theseus(t, N_map=20, N_batch=1):
+        """Test forward pass of theseus layer"""
+        set_seed(0)
         # Generate problem
-        np.random.seed(0)
-        torch.manual_seed(0)
-        torch.set_default_dtype(torch.float64)
-        # No noise
-        t.cam_gt.sigma_u = 0.0
-        t.cam_gt.sigma_v = 0.0
-        r_p, C_p0, r_l, pixel_meas = st.get_prob_data(camera=t.cam_gt, N_map=N_map)
+        r_ps, C_p0s, r_ls, pixel_meass = st.get_prob_data(
+            camera=t.cam_gt, N_map=N_map, N_batch=N_batch
+        )
 
         # generate parameterized camera
         cam_torch = st.Camera(
@@ -167,13 +165,13 @@ class TestStereoTune(unittest.TestCase):
             sigma_v=t.cam_gt.sigma_v,
         )
         # Build layer
-        theseus_layer = st.build_theseus_layer(cam_torch, N_m=N_map)
+        theseus_layer = st.build_theseus_layer(cam_torch, N_map=N_map, N_batch=N_batch)
         # Run Forward pass
         theseus_inputs = {
-            "C_p0": torch.tensor(C_p0).expand(1, 3, 3),
-            "r_p0": torch.tensor(r_p[0]).T,
-            "r_l": torch.tensor(r_l[:, :, 0]).T.expand(1, 3, N_map),
-            "pixel_meas": torch.tensor(pixel_meas).expand(1, 4, N_map),
+            "C_p0s": torch.tensor(C_p0s),
+            "r_p0s": torch.tensor(r_ps.squeeze(2)),
+            "r_ls": torch.tensor(r_ls),
+            "pixel_meass": torch.tensor(pixel_meass),
         }
         r_p_est, C_est = theseus_layer.forward(
             theseus_inputs,
@@ -181,8 +179,9 @@ class TestStereoTune(unittest.TestCase):
         )
 
         # Check the error
-        np.testing.assert_allclose(C_est.T @ r_p_est, r_p[0], atol=1e-3)
-        np.testing.assert_allclose(C_est.T @ C_p0[0], np.eye(3), atol=5e-4)
+        for b in range(N_batch):
+            np.testing.assert_allclose(C_est[b].T @ r_p_est[b], r_ps[b], atol=1e-3)
+            np.testing.assert_allclose(C_est[b].T @ C_p0s[b], np.eye(3), atol=5e-4)
 
     def test_grads_camera(t, N_batch=1):
         """Test gradients for camera parameters
@@ -807,4 +806,4 @@ if __name__ == "__main__":
     # unittest.main()
     test = TestStereoTune(no_noise=True)
     # test.test_tune_params(plot=True, optim="LBFGS", N_map=50, N_pose=10)
-    test.test_tune_params()
+    test.test_fwd_theseus()
