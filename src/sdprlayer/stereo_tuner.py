@@ -359,35 +359,38 @@ def build_theseus_layer(cam_torch: Camera, N_map, N_batch=1):
     C_p0s = th.SO3(name="C_p0s")
     r_p0s = th.Point3(name="r_p0s")
     # Auxillary (data) variables (pixel measurements and landmarks)
-    pixel_meass = th.Variable(torch.zeros(N_batch, 4, N_map), name="pixel_meass")
+    meas = th.Variable(torch.zeros(N_batch, 3, N_map), name="meas")
+    weights = th.Variable(torch.zeros(N_batch, N_map, 3, 3), name="weights")
     r_ls = th.Variable(torch.zeros(N_batch, 3, N_map), name="r_ls")
 
     # Define cost function
     def error_fn(optim_vars, aux_vars):
         C_p0s, r_p0s = optim_vars
-        pixel_meass, r_ls = aux_vars
-        # run inverse cam model on pixels
-        meas, weights = cam_torch.inverse(pixel_meass)
+        meas, weights, r_ls = aux_vars
 
-        # construct errors
+        # Get error for each map point
         errors = []
         for j in range(meas.shape[-1]):
             # get measurement
-            meas_j = meas[:, :, [j]]
+            meas_j = meas[:, :, j]
             # get weight
             W_ij = weights[:, j, :, :]
             W_ij_half = torch.linalg.cholesky(W_ij)
-            # get measurement in camera frame
-            cam_to_lm = r_ls.tensor[:, :, [j]] - r_p0s.tensor.T
-            err = meas_j - torch.bmm(C_p0s.tensor, cam_to_lm)
+            # get measurement in camera frame (N_batch, 3)
+            r_jp_in0 = r_ls.tensor[:, :, j] - r_p0s.tensor
+            r_jp_inp = torch.einsum("bij,bj->bi", C_p0s.tensor, r_jp_in0)
             # get error
-            errors += [torch.bmm(W_ij_half, err)]
+            err = meas_j - r_jp_inp
+            # Multiply by weight matrix.
+            err_w = torch.einsum("bij,bj->bi", W_ij_half, err)
+            errors += [err_w]
+        # Stack errors (N_batch, 3 * N_map)
         error_stack = torch.cat(errors, dim=1)
         return error_stack
 
     objective = th.Objective()
     optim_vars = [C_p0s, r_p0s]
-    aux_vars = [pixel_meass, r_ls]
+    aux_vars = [meas, weights, r_ls]
     cost_function = th.AutoDiffCostFunction(
         optim_vars=optim_vars,
         dim=N_map * 3,
