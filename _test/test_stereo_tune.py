@@ -173,8 +173,8 @@ class TestStereoTune(unittest.TestCase):
         st.run_pypose_opt(reg, meas, weights)
 
         # Check the error
-        C_est = reg.C_p0s
-        r_p_est = reg.r_p0s
+        C_p0_est = reg.T_p0s.rotation().matrix().detach().numpy()
+        r_0p_p_est = reg.T_p0s.translation().detach().numpy()
 
         if t.no_noise:
             atol_r = 1e-7
@@ -183,10 +183,10 @@ class TestStereoTune(unittest.TestCase):
             atol_r = 7e-3
             atol_c = 7e-3
         for b in range(N_batch):
-            r_p0_est_d = r_p_est[b].detach().numpy()
-            C_p0_est_d = C_est[b].detach().numpy()
-            np.testing.assert_allclose(r_p0_est_d, r_p0s[b], atol=atol_r)
-            np.testing.assert_allclose(C_p0_est_d.T @ C_p0s[b], np.eye(3), atol=atol_c)
+            np.testing.assert_allclose(
+                r_0p_p_est[b], (-C_p0s[b] @ r_p0s[b]).squeeze(-1), atol=atol_r
+            )
+            np.testing.assert_allclose(C_p0_est[b].T @ C_p0s[b], np.eye(3), atol=atol_c)
 
     def test_fwd_theseus(t, N_map=20, N_batch=5):
         """Test forward pass of theseus layer"""
@@ -912,6 +912,6 @@ def plot_map(r_l, ax=None, **kwargs):
 
 if __name__ == "__main__":
     # unittest.main()
-    test = TestStereoTune(no_noise=False)
+    test = TestStereoTune(no_noise=True)
     # test.test_tune_params(plot=True, optim="LBFGS", N_map=50, N_pose=10)
     test.test_fwd_pypose()
