@@ -8,9 +8,11 @@ import pandas as pd
 # SDPRlayer import
 from sdprlayer import SDPRLayer
 import torch
+from torch import nn
 
 # Theseus
 import theseus as th
+import pypose as pp
 
 # Stereo problem imports
 from mwcerts.stereo_problems import (
@@ -347,7 +349,61 @@ def tune_stereo_params_sdpr(
     return pd.DataFrame(iter_info)
 
 
-def build_theseus_layer(cam_torch: Camera, N_map, N_batch=1):
+# PYPOSE OPTIMIZATION
+
+
+class MWRegistration(nn.Module):
+    def __init__(self, r_p0s_init, C_p0s_init, r_ls, **kwargs):
+        super().__init__()
+        self.N_map = r_ls.shape[-1]  # Number of map points
+        self.N_batch = C_p0s_init.shape[0]  # Number of instances
+
+        # Initialize the poses
+        if not isinstance(r_p0s_init, torch.Tensor):
+            r_p0s_init = torch.tensor(r_p0s_init).to(torch.get_default_dtype())
+        self.r_p0s = nn.Parameter(r_p0s_init)
+        if not isinstance(C_p0s_init, torch.Tensor):
+            C_p0s_init = torch.tensor(C_p0s_init).to(torch.get_default_dtype())
+        # Construct homogeneous transformation matrices
+        r_p0_p_s = torch.bmm(self.C_p0s, r_p0s_init)
+        T_p0s = torch.stack([C_p0s_init, r_p0_p_s], dim=2)
+        self.T_p0s = pp.Parameter(pp.mat2SE3(T_p0s))
+
+    def forward(self, meas):
+        # Get error for each map point
+        errors = []
+        for j in range(self.N_map):
+            # get measurement
+            meas_j = meas[:, :, j]
+            # get measurement in camera frame (N_batch, 3)
+            r_jp_inP = pp.bmv(self.T_p0s, self.r_ls[:, :, [j]])
+            # get error
+            err = meas_j - r_jp_inP
+            # Multiply by weight matrix.
+            errors += [err]
+        # Stack errors (N_batch, 3 * N_map)
+        error_stack = torch.cat(errors, dim=1)
+        return error_stack
+
+
+def run_pypose_opt(reg: MWRegistration, meas, weights):
+    # Setup
+    solver = pp.optim.solver.Cholesky()
+    strategy = pp.optim.strategy.TrustRegion()
+    optimizer = pp.optim.LM(reg, solver=solver, strategy=strategy, min=1e-6)
+    scheduler = pp.optim.scheduler.StopOnPlateau(
+        optimizer, steps=10, patience=3, decreasing=1e-3, verbose=True
+    )
+    # Convert weights
+    weights_blocked = []
+    for i in range(reg.N_batch):
+        weights_blocked[i] = torch.linalg.block_diag(*(weights[i]))
+    weights_blocked = torch.stack(weights_blocked)
+    # Run optimizer
+    scheduler.optimize(input=[meas], weight=weights_blocked, verbose=True)
+
+
+def build_theseus_layer(N_map, N_batch=1):
     """Build theseus layer for stereo problem
 
     Args:
