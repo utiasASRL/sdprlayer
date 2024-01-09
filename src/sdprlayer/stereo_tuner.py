@@ -1,26 +1,20 @@
 #!/bin/bash/python
-# boilerplate
 import numpy as np
 import matplotlib.pyplot as plt
 import warnings
 import pandas as pd
-
-# SDPRlayer import
-from sdprlayer import SDPRLayer
 import torch
 from torch import nn
-
-# Theseus
 import theseus as th
 import pypose as pp
+import spatialmath.base as sm
+from pylgmath.se3.transformation import Transformation as Trans
 
-# Stereo problem imports
+from sdprlayer import SDPRLayer
 from mwcerts.stereo_problems import (
     Localization,
     skew,
 )
-import spatialmath.base as sm
-from pylgmath.se3.transformation import Transformation as Trans
 
 
 class Camera:
@@ -412,8 +406,8 @@ def build_theseus_layer(N_map, N_batch=1):
         pixel_meas (_type_): _description_
     """
     # Optimization variables
-    C_p0s = th.SO3(name="C_p0s")
     r_p0s = th.Point3(name="r_p0s")
+    C_p0s = th.SO3(name="C_p0s")
     # Auxillary (data) variables (pixel measurements and landmarks)
     meas = th.Variable(torch.zeros(N_batch, 3, N_map), name="meas")
     weights = th.Variable(torch.zeros(N_batch, N_map, 3, 3), name="weights")
@@ -457,7 +451,13 @@ def build_theseus_layer(N_map, N_batch=1):
     )
     objective.add(cost_function)
 
-    layer = th.TheseusLayer(th.GaussNewton(objective, max_iterations=10))
+    # Build layer
+    opt_kwargs = {
+        "abs_err_tolerance": 1e-14,
+        "rel_err_tolerance": 1e-14,
+        "max_iterations": 100,
+    }
+    layer = th.TheseusLayer(th.GaussNewton(objective, **opt_kwargs))
 
     return layer
 
@@ -466,32 +466,61 @@ def tune_stereo_params_theseus(
     cam_torch: Camera,
     params,
     opt,
-    r_ps,
-    C_p0s,
+    r_p0s_gt,
+    C_p0s_gt,
     r_ls,
     pixel_meass,
     term_crit=term_crit_def,
     verbose=False,
+    init_at_gt=True,
 ):
-    # define closure
+    # Get sizes
+    N_map = r_ls.shape[-1]
+    N_batch = r_ls.shape[0]
+
+    # Initialize optimization tensors
+    if init_at_gt:
+        r_vals = torch.tensor(r_p0s_gt, dtype=torch.double).squeeze(-1)
+        C_vals = torch.tensor(C_p0s_gt, dtype=torch.double)
+    else:
+        raise ValueError("Not implemented")
+    r_p0s_gt = torch.tensor(r_p0s_gt, dtype=torch.double).squeeze(-1)
+    C_p0s_gt = torch.tensor(C_p0s_gt, dtype=torch.double)
+
+    # Build layer
+    theseus_layer = build_theseus_layer(N_map=N_map, N_batch=N_batch)
+
+    # define closure function
     def closure_fcn():
         # zero grad
         opt.zero_grad()
-        losses = []
-        # Loop over instances
-        for i, pixel_meas in enumerate(pixel_meass):
-            # generate loss based on landmarks
-            meas, weights = cam_torch.inverse(*pixel_meas)
-            # Check that measurements are correct (should be exact with no noise)
-            meas_gt = torch.tensor(C_p0s[i] @ (np.hstack(r_ls[i]) - r_ps[i]))
+        # invert the camera measurements
+        meas, weights = cam_torch.inverse(pixel_meass)
 
-            for k in range(meas.shape[1]):
-                losses += [
-                    (meas[:, [k]] - meas_gt[:, [k]]).T
-                    @ weights[k]
-                    @ (meas[:, [k]] - meas_gt[:, [k]])
-                ]
-        loss = torch.stack(losses).sum()
+        theseus_inputs = {
+            "C_p0s": C_vals,
+            "r_p0s": r_vals,
+            "r_ls": torch.tensor(r_ls),
+            "meas": meas,
+            "weights": weights,
+        }
+        # Run Forward pass
+        th_vars, info = theseus_layer.forward(
+            theseus_inputs,
+            optimizer_kwargs={
+                "track_best_solution": True,
+                "verbose": False,
+                "backward_mode": "implicit",
+            },
+        )
+        # Define loss with ground truth
+        loss = torch.tensor(0.0)
+        for i in range(N_batch):
+            loss += torch.norm(th_vars["r_p0s"][i] - r_p0s_gt[i]) ** 2
+            loss += (
+                torch.norm(C_p0s_gt[i].T @ th_vars["C_p0s"][i] - torch.eye(3), p="fro")
+                ** 2
+            )
         # backprop
         loss.backward()
         return loss
@@ -506,7 +535,9 @@ def tune_stereo_params_theseus(
     iter_info = []
     loss = torch.tensor(np.inf)
     while grad_sq > tol_grad_sq and n_iter < max_iter and loss > tol_loss:
+        # Take a step
         loss = opt.step(closure_fcn)
+        # Store loss
         loss_stored += [loss.item()]
         grad = np.vstack([p.grad for p in params])
         grad_sq = np.sum([g**2 for g in grad])
