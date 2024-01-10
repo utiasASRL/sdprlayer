@@ -123,12 +123,12 @@ def get_gt_setup(
     # Cluster at the origin
     r_l = lm_bound * (np.random.rand(3, N_map) - 0.5)
     # Ground Truth Poses
-    r_ps = []
+    r_p0s = []
     C_p0s = []
     if traj_type == "clusters":
         # Ground Truth Poses
         for i in range(N_batch):
-            r_ps += [0.1 * np.random.randn(3, 1)]
+            r_p0s += [0.1 * np.random.randn(3, 1)]
             C_p0s += [sm.roty(0.1 * np.random.randn(1)[0])]
         # Offset from the origin
         r_l = r_l + offs
@@ -144,7 +144,7 @@ def get_gt_setup(
         for i in range(N_batch):
             # Location
             r = radius * np.array([[np.cos(phi), np.sin(phi), 0]]).T
-            r_ps += [r]
+            r_p0s += [r]
             # Z Axis points at origin
             z = -r / np.linalg.norm(r)
             x = np.array([[0.0, 0.0, 1.0]]).T
@@ -152,21 +152,21 @@ def get_gt_setup(
             C_p0s += [np.hstack([x, y, z]).T]
             # Update angle
             phi = (phi + delta_phi) % (2 * np.pi)
-    r_ps = np.stack(r_ps)
+    r_p0s = np.stack(r_p0s)
     C_p0s = np.stack(C_p0s)
 
-    return r_ps, C_p0s, r_l
+    return r_p0s, C_p0s, r_l
 
 
 def get_prob_data(camera=Camera(), N_map=30, N_batch=1):
     # get ground truth information
-    r_ps, C_p0s, r_l = get_gt_setup(N_map=N_map, N_batch=N_batch)
+    r_p0s, C_p0s, r_l = get_gt_setup(N_map=N_map, N_batch=N_batch)
 
     # generate measurements
     pixel_meass = []
     r_ls = []
     for i in range(N_batch):
-        r_p = r_ps[i]
+        r_p = r_p0s[i]
         C_p0 = C_p0s[i]
         r_ls += [r_l]
         r_l_inC = C_p0 @ (r_l - r_p)
@@ -174,7 +174,7 @@ def get_prob_data(camera=Camera(), N_map=30, N_batch=1):
     pixel_meass = np.stack(pixel_meass)
     r_ls = np.stack(r_ls)
 
-    return r_ps, C_p0s, r_ls, pixel_meass
+    return r_p0s, C_p0s, r_ls, pixel_meass
 
 
 def kron(A, B):
@@ -267,10 +267,10 @@ term_crit_def = {
 }  # Optimization termination criteria
 
 
-def get_constraints(r_ps, C_p0s, r_ls):
+def get_constraints(r_p0s, C_p0s, r_ls):
     """Generate constraints for problem"""
     r_ls_b = [r_ls[0, :, [i]] for i in range(r_ls.shape[2])]
-    prob = Localization([r_ps[0]], [C_p0s[0]], r_ls_b)
+    prob = Localization([r_p0s[0]], [C_p0s[0]], r_ls_b)
     prob.generate_constraints()
     prob.generate_redun_constraints()
     constraints = prob.constraints + prob.constraints_r
@@ -282,7 +282,7 @@ def tune_stereo_params_sdpr(
     cam_torch: Camera,
     params,
     opt,
-    r_ps,
+    r_p0s,
     C_p0s,
     r_ls,
     pixel_meass,
@@ -291,7 +291,7 @@ def tune_stereo_params_sdpr(
     solver="SCS",
 ):
     # Define a localization class to get the constraints
-    constraints_list = get_constraints(r_ps, C_p0s, r_ls)
+    constraints_list = get_constraints(r_p0s, C_p0s, r_ls)
     # Build Layer
     sdpr_layer = SDPRLayer(13, constraints=constraints_list, use_dual=True)
 
@@ -308,7 +308,7 @@ def tune_stereo_params_sdpr(
         else:
             raise ValueError("Invalid solver")
         Xs = sdpr_layer(Q, solver_args=solver_args)[0]
-        loss = get_loss_from_sols(Xs, r_ps, C_p0s)
+        loss = get_loss_from_sols(Xs, r_p0s, C_p0s)
         # backprop
         loss.backward()
         return loss
@@ -397,7 +397,7 @@ def run_pypose_opt(reg: MWRegistration, meas, weights):
 # THESEUS OPTIMIZATION
 
 
-def build_theseus_layer(N_map, N_batch=1):
+def build_theseus_layer(N_map, N_batch=1, opt_kwargs_in={}):
     """Build theseus layer for stereo problem
 
     Args:
@@ -457,6 +457,7 @@ def build_theseus_layer(N_map, N_batch=1):
         "rel_err_tolerance": 1e-14,
         "max_iterations": 100,
     }
+    opt_kwargs.update(opt_kwargs_in)
     layer = th.TheseusLayer(th.GaussNewton(objective, **opt_kwargs))
 
     return layer
@@ -473,6 +474,7 @@ def tune_stereo_params_theseus(
     term_crit=term_crit_def,
     verbose=False,
     init_at_gt=True,
+    opt_kwargs={},
 ):
     # Get sizes
     N_map = r_ls.shape[-1]
@@ -488,7 +490,9 @@ def tune_stereo_params_theseus(
     C_p0s_gt = torch.tensor(C_p0s_gt, dtype=torch.double)
 
     # Build layer
-    theseus_layer = build_theseus_layer(N_map=N_map, N_batch=N_batch)
+    theseus_layer = build_theseus_layer(
+        N_map=N_map, N_batch=N_batch, opt_kwargs_in=opt_kwargs
+    )
 
     # define closure function
     def closure_fcn():
@@ -509,7 +513,7 @@ def tune_stereo_params_theseus(
             theseus_inputs,
             optimizer_kwargs={
                 "track_best_solution": True,
-                "verbose": False,
+                "verbose": True,
                 "backward_mode": "implicit",
             },
         )
@@ -561,7 +565,7 @@ def tune_stereo_params_no_opt(
     cam_torch: Camera,
     params,
     opt,
-    r_ps,
+    r_p0s,
     C_p0s,
     r_ls,
     pixel_meass,
@@ -580,7 +584,7 @@ def tune_stereo_params_no_opt(
         # Loop over instances
         for i in range(meas.shape[0]):
             # Get ground truth landmark measurements
-            meas_gt = torch.tensor(C_p0s[i] @ (r_ls[i] - r_ps[i]))
+            meas_gt = torch.tensor(C_p0s[i] @ (r_ls[i] - r_p0s[i]))
 
             for k in range(meas.shape[-1]):
                 losses += [

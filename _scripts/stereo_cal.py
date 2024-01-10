@@ -15,14 +15,16 @@ cam_gt = st.Camera(
     f_v=484.5,
     c_u=0.0,
     c_v=0.0,
-    b=0.24,
-    sigma_u=0.5,
-    sigma_v=0.5,
+    b=0.7,
+    sigma_u=0.5 * 0,
+    sigma_v=0.5 * 0,
 )
+
+torch.set_default_dtype(torch.float64)
 
 
 def get_cal_data(
-    Np=3,  # Number of poses
+    N_batch=3,  # Number of poses
     N_map=10,  # number of landmarks
     offs=np.array([[0, 0, 2]]).T,  # offset between poses and landmarks
     n_turns=0.2,  # (circle) number of turns around the cluster
@@ -42,22 +44,22 @@ def get_cal_data(
     r_l = np.hstack(r_l)
     r_l = r_l - np.mean(r_l, axis=1, keepdims=True)
     # Ground Truth Poses
-    r_ps = []
+    r_p0s = []
     C_p0s = []
 
     # GT poses equally spaced along n turns of a circle
     radius = np.linalg.norm(offs)
     assert radius > 0.2, "Radius of trajectory circle should be larger"
-    if Np > 1:
-        delta_phi = n_turns * 2 * np.pi / (Np - 1)
+    if N_batch > 1:
+        delta_phi = n_turns * 2 * np.pi / (N_batch - 1)
         phi = 0.0
     else:
         delta_phi = n_turns
         phi = delta_phi
-    for i in range(Np):
+    for i in range(N_batch):
         # Location
         r = radius * np.array([[np.cos(phi), 0.0, np.sin(phi)]]).T
-        r_ps += [r]
+        r_p0s += [r]
         # Z Axis points at origin
         z = -r / np.linalg.norm(r)
         y = np.array([[0.0, 1.0, 0.0]]).T
@@ -70,7 +72,7 @@ def get_cal_data(
         # Plot data
         fig = plt.figure()
         ax = fig.add_subplot(111, projection="3d")
-        plot_poses(C_p0s, r_ps, ax=ax)
+        plot_poses(C_p0s, r_p0s, ax=ax)
         plot_map(r_l, ax=ax)
         ax.set_xlabel("X")
         ax.set_ylabel("Y")
@@ -81,23 +83,25 @@ def get_cal_data(
         ax.set_zlim(-r, r)
 
     # Get pixel measurements
-    r_ls = []
     pixel_meass = []
-    for i in range(Np):
-        # get landmarks in camera frame
-        r_l_c = C_p0s[i] @ (r_l - r_ps[i])
-        # get pixel measurements
-        pixel_meass += [cam_gt.forward([r_l_c])]
-        # repeat same landmarks for each pose
-        r_ls += [np.expand_dims(r_l.T, axis=2)]
-
+    r_ls = []
+    for i in range(N_batch):
+        r_p = r_p0s[i]
+        C_p0 = C_p0s[i]
+        r_ls += [r_l]
+        r_l_inC = C_p0 @ (r_l - r_p)
+        pixel_meass += [cam_gt.forward(r_l_inC)]
         if plot:
             plot_pixel_meas(pixel_meass[-1])
+    pixel_meass = np.stack(pixel_meass)
+    r_ls = np.stack(r_ls)
+    r_p0s = np.stack(r_p0s)
+    C_p0s = np.stack(C_p0s)
 
     if plot:
         plt.show()
 
-    return r_ps, C_p0s, r_ls, pixel_meass
+    return r_p0s, C_p0s, r_ls, pixel_meass
 
 
 def plot_poses(R_cw, t_cw_w, ax=None, **kwargs):
@@ -135,7 +139,7 @@ def plot_map(r_l, ax=None, **kwargs):
     ax.scatter(*r_l, ".", color="k")
 
 
-def run_sdpr_cal(r_ps, C_p0s, r_ls, pixel_meass):
+def run_sdpr_cal(r_p0s, C_p0s, r_ls, pixel_meass):
     # generate parameterized camera
     cam_torch = st.Camera(
         f_u=torch.tensor(cam_gt.f_u, requires_grad=True),
@@ -159,7 +163,7 @@ def run_sdpr_cal(r_ps, C_p0s, r_ls, pixel_meass):
         params=params,
         opt=opt,
         term_crit=term_crit,
-        r_p=r_ps,
+        r_p=r_p0s,
         C_p0=C_p0s,
         r_l=r_ls,
         pixel_meas=pixel_meass,
@@ -168,12 +172,87 @@ def run_sdpr_cal(r_ps, C_p0s, r_ls, pixel_meass):
 
     print("Done")
 
-def run_theseus_cal(r_ps, C_p0s, r_ls, pixel_meass):
-    
-    
+
+def run_theseus_cal(r_p0s, C_p0s, r_ls, pixel_meass):
+    # Convert to tensor
+    pixel_meass = torch.tensor(pixel_meass)
+
+    # dictionary of paramter test values
+    param_dict = {
+        "b": dict(
+            offs=1,
+            lr=5e-3,
+            tol_grad_sq=1e-10,
+            atol=2e-3,
+            atol_nonoise=1e-5,
+        ),
+    }
+
+    # generate parameterized camera
+    cam_torch = st.Camera(
+        f_u=torch.tensor(cam_gt.f_u, requires_grad=True),
+        f_v=torch.tensor(cam_gt.f_v, requires_grad=True),
+        c_u=torch.tensor(cam_gt.c_u, requires_grad=True),
+        c_v=torch.tensor(cam_gt.c_v, requires_grad=True),
+        b=torch.tensor(cam_gt.b, requires_grad=True),
+        sigma_u=cam_gt.sigma_u,
+        sigma_v=cam_gt.sigma_v,
+    )
+    optim = "LBFGS"
+    for key, tune_params in param_dict.items():
+        # Add offset to torch param
+        getattr(cam_torch, key).data += tune_params["offs"]
+        # Define parameter and learning rate
+        params = [getattr(cam_torch, key)]
+        if optim == "Adam":
+            opt = torch.optim.Adam(params, lr=tune_params["lr"])
+        elif optim == "LBFGS":
+            if key == "b":
+                lr = 1e-1
+            else:
+                lr = 10
+            opt = torch.optim.LBFGS(
+                params,
+                history_size=50,
+                tolerance_change=1e-16,
+                tolerance_grad=1e-16,
+                lr=lr,
+                max_iter=1,
+                line_search_fn="strong_wolfe",
+            )
+        # Termination criteria
+        term_crit = {
+            "max_iter": 500,
+            "tol_grad_sq": 1e-14,
+            "tol_loss": 1e-10,
+        }
+        opt_kwargs = {
+            "abs_err_tolerance": 1e-10,
+            "rel_err_tolerance": 1e-8,
+            "max_iterations": 100,
+        }
+        # Run Tuner
+        iter_info = st.tune_stereo_params_theseus(
+            cam_torch=cam_torch,
+            params=params,
+            opt=opt,
+            term_crit=term_crit,
+            r_p0s_gt=r_p0s,
+            C_p0s_gt=C_p0s,
+            r_ls=r_ls,
+            pixel_meass=pixel_meass,
+            verbose=True,
+            opt_kwargs=opt_kwargs,
+        )
+
+        plt.figure()
+        plt.plot(iter_info["loss"])
+        plt.ylabel("Loss")
+        plt.xlabel("Iteration")
+        plt.show()
 
 
 if __name__ == "__main__":
     # Generate data
-    r_ps, C_p0s, r_ls, pixel_meass = get_cal_data(plot=False)
-    run_sdpr_cal(r_ps, C_p0s, r_ls, pixel_meass)
+    r_p0s, C_p0s, r_ls, pixel_meass = get_cal_data(plot=False)
+    run_theseus_cal(r_p0s, C_p0s, r_ls, pixel_meass)

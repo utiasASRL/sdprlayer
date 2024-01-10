@@ -19,20 +19,20 @@ def get_prob_data():
     # Define polynomial (lowest order first)
     p_vals = np.array([2, 2, -0.5, -2 / 3, 1 / 4])
 
-    Constraints = []
+    constraints = []
     A = sp.csc_array((3, 3))  # w^2 = 1
     A[0, 0] = 1
-    Constraints += [(A, 1.0)]
+    constraints += [(A, 1.0)]
     A = sp.csc_array((3, 3))  # x^2 = x*x
     A[2, 0] = 1 / 2
     A[0, 2] = 1 / 2
     A[1, 1] = -1
-    Constraints += [(A, 0.0)]
+    constraints += [(A, 0.0)]
 
     # Candidate solution
     x_cand = np.array([[1.0000, -1.4871, 2.2115, -3.2888]]).T
 
-    return dict(p_vals=p_vals, Constraints=Constraints, x_cand=x_cand)
+    return dict(p_vals=p_vals, constraints=constraints, x_cand=x_cand)
 
 
 def plot_polynomial(p_vals):
@@ -75,15 +75,15 @@ def local_solver(p: torch.Tensor, x_init=0.0):
     return x_hat
 
 
-def certifier(Q, Constraints, x_cand):
+def certifier(Q, constraints, x_cand):
     """compute lagrange multipliers and certificate given candidate solution"""
     q = (Q @ x_cand).flatten()
-    Ax = np.hstack([A @ x_cand for A, b in Constraints])
+    Ax = np.hstack([A @ x_cand for A, b in constraints])
     # Compute Multipliers
     res = lsq_linear(Ax, q, tol=1e-12)
     mults = res.x
     # Compute Certificate - diffcp assumes the form:  H = Q - A*mult
-    H = Q - np.sum([mults[i] * A for i, (A, b) in enumerate(Constraints)])
+    H = Q - np.sum([mults[i] * A for i, (A, b) in enumerate(constraints)])
     return H, mults
 
 
@@ -93,10 +93,10 @@ def test_prob_sdp(display=False):
     np.random.seed(2)
     # Get data from data function
     data = get_prob_data()
-    Constraints = data["Constraints"]
+    constraints = data["constraints"]
 
     # Create SDPR Layer
-    optlayer = SDPRLayer(n_vars=3, Constraints=Constraints)
+    optlayer = SDPRLayer(n_vars=3, constraints=constraints)
 
     # Set up polynomial parameter tensor
     p = torch.tensor(data["p_vals"], requires_grad=True)
@@ -159,13 +159,13 @@ def test_grad_num(autograd_test=True, use_dual=True):
     """The goal of this script is to test the dual formulation of the SDPRLayer"""
     # Get data from data function
     data = get_prob_data()
-    Constraints = data["Constraints"]
+    constraints = data["constraints"]
 
     # Set up polynomial parameter tensor
     p = torch.tensor(data["p_vals"], requires_grad=True)
 
     # Create SDPR Layer
-    sdpr_args = dict(n_vars=3, Constraints=Constraints, use_dual=use_dual)
+    sdpr_args = dict(n_vars=3, constraints=constraints, use_dual=use_dual)
     optlayer = SDPRLayer(**sdpr_args)
 
     # Define loss
@@ -220,13 +220,13 @@ def test_grad_local(autograd_test=True):
     solver and the reverse pass uses the certificate."""
     # Get data from data function
     data = get_prob_data()
-    Constraints = data["Constraints"]
+    constraints = data["constraints"]
 
     # Set up polynomial parameter tensor
     p = torch.tensor(data["p_vals"], requires_grad=True)
 
     # Create SDPR Layer (SDP version)
-    sdpr_args = dict(n_vars=3, Constraints=Constraints, use_dual=True)
+    sdpr_args = dict(n_vars=3, constraints=constraints, use_dual=True)
     optlayer_sdp = SDPRLayer(**sdpr_args)
     # Create SDPR Layer (Local version)
     sdpr_args["local_solver"] = local_solver

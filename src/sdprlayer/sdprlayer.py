@@ -71,7 +71,12 @@ class SDPRLayer(CvxpyLayer):
             parameters=[Q],
         )
 
-    def forward(self, Q: torch.tensor, **kwargs):
+    def forward(self, Qs: torch.tensor, **kwargs):
+        # get batch dimension
+        if Qs.ndim > 2:
+            N_batch = range(Qs.shape[0])
+        else:
+            N_batch = 1
         # Define new kwargs to not affect original
         kwargs_new = deepcopy(kwargs)
         if "solver_args" in kwargs and "solve_method" in kwargs["solver_args"]:
@@ -79,20 +84,21 @@ class SDPRLayer(CvxpyLayer):
             # Check if we are injecting a solution
             if method == "local" or method == "mosek":
                 assert self.use_dual, "Primal not implemented. Set use_dual=True"
-
-                # Check if Q is not batched
-                Qs = Q.cpu().detach().double().numpy()
-                if Qs.ndim == 2:
-                    Qs = Qs.unsqueeze(0)
-
+                # detach
+                Qs_d = Qs.cpu().detach().double().numpy()
+                # TODO this loop should be set up so that we can run in parallel.
                 ext_vars_list = []
-                for i in range(Qs.shape[0]):
+                for i in range(N_batch):
+                    # this check is to facilitate batched or non-batched inputs
+                    if N_batch == 1:
+                        Q_val = Qs_d
+                    else:
+                        Q_val = Qs_d[i]
+                    # Get data matrix and make sure its symmetric
+                    assert np.allclose(Q_val, Q_val.T), "Q must be symmetric"
+
                     if method == "mosek":
                         assert "MOSEK" in cp.installed_solvers(), "MOSEK not installed"
-
-                        # Get data matrix and make sure its symmetric
-                        Q_val = Qs[i]
-                        assert np.allclose(Q_val, Q_val.T), "Q must be symmetric"
                         self.Q.value = Q_val
                         # Get parameters for mosek
                         verbose = kwargs["solver_args"].get("verbose", False)
@@ -116,19 +122,18 @@ class SDPRLayer(CvxpyLayer):
                             self.local_solver is not None
                         ), "Local solver not defined."
                         assert self.certifier is not None, "Certifier not defined."
-
-                        # TODO set up batched version of local solver
-
                         # Run Local Solver
                         x_cand = self.local_solver(**self.local_args)
                         X = x_cand @ x_cand.T
-                        # Get detach version of Q
-                        Q_detach = Q.cpu().detach().double().numpy()
                         # Certify Local Solution
                         H, mults = self.certifier(
-                            Q=Q_detach, constraints=self.constraints_p, x_cand=x_cand
+                            Q=Q_val, constraints=self.constraints_p, x_cand=x_cand
                         )
-                        # TODO add in a check here to make sure H is PSD
+                        # TODO Improve this check using some other library
+                        min_eig = np.min(np.linalg.eigvalsh(H))
+                        if min_eig < -1e-8:
+                            # TODO this should queue a reinitialization
+                            raise ValueError("Local solution not certified")
 
                     # Add to list of solutions
                     ext_vars_list += [
@@ -146,7 +151,7 @@ class SDPRLayer(CvxpyLayer):
                     kwargs_new["solver_args"] = solver_args
 
         # Call cvxpylayers forward function
-        res = super().forward(Q, **kwargs_new)
+        res = super().forward(Qs, **kwargs_new)
         # TODO If using mosek or local then overwrite the results for
         # better accuracy.
         return res

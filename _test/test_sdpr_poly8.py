@@ -25,26 +25,26 @@ def get_prob_data():
         [5.0000, 1.3167 * 2, -1.4481 * 3, 0 * 4, 0.2685 * 3, -0.0667 * 2, 0.0389]
     )
 
-    Constraints = []
+    constraints = []
     A = sp.csc_array((4, 4))  # w^2 = 1
     A[0, 0] = 1
-    Constraints += [(A, 1.0)]
+    constraints += [(A, 1.0)]
     A = sp.csc_array((4, 4))  # x^2 = x*x
     A[2, 0] = 1 / 2
     A[0, 2] = 1 / 2
     A[1, 1] = -1
-    Constraints += [(A, 0.0)]
+    constraints += [(A, 0.0)]
     A = sp.csc_array((4, 4))  # x^3 = x^2*x
     A[3, 0] = 1
     A[0, 3] = 1
     A[1, 2] = -1
     A[2, 1] = -1
-    Constraints += [(A, 0.0)]
+    constraints += [(A, 0.0)]
     A = sp.csc_array((4, 4))  # x^3*x = x^2*x^2
     A[3, 1] = 1 / 2
     A[1, 3] = 1 / 2
     A[2, 2] = -1
-    Constraints += [(A, 0.0)]
+    constraints += [(A, 0.0)]
 
     # Candidate solution
     x_cand = np.array([[1.0000, -1.4871, 2.2115, -3.2888]]).T
@@ -52,7 +52,7 @@ def get_prob_data():
     # Dual optimal
     mults = -np.array([[-3.1937], [2.5759], [-0.0562], [0.8318]])
 
-    return dict(p_vals=p_vals, Constraints=Constraints, x_cand=x_cand, opt_mults=mults)
+    return dict(p_vals=p_vals, constraints=constraints, x_cand=x_cand, opt_mults=mults)
 
 
 def plot_polynomial(p_vals):
@@ -97,11 +97,11 @@ def local_solver(p: torch.Tensor, x_init=0.0):
     return x_hat
 
 
-def certifier(Q, Constraints, x_cand):
+def certifier(Q, constraints, x_cand):
     opts = opts_cut_dflt
     method = "cuts"
     _, output = solve_eopt(
-        Q=Q, Constraints=Constraints, x_cand=x_cand, opts=opts, method=method
+        Q=Q, Constraints=constraints, x_cand=x_cand, opts=opts, method=method
     )
     if not output["status"] == "POS_LB":
         raise ValueError("Unable to certify solution")
@@ -115,10 +115,10 @@ def test_prob_sdp(display=False):
     np.random.seed(2)
     # Get data from data function
     data = get_prob_data()
-    Constraints = data["Constraints"]
+    constraints = data["constraints"]
 
     # Create SDPR Layer
-    optlayer = SDPRLayer(n_vars=4, Constraints=Constraints)
+    optlayer = SDPRLayer(n_vars=4, constraints=constraints)
 
     # Set up polynomial parameter tensor
     p = torch.tensor(data["p_vals"], requires_grad=True)
@@ -188,13 +188,13 @@ def test_prob_local(display=False):
     np.random.seed(2)
     # Get data from data function
     data = get_prob_data()
-    Constraints = data["Constraints"]
+    constraints = data["constraints"]
 
     # Set up polynomial parameter tensor
     p = torch.tensor(data["p_vals"], requires_grad=True)
 
     # Create SDPR Layer
-    sdpr_args = dict(n_vars=4, Constraints=Constraints, use_dual=True)
+    sdpr_args = dict(n_vars=4, constraints=constraints, use_dual=True)
     sdpr_args["local_solver"] = local_solver
     sdpr_args["certifier"] = certifier
     sdpr_args["local_args"] = dict(p=p, x_init=-1.5)
@@ -259,13 +259,13 @@ def test_grad_sdp(autograd_test=True, use_dual=True):
     """The goal of this script is to test the dual formulation of the SDPRLayer"""
     # Get data from data function
     data = get_prob_data()
-    Constraints = data["Constraints"]
+    constraints = data["constraints"]
 
     # Set up polynomial parameter tensor
     p = torch.tensor(data["p_vals"], requires_grad=True)
 
     # Create SDPR Layer
-    sdpr_args = dict(n_vars=4, Constraints=Constraints, use_dual=use_dual)
+    sdpr_args = dict(n_vars=4, constraints=constraints, use_dual=use_dual)
     optlayer = SDPRLayer(**sdpr_args)
 
     # Define loss
@@ -317,13 +317,13 @@ def test_grad_sdp_mosek(use_dual=True):
     """Test SDPRLayer with MOSEK as the solver"""
     # Get data from data function
     data = get_prob_data()
-    Constraints = data["Constraints"]
+    constraints = data["constraints"]
 
     # Set up polynomial parameter tensor
     p = torch.tensor(data["p_vals"], requires_grad=True)
 
     # Create SDPR Layer
-    sdpr_args = dict(n_vars=4, Constraints=Constraints, use_dual=use_dual)
+    sdpr_args = dict(n_vars=4, constraints=constraints, use_dual=use_dual)
     optlayer = SDPRLayer(**sdpr_args)
 
     # Define loss
@@ -365,13 +365,13 @@ def test_grad_local(autograd_test=True):
     solver and the reverse pass uses the certificate."""
     # Get data from data function
     data = get_prob_data()
-    Constraints = data["Constraints"]
+    constraints = data["constraints"]
 
     # Set up polynomial parameter tensor
     p = torch.tensor(data["p_vals"], requires_grad=True)
 
     # Create SDPR Layer (SDP version)
-    sdpr_args = dict(n_vars=4, Constraints=Constraints, use_dual=True)
+    sdpr_args = dict(n_vars=4, constraints=constraints, use_dual=True)
     optlayer_sdp = SDPRLayer(**sdpr_args)
     # Create SDPR Layer (Local version)
     sdpr_args["local_solver"] = local_solver
@@ -434,7 +434,7 @@ def test_grad_local(autograd_test=True):
 
 if __name__ == "__main__":
     # test_prob_sdp()
-    # test_prob_local(display=True)
-    test_grad_sdp()
+    test_prob_local(display=True)
+    # test_grad_sdp()
     # test_grad_sdp_mosek()
     # test_grad_local()
