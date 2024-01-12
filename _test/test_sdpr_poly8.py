@@ -1,15 +1,15 @@
 import os
+import unittest
 
+import cvxpy as cp
+from cvxpylayers.torch import CvxpyLayer
 import matplotlib.pylab as plt
 import numpy as np
 import scipy.sparse as sp
-
-import cvxpy as cp
 import torch
-from cvxpylayers.torch import CvxpyLayer
-from sdprlayer import SDPRLayer
+
 from cert_tools.eopt_solvers import solve_eopt, opts_cut_dflt
-import unittest
+from sdprlayer import SDPRLayer
 
 root_dir = os.path.abspath(os.path.dirname(__file__) + "/../")
 
