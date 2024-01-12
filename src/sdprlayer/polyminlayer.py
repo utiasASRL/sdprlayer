@@ -2,7 +2,6 @@ from typing import Any
 import matplotlib.pylab as plt
 import numpy as np
 import torch
-from torch.profiler import record_function
 
 
 class PolyMinLayer(torch.nn.Module):
@@ -35,7 +34,7 @@ class PolyMinLayerFn(torch.autograd.Function):
         assert poly.shape[0] > 2, "Polynomial must be of degree at least 2"
         # update opt_params
         opt_params_default = dict(
-            optimizer="lbfgs", lr=0.1, grad_sq_tol=1e-12, max_iter=100, verbose=False
+            optimizer="sgd", lr=1e-3, grad_sq_tol=1e-12, max_iter=100, verbose=False
         )
         opt_params_default.update(opt_params)
         opt_params = opt_params_default
@@ -46,6 +45,8 @@ class PolyMinLayerFn(torch.autograd.Function):
             opt = torch.optim.SGD(params=[x_min], lr=opt_params["lr"])
         elif opt_params["optimizer"] == "lbfgs":
             opt = torch.optim.LBFGS(params=[x_min], max_iter=1)
+        elif opt_params["optimizer"] == "adam":
+            opt = torch.optim.Adam(params=[x_min], lr=opt_params["lr"])
         # Detach the poly coefficients to avoid accidental grad
         # computation
         poly = poly.detach()
