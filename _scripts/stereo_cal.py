@@ -104,6 +104,43 @@ def get_cal_data(
     return r_p0s, C_p0s, r_ls, pixel_meass
 
 
+def get_random_inits(radius, N_batch=3, plot=False):
+    r_p0s = []
+    C_p0s = []
+
+    for i in range(N_batch):
+        # random locations
+        r_ = np.random.random((3, 1)) - 0.5
+        r = radius * r_ / np.linalg.norm(r_)
+        r_p0s += [r]
+        # random orientation pointing at origin
+        z = -r / np.linalg.norm(r)
+        y = np.random.randn(3, 1)
+        y = y - y.T @ z * z
+        y = y / np.linalg.norm(y)
+        x = -skew(z) @ y
+        C_p0s += [np.hstack([x, y, z]).T]
+
+    if plot:
+        # Plot data
+        fig = plt.figure()
+        ax = fig.add_subplot(111, projection="3d")
+        plot_poses(C_p0s, r_p0s, ax=ax)
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+        ax.set_zlabel("Z")
+        r = radius * 1.1
+        ax.set_xlim(-r, r)
+        ax.set_ylim(-r, r)
+        ax.set_zlim(-r, r)
+        plt.show()
+
+    r_p0s = np.stack(r_p0s)
+    C_p0s = np.stack(C_p0s)
+
+    return r_p0s, C_p0s
+
+
 def plot_poses(R_cw, t_cw_w, ax=None, **kwargs):
     if ax is None:
         fig = plt.figure()
@@ -173,7 +210,7 @@ def run_sdpr_cal(r_p0s, C_p0s, r_ls, pixel_meass):
     print("Done")
 
 
-def run_theseus_cal(r_p0s, C_p0s, r_ls, pixel_meass):
+def run_theseus_cal_b(r_p0s, C_p0s, r_ls, pixel_meass):
     # Convert to tensor
     pixel_meass = torch.tensor(pixel_meass)
 
@@ -252,7 +289,61 @@ def run_theseus_cal(r_p0s, C_p0s, r_ls, pixel_meass):
         plt.show()
 
 
+def find_local_minima(N_batch=1):
+    r_p0s, C_p0s, r_ls, pixel_meass = get_cal_data(N_batch=N_batch,plot=False)
+    N_map = r_ls.shape[2]
+    # Convert to tensor
+    pixel_meass = torch.tensor(pixel_meass)
+    # generate parameterized camera
+    cam_torch = st.Camera(
+        f_u=torch.tensor(cam_gt.f_u, requires_grad=True),
+        f_v=torch.tensor(cam_gt.f_v, requires_grad=True),
+        c_u=torch.tensor(cam_gt.c_u, requires_grad=True),
+        c_v=torch.tensor(cam_gt.c_v, requires_grad=True),
+        b=torch.tensor(cam_gt.b, requires_grad=True),
+        sigma_u=cam_gt.sigma_u,
+        sigma_v=cam_gt.sigma_v,
+    )
+    # Get theseus layer
+    theseus_opts = {
+            "abs_err_tolerance": 1e-10,
+            "rel_err_tolerance": 1e-8,
+            "max_iterations": 100,
+        }
+    layer = st.build_theseus_layer(N_map=N_map, N_batch=N_batch,opt_kwargs_in=theseus_opts)
+    # invert the camera measurements
+    meas, weights = cam_torch.inverse(pixel_meass)
+    # Generate random initializations
+    r_p0s_init, C_p0s_init = get_random_inits(radius=2.0, N_batch=100, plot=False)
+    
+    losses, C_sols, r_sols = [], [], []
+    with torch.no_grad():    
+        for i in range(r_p0s_init.shape[0]):
+            theseus_inputs = {
+                    "C_p0s": C_p0s_init[[i],:,:],
+                    "r_p0s": r_p0s_init[[i],:,:],
+                    "r_ls": torch.tensor(r_ls),
+                    "meas": meas,
+                    "weights": weights,
+                }
+        
+            out, info = layer.forward(
+                theseus_inputs,
+                optimizer_kwargs={
+                    "track_best_solution": True,
+                    "verbose": True,
+                    "backward_mode": "implicit",
+                },
+            )
+            # TODO record optimal costs
+            
+            # TODO get optimal solutions
+            
+        
+
 if __name__ == "__main__":
     # Generate data
-    r_p0s, C_p0s, r_ls, pixel_meass = get_cal_data(plot=False)
-    run_theseus_cal(r_p0s, C_p0s, r_ls, pixel_meass)
+    # r_p0s, C_p0s, r_ls, pixel_meass = get_cal_data(plot=False)
+    # run_theseus_cal(r_p0s, C_p0s, r_ls, pixel_meass)
+    # run_sdpr_cal(r_p0s, C_p0s, r_ls, pixel_meass)
+    # r_p0s, C_p0s = get_random_inits(radius=2.0, N_batch=20, plot=True)
