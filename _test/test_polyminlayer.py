@@ -26,9 +26,12 @@ class TestPolyMin(unittest.TestCase):
         # Init values
         x_init = [-2.0, 5.0]
         poly = torch.tensor(self.poly)
-        opt_params = dict(lr=1e-3, grad_sq_tol=1e-12, max_iter=10000, verbose=verbose)
+        opt_params = dict(
+            optimizer="lbfgs", grad_sq_tol=1e-10, max_iter=10000, verbose=verbose
+        )
+        # opt_params = dict(optimizer="sgd",lr=1e-3, grad_sq_tol=1e-12, max_iter=10000, verbose=verbose)
         # define layer and run local optimization
-        layer = PolyMinLayer(opt_params=opt_params)
+        layer = PolyMinLayer(opt_params={"verbose": verbose})
         with torch.no_grad():
             x_min_1 = layer.forward(poly, x_init[0])
             x_min_2 = layer.forward(poly, x_init[1])
@@ -50,7 +53,10 @@ class TestPolyMin(unittest.TestCase):
     def test_backward(self, verbose=False):
         # Init values
         poly = torch.tensor(self.poly, requires_grad=True)
-        opt_params = dict(lr=1e-3, grad_sq_tol=1e-12, max_iter=10000, verbose=verbose)
+        # opt_params = dict(optimizer="sgd",lr=1e-3, grad_sq_tol=1e-12, max_iter=10000, verbose=verbose)
+        opt_params = dict(
+            optimizer="lbfgs", grad_sq_tol=1e-10, max_iter=10000, verbose=verbose
+        )
         # define layer and run local optimization
         layer = PolyMinLayer(opt_params=opt_params)
 
@@ -65,7 +71,10 @@ class TestPolyMin(unittest.TestCase):
     def test_integrated(self, verbose=False):
         # Init values
         poly = torch.tensor(self.poly, requires_grad=True)
-        opt_params = dict(lr=1e-3, grad_sq_tol=1e-12, max_iter=10000, verbose=verbose)
+        # opt_params = dict(optimizer="sgd",lr=1e-3, grad_sq_tol=1e-12, max_iter=10000, verbose=verbose)
+        opt_params = dict(
+            optimizer="lbfgs", grad_sq_tol=1e-10, max_iter=10000, verbose=verbose
+        )
         # define layer and run local optimization
         layer = PolyMinLayer(opt_params=opt_params)
 
@@ -83,4 +92,5 @@ class TestPolyMin(unittest.TestCase):
 if __name__ == "__main__":
     test = TestPolyMin()
     # test.test_forward(verbose=True, plot=True)
+    # test.test_backward(verbose=False)
     test.test_integrated(verbose=True)
