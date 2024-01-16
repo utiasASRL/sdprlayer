@@ -1,12 +1,12 @@
-from contextlib import AbstractContextManager
-from typing import Any
-import numpy as np
-import torch
-import unittest
+import os
+
 import matplotlib.pyplot as plt
+import numpy as np
+from pickle import dump, load
+import torch
+
+from mwcerts.stereo_problems import skew
 import sdprlayer.stereo_tuner as st
-from mwcerts.stereo_problems import Localization, skew
-from sdprlayer import SDPRLayer
 
 
 # Define camera ground truth
@@ -15,12 +15,17 @@ cam_gt = st.Camera(
     f_v=484.5,
     c_u=0.0,
     c_v=0.0,
-    b=0.7,
-    sigma_u=0.5 * 0,
-    sigma_v=0.5 * 0,
+    b=0.24,
+    sigma_u=0.5,
+    sigma_v=0.5,
 )
 
 torch.set_default_dtype(torch.float64)
+
+
+def set_seed(seed):
+    np.random.seed(seed)
+    torch.manual_seed(seed)
 
 
 def get_cal_data(
@@ -29,14 +34,12 @@ def get_cal_data(
     offs=np.array([[0, 0, 2]]).T,  # offset between poses and landmarks
     n_turns=0.2,  # (circle) number of turns around the cluster
     board_dims=np.array([0.3, 0.3]),  # width and height of calibration board
-    N_squares=np.array(
-        [10, 10]
-    ),  # number of squares in calibration board (width, height)
+    N_squares=[10, 10],  # number of squares in calibration board (width, height)
     plot=False,
 ):
     """Generate Ground truth pose and landmark data. Also generate pixel measurements"""
     # Ground Truth Map Points
-    sq_size = board_dims / N_squares
+    sq_size = board_dims / np.array(N_squares)
     r_l = []
     for i in range(N_squares[0]):
         for j in range(N_squares[1]):
@@ -150,7 +153,12 @@ def plot_poses(R_cw, t_cw_w, ax=None, **kwargs):
         directions = R_cw[i].T
 
         for j in range(3):
-            ax.quiver(*origin, *directions[:, j], color=["r", "g", "b"][j])
+            if "color" in kwargs:
+                ax.quiver(*origin, *directions[:, j], **kwargs)
+            else:
+                ax.quiver(
+                    *origin, *directions[:, j], color=["r", "g", "b"][j], **kwargs
+                )
 
 
 def plot_pixel_meas(pixel_meas, ax=None, **kwargs):
@@ -173,7 +181,7 @@ def plot_map(r_l, ax=None, **kwargs):
         fig = plt.figure()
         ax = fig.add_subplot(111, projection="3d")
 
-    ax.scatter(*r_l, ".", color="k")
+    ax.plot(*r_l, ".", color="k")
 
 
 def run_sdpr_cal(r_p0s, C_p0s, r_ls, pixel_meass):
@@ -195,7 +203,7 @@ def run_sdpr_cal(r_p0s, C_p0s, r_ls, pixel_meass):
     term_crit = {"max_iter": 2000, "tol_grad_sq": 1e-12, "tol_loss": 1e-12}
 
     # Run Tuner
-    iter_info = st.tune_stereo_params(
+    iter_info = st.tune_stereo_params_sdpr(
         cam_torch=cam_torch,
         params=params,
         opt=opt,
@@ -207,24 +215,114 @@ def run_sdpr_cal(r_p0s, C_p0s, r_ls, pixel_meass):
         verbose=True,
     )
 
-    print("Done")
+
+# Comparison scripts
 
 
-def run_theseus_cal_b(r_p0s, C_p0s, r_ls, pixel_meass):
+def tune_baseline_theseus(local=True):
+    """Comparison of baseline tunings when inner optimization starts
+    from either local or global minimum"""
+    # load data
+    folder = os.path.dirname(os.path.realpath(__file__))
+    folder = os.path.join(folder, "outputs")
+    prob_data = load(open(folder + "/stereo_cal_local_min_init.pkl", "rb"))
+    r_p0s = prob_data["r_p0s"]
+    C_p0s = prob_data["C_p0s"]
+    r_ls = torch.tensor(prob_data["r_ls"])
+    r_ls.unsqueeze_(0)  # add batch dimension
+    pixel_meass = prob_data["pixel_meass"]
+    if local:
+        r_p0s_init = prob_data["r_p0s_init_l"].unsqueeze(0)
+        C_p0s_init = prob_data["C_p0s_init_l"].unsqueeze(0)
+    else:
+        r_p0s_init = prob_data["r_p0s_init_g"].unsqueeze(0)
+        C_p0s_init = prob_data["C_p0s_init_g"].unsqueeze(0)
+    cam_torch = prob_data["cam_torch"]
+
+    # Define parameter and learning rate
+    params = [cam_torch.b]
+
+    opt = torch.optim.Adam(params, lr=1e-2, betas=(0.7, 0.999))
+    # Termination criteria
+    term_crit = {
+        "max_iter": 500,
+        "tol_grad_sq": 1e-10,
+        "tol_loss": 1e-10,
+    }
+    opt_kwargs = {
+        "abs_err_tolerance": 1e-10,
+        "rel_err_tolerance": 1e-8,
+        "max_iterations": 100,
+    }
+    # Run Tuner
+    iter_info = st.tune_stereo_params_theseus(
+        cam_torch=cam_torch,
+        params=params,
+        opt=opt,
+        term_crit=term_crit,
+        r_p0s_gt=r_p0s,
+        C_p0s_gt=C_p0s,
+        r_ls=r_ls,
+        pixel_meass=pixel_meass,
+        r_p0s_init=r_p0s_init,
+        C_p0s_init=C_p0s_init,
+        verbose=True,
+        opt_kwargs=opt_kwargs,
+    )
+
+    return iter_info
+
+
+def tune_baseline_sdpr():
+    # load data
+    folder = os.path.dirname(os.path.realpath(__file__))
+    folder = os.path.join(folder, "outputs")
+    prob_data = load(open(folder + "/stereo_cal_local_min_init.pkl", "rb"))
+    r_p0s = prob_data["r_p0s"]
+    C_p0s = prob_data["C_p0s"]
+    r_ls = prob_data["r_ls"]
+    pixel_meass = prob_data["pixel_meass"]
+    cam_torch = prob_data["cam_torch"]
+
+    # Define parameter and learning rate
+    params = [cam_torch.b]
+
+    opt = torch.optim.Adam(params, lr=1e-2, betas=(0.9, 0.999))
+    # Termination criteria
+    term_crit = {
+        "max_iter": 500,
+        "tol_grad_sq": 1e-10,
+        "tol_loss": 1e-10,
+    }
+    # Run Tuner
+    iter_info = st.tune_stereo_params_sdpr(
+        cam_torch=cam_torch,
+        params=params,
+        opt=opt,
+        term_crit=term_crit,
+        r_p0s_gt=r_p0s,
+        C_p0s_gt=C_p0s,
+        r_ls=r_ls,
+        pixel_meass=pixel_meass,
+        verbose=True,
+    )
+
+    return iter_info
+
+
+def tune_baseline(tuner="spdr", N_batch=20):
+    set_seed(0)
+    # Generate data
+    offs = np.array([[0, 0, 3]]).T
+    r_p0s, C_p0s, r_ls, pixel_meass = get_cal_data(
+        offs=offs, board_dims=[0.6, 1.0], N_squares=[8, 8], N_batch=N_batch, plot=False
+    )
+    r_p0s = torch.tensor(r_p0s)
+    C_p0s = torch.tensor(C_p0s)
+    r_ls = torch.tensor(r_ls)
+    N_map = r_ls.shape[2]
     # Convert to tensor
     pixel_meass = torch.tensor(pixel_meass)
-
-    # dictionary of paramter test values
-    param_dict = {
-        "b": dict(
-            offs=1,
-            lr=5e-3,
-            tol_grad_sq=1e-10,
-            atol=2e-3,
-            atol_nonoise=1e-5,
-        ),
-    }
-
     # generate parameterized camera
     cam_torch = st.Camera(
         f_u=torch.tensor(cam_gt.f_u, requires_grad=True),
@@ -235,38 +333,44 @@ def run_theseus_cal_b(r_p0s, C_p0s, r_ls, pixel_meass):
         sigma_u=cam_gt.sigma_u,
         sigma_v=cam_gt.sigma_v,
     )
-    optim = "LBFGS"
-    for key, tune_params in param_dict.items():
-        # Add offset to torch param
-        getattr(cam_torch, key).data += tune_params["offs"]
-        # Define parameter and learning rate
-        params = [getattr(cam_torch, key)]
-        if optim == "Adam":
-            opt = torch.optim.Adam(params, lr=tune_params["lr"])
-        elif optim == "LBFGS":
-            if key == "b":
-                lr = 1e-1
-            else:
-                lr = 10
-            opt = torch.optim.LBFGS(
-                params,
-                history_size=50,
-                tolerance_change=1e-16,
-                tolerance_grad=1e-16,
-                lr=lr,
-                max_iter=1,
-                line_search_fn="strong_wolfe",
-            )
-        # Termination criteria
-        term_crit = {
-            "max_iter": 500,
-            "tol_grad_sq": 1e-14,
-            "tol_loss": 1e-10,
-        }
+
+    # Define parameter to tune
+    params = [cam_torch.b]
+    # Define optimizer
+    opt = torch.optim.Adam(params, lr=1e-3, betas=(0.9, 0.999))
+    # Termination criteria
+    term_crit = {
+        "max_iter": 500,
+        "tol_grad_sq": 1e-10,
+        "tol_loss": 1e-10,
+    }
+    # Run Tuner
+    if tuner == "spdr":
+        iter_info = st.tune_stereo_params_sdpr(
+            cam_torch=cam_torch,
+            params=params,
+            opt=opt,
+            term_crit=term_crit,
+            r_p0s_gt=r_p0s,
+            C_p0s_gt=C_p0s,
+            r_ls=r_ls,
+            pixel_meass=pixel_meass,
+            verbose=True,
+        )
+    else:
+        # Generate random initializations
+        radius = np.linalg.norm(offs)
+        r_p0s_init, C_p0s_init = get_random_inits(
+            radius=radius, N_batch=N_batch, plot=False
+        )
+        r_p0s_init = torch.tensor(r_p0s_init)
+        C_p0s_init = torch.tensor(C_p0s_init)
+        # opt parameters
         opt_kwargs = {
             "abs_err_tolerance": 1e-10,
             "rel_err_tolerance": 1e-8,
             "max_iterations": 100,
+            "step_size": 0.5,
         }
         # Run Tuner
         iter_info = st.tune_stereo_params_theseus(
@@ -278,19 +382,79 @@ def run_theseus_cal_b(r_p0s, C_p0s, r_ls, pixel_meass):
             C_p0s_gt=C_p0s,
             r_ls=r_ls,
             pixel_meass=pixel_meass,
+            r_p0s_init=r_p0s_init,
+            C_p0s_init=C_p0s_init,
             verbose=True,
             opt_kwargs=opt_kwargs,
         )
 
-        plt.figure()
-        plt.plot(iter_info["loss"])
-        plt.ylabel("Loss")
-        plt.xlabel("Iteration")
-        plt.show()
+    return iter_info
 
 
-def find_local_minima(N_batch=1):
-    r_p0s, C_p0s, r_ls, pixel_meass = get_cal_data(N_batch=N_batch,plot=False)
+def compare_tune_baseline(N_batch=20):
+    """Compare tuning of baseline parameters with SDPR and Theseus.
+    Use actual batch of measurements"""
+    info_s = tune_baseline("spdr", N_batch=N_batch)
+    info_l = tune_baseline("theseus", N_batch=N_batch)
+
+    # Plot loss
+    plt.figure()
+    plt.plot(info_l["loss"], label="Theseus")
+    plt.plot(info_s["loss"], label="SDPR")
+    plt.ylabel("Loss")
+    plt.xlabel("Iteration")
+    plt.legend()
+
+    # Plot parameter values
+    plt.figure()
+    plt.plot(info_l["params"], label="Theseus")
+    plt.plot(info_s["params"], label="SDPR")
+    plt.ylabel("Baseline Value")
+    plt.xlabel("Iteration")
+    plt.legend()
+    plt.show()
+    print("Done")
+
+
+def compare_tune_baseline_single():
+    """Compare tuning of baseline parameters with SDPR and Theseus.
+    Use a single currated inner opttimization with local and global min"""
+    info_s = tune_baseline_sdpr()
+    info_g = tune_baseline_theseus(local=False)
+    info_l = tune_baseline_theseus(local=True)
+
+    # Plot loss
+    plt.figure()
+    plt.plot(info_l["loss"], label="Local init")
+    plt.plot(info_g["loss"], label="Global init")
+    plt.plot(info_s["loss"], label="SDPR")
+    plt.ylabel("Loss")
+    plt.xlabel("Iteration")
+    plt.legend()
+
+    # Plot parameter values
+    plt.figure()
+    plt.plot(info_l["params"], label="Local init")
+    plt.plot(info_g["params"], label="Global init")
+    plt.plot(info_s["params"], label="SDPR")
+    plt.ylabel("Baseline Value")
+    plt.xlabel("Iteration")
+    plt.legend()
+    plt.show()
+    print("Done")
+
+
+def find_local_minima(N_inits=100, store_data=False):
+    set_seed(0)
+
+    # Generate data
+    offs = np.array([[0, 0, 3]]).T
+    r_p0s, C_p0s, r_ls, pixel_meass = get_cal_data(
+        offs=offs, board_dims=[0.6, 1.0], N_squares=[8, 8], N_batch=1, plot=False
+    )
+    r_p0s = torch.tensor(r_p0s)
+    C_p0s = torch.tensor(C_p0s)
+    r_ls = torch.tensor(r_ls)
     N_map = r_ls.shape[2]
     # Convert to tensor
     pixel_meass = torch.tensor(pixel_meass)
@@ -306,40 +470,91 @@ def find_local_minima(N_batch=1):
     )
     # Get theseus layer
     theseus_opts = {
-            "abs_err_tolerance": 1e-10,
-            "rel_err_tolerance": 1e-8,
-            "max_iterations": 100,
-        }
-    layer = st.build_theseus_layer(N_map=N_map, N_batch=N_batch,opt_kwargs_in=theseus_opts)
+        "abs_err_tolerance": 1e-10,
+        "rel_err_tolerance": 1e-8,
+        "max_iterations": 100,
+    }
+    layer = st.build_theseus_layer(
+        N_map=N_map, N_batch=N_inits, opt_kwargs_in=theseus_opts
+    )
     # invert the camera measurements
     meas, weights = cam_torch.inverse(pixel_meass)
     # Generate random initializations
-    r_p0s_init, C_p0s_init = get_random_inits(radius=2.0, N_batch=100, plot=False)
-    
-    losses, C_sols, r_sols = [], [], []
-    with torch.no_grad():    
-        for i in range(r_p0s_init.shape[0]):
-            theseus_inputs = {
-                    "C_p0s": C_p0s_init[[i],:,:],
-                    "r_p0s": r_p0s_init[[i],:,:],
-                    "r_ls": torch.tensor(r_ls),
-                    "meas": meas,
-                    "weights": weights,
-                }
-        
-            out, info = layer.forward(
-                theseus_inputs,
-                optimizer_kwargs={
-                    "track_best_solution": True,
-                    "verbose": True,
-                    "backward_mode": "implicit",
-                },
-            )
-            # TODO record optimal costs
-            
-            # TODO get optimal solutions
-            
-        
+    radius = np.linalg.norm(offs)
+    r_p0s_init, C_p0s_init = get_random_inits(
+        radius=radius, N_batch=N_inits, plot=False
+    )
+    r_p0s_init = torch.tensor(r_p0s_init)
+    C_p0s_init = torch.tensor(C_p0s_init)
+
+    with torch.no_grad():
+        # Set initializations and measurements
+        theseus_inputs = {
+            "C_p0s": C_p0s_init,
+            "r_p0s": r_p0s_init[:, :, 0],
+            "r_ls": torch.tensor(r_ls),
+            "meas": meas,
+            "weights": weights,
+        }
+        # Run theseus
+        out, info = layer.forward(
+            theseus_inputs,
+            optimizer_kwargs={
+                "track_best_solution": True,
+                "verbose": True,
+                "backward_mode": "implicit",
+            },
+        )
+        # get optimal solutions
+        C_sols = out["C_p0s"]
+        r_sols = out["r_p0s"]
+        # record optimal costs
+        losses = info.best_err.detach().numpy()
+    C_sols = C_sols.detach().numpy()
+    r_sols = r_sols.detach().numpy()
+    # Show loss distribution
+    plt.figure()
+    plt.hist(losses)
+    plt.show()
+
+    # Plot final solutions
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection="3d")
+    plot_poses(C_sols, r_sols, ax=ax, alpha=0.2)
+    plot_poses(C_p0s, r_p0s, ax=ax, color="k")
+    plot_map(r_ls[0].detach().numpy(), ax=ax)
+
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    ax.set_zlabel("Z")
+    r = radius * 1.1
+    ax.set_xlim(-r, r)
+    ax.set_ylim(-r, r)
+    ax.set_zlim(-r, r)
+    plt.show()
+
+    # Find local minima
+    loss_min = np.min(losses)
+    ind_local = np.where(np.abs(losses - loss_min) > 20)[0]
+    ind_global = np.where(np.abs(losses - loss_min) < 20)[0]
+
+    # Store data
+    if store_data:
+        prob_data = dict(
+            cam_torch=cam_torch,
+            r_p0s=r_p0s,
+            C_p0s=C_p0s,
+            r_ls=r_ls,
+            pixel_meass=pixel_meass,
+            r_p0s_init_l=r_p0s_init[ind_local[0]],
+            C_p0s_init_l=C_p0s_init[ind_local[0]],
+            r_p0s_init_g=r_p0s_init[ind_global[0]],
+            C_p0s_init_g=C_p0s_init[ind_global[0]],
+        )
+        folder = os.path.dirname(os.path.realpath(__file__))
+        folder = os.path.join(folder, "outputs")
+        dump(prob_data, open(folder + "/stereo_cal_local_min_init.pkl", "wb"))
+
 
 if __name__ == "__main__":
     # Generate data
@@ -347,3 +562,6 @@ if __name__ == "__main__":
     # run_theseus_cal(r_p0s, C_p0s, r_ls, pixel_meass)
     # run_sdpr_cal(r_p0s, C_p0s, r_ls, pixel_meass)
     # r_p0s, C_p0s = get_random_inits(radius=2.0, N_batch=20, plot=True)
+    # find_local_minima(store_data=True)
+    compare_tune_baseline()
+    # compare_tune_baseline_single()

@@ -201,7 +201,9 @@ def get_data_mat(cam_torch: Camera, r_ls, pixel_meass):
         Q_es = []
         for i in range(meas.shape[-1]):
             W_ij = weights[b, i]
-            m_j0_0 = torch.tensor(r_ls[b, :, [i]].T)
+            m_j0_0 = r_ls[b, :, [i]]
+            if m_j0_0.shape == (1, 3):
+                m_j0_0 = m_j0_0.T
             y_ji_i = meas[b, :, [i]]
             # Define matrix
             Q_e = torch.zeros(13, 13, dtype=torch.double)
@@ -230,34 +232,34 @@ def get_data_mat(cam_torch: Camera, r_ls, pixel_meass):
 
 
 # Loss Function
-def get_loss_from_sols(Xs, r_p_in0, C_p0):
-    "Get ground truth loss over multiple solutions"
+def get_vars_from_mats(Xs):
+    "extract variables from SDP solution matrices"
     if Xs.ndim == 2:
         Xs = Xs.unsqueeze(0)
-    losses = []
-    for i in range(Xs.shape[0]):
-        losses += [get_loss_from_sol(Xs[i], r_p_in0[i], C_p0[i])]
-    loss = torch.stack(losses).sum()
-    return loss
+    # TODO should be able to vectorize this
+    r_p0s, C_p0s = [], []
+    for X in Xs:
+        # Check rank
+        sorted_eigs = np.sort(np.linalg.eigvalsh(X.detach().numpy()))
+        sorted_eigs = np.abs(sorted_eigs)
+        assert sorted_eigs[-1] / sorted_eigs[-2] > 1e5, "X is not rank-1"
+        # extract solutions
+        r_p0_inP = (X[10:, [0]] + X[[0], 10:].T) / 2.0
+        C_vec = (X[1:10, [0]] + X[[0], 1:10].T) / 2.0
+        C_p0 = C_vec.reshape((3, 3)).T
+        r_p0s += [C_p0.T @ r_p0_inP]
+        C_p0s += [C_p0]
+    r_p0s = torch.stack(r_p0s)
+    C_p0s = torch.stack(C_p0s)
+    return r_p0s, C_p0s
 
 
-def get_loss_from_sol(X, r_p_in0, C_p0):
-    "Get ground truth loss from solution"
-    # Check rank
-    sorted_eigs = np.sort(np.linalg.eigvalsh(X.detach().numpy()))
-    assert sorted_eigs[-1] / sorted_eigs[-2] > 1e4, "X is not rank-1"
-    # Convert to tensors
-    C_p0 = torch.tensor(C_p0, dtype=torch.float64)
-    r_p_in0 = torch.tensor(r_p_in0, dtype=torch.float64)
-    # Extract solution (assume Rank-1)
-    r = (X[10:, [0]] + X[[0], 10:].T) / 2.0
-    C_vec = (X[1:10, [0]] + X[[0], 1:10].T) / 2.0
-    C = C_vec.reshape((3, 3)).T
-    loss = (
-        torch.norm(r - C_p0 @ r_p_in0) ** 2
-        + torch.norm(C.T @ C_p0 - torch.eye(3), p="fro") ** 2
-    )
-    return loss
+def get_outer_loss(r_p0s, C_p0s, r_p0s_gt, C_p0s_gt):
+    "Outer optimization losses"
+    loss = torch.norm(r_p0s - r_p0s_gt) ** 2
+    C_diff = C_p0s.transpose(-2, -1) @ C_p0s_gt
+    loss += torch.norm(C_diff - torch.eye(3), p="fro") ** 2
+    return loss.sum()
 
 
 term_crit_def = {
@@ -282,8 +284,8 @@ def tune_stereo_params_sdpr(
     cam_torch: Camera,
     params,
     opt,
-    r_p0s,
-    C_p0s,
+    r_p0s_gt,
+    C_p0s_gt,
     r_ls,
     pixel_meass,
     term_crit=term_crit_def,
@@ -291,12 +293,12 @@ def tune_stereo_params_sdpr(
     solver="SCS",
 ):
     # Define a localization class to get the constraints
-    constraints_list = get_constraints(r_p0s, C_p0s, r_ls)
+    constraints_list = get_constraints(r_p0s_gt, C_p0s_gt, r_ls)
     # Build Layer
-    sdpr_layer = SDPRLayer(13, constraints=constraints_list, use_dual=True)
+    sdpr_layer = SDPRLayer(13, constraints=constraints_list, use_dual=False)
 
     # define closure
-    def closure_fcn():
+    def closure_inner():
         # zero grad
         opt.zero_grad()
         # generate loss
@@ -308,9 +310,14 @@ def tune_stereo_params_sdpr(
         else:
             raise ValueError("Invalid solver")
         Xs = sdpr_layer(Q, solver_args=solver_args)[0]
-        loss = get_loss_from_sols(Xs, r_p0s, C_p0s)
+        # Extract variables
+        r_p0s, C_p0s = get_vars_from_mats(Xs)
+        # Generate loss
+        loss = get_outer_loss(r_p0s, C_p0s, r_p0s_gt, C_p0s_gt)
         # backprop
         loss.backward()
+        # take a step
+        opt.step()
         return loss
 
     # Optimization loop
@@ -323,7 +330,7 @@ def tune_stereo_params_sdpr(
     iter_info = []
     loss = torch.tensor(np.inf)
     while grad_sq > tol_grad_sq and n_iter < max_iter and loss > tol_loss:
-        loss = opt.step(closure_fcn)
+        loss = closure_inner()
         loss_stored += [loss.item()]
         grad = np.vstack([p.grad for p in params])
         grad_sq = np.sum([g**2 for g in grad])
@@ -423,7 +430,7 @@ def build_theseus_layer(N_map, N_batch=1, opt_kwargs_in={}):
         for j in range(meas.shape[-1]):
             # get measurement
             meas_j = meas[:, :, j]
-            # get weight
+            # get weight (N_batch,N_map, 3, 3)
             W_ij = weights[:, j, :, :]
             W_ij_half = torch.linalg.cholesky(W_ij)
             # get measurement in camera frame (N_batch, 3)
@@ -458,7 +465,8 @@ def build_theseus_layer(N_map, N_batch=1, opt_kwargs_in={}):
         "max_iterations": 100,
     }
     opt_kwargs.update(opt_kwargs_in)
-    layer = th.TheseusLayer(th.GaussNewton(objective, **opt_kwargs))
+    # layer = th.TheseusLayer(th.GaussNewton(objective, **opt_kwargs))
+    layer = th.TheseusLayer(th.LevenbergMarquardt(objective, **opt_kwargs))
 
     return layer
 
@@ -473,19 +481,22 @@ def tune_stereo_params_theseus(
     pixel_meass,
     term_crit=term_crit_def,
     verbose=False,
-    init_at_gt=True,
+    r_p0s_init=None,
+    C_p0s_init=None,
     opt_kwargs={},
 ):
     # Get sizes
     N_map = r_ls.shape[-1]
-    N_batch = r_ls.shape[0]
+    N_batch = r_p0s_gt.shape[0]
 
     # Initialize optimization tensors
-    if init_at_gt:
-        r_vals = torch.tensor(r_p0s_gt, dtype=torch.double).squeeze(-1)
-        C_vals = torch.tensor(C_p0s_gt, dtype=torch.double)
+    if r_p0s_init is None:
+        r_p0s_init = torch.tensor(r_p0s_gt, dtype=torch.double).squeeze(-1)
+        C_p0s_init = torch.tensor(C_p0s_gt, dtype=torch.double)
     else:
-        raise ValueError("Not implemented")
+        assert r_p0s_init.shape == (N_batch, 3, 1)
+        r_p0s_init.squeeze_(-1)  # Remove last dimension
+        assert C_p0s_init.shape == (N_batch, 3, 3)
     r_p0s_gt = torch.tensor(r_p0s_gt, dtype=torch.double).squeeze(-1)
     C_p0s_gt = torch.tensor(C_p0s_gt, dtype=torch.double)
 
@@ -495,39 +506,42 @@ def tune_stereo_params_theseus(
     )
 
     # define closure function
-    def closure_fcn():
+    def step_inner(r_p0s_init, C_p0s_init):
         # zero grad
         opt.zero_grad()
         # invert the camera measurements
         meas, weights = cam_torch.inverse(pixel_meass)
 
         theseus_inputs = {
-            "C_p0s": C_vals,
-            "r_p0s": r_vals,
-            "r_ls": torch.tensor(r_ls),
+            "C_p0s": C_p0s_init,
+            "r_p0s": r_p0s_init,
+            "r_ls": r_ls,
             "meas": meas,
             "weights": weights,
         }
         # Run Forward pass
-        th_vars, info = theseus_layer.forward(
+        vars_th, info = theseus_layer.forward(
             theseus_inputs,
             optimizer_kwargs={
                 "track_best_solution": True,
-                "verbose": True,
+                "verbose": False,
                 "backward_mode": "implicit",
             },
         )
-        # Define loss with ground truth
-        loss = torch.tensor(0.0)
-        for i in range(N_batch):
-            loss += torch.norm(th_vars["r_p0s"][i] - r_p0s_gt[i]) ** 2
-            loss += (
-                torch.norm(C_p0s_gt[i].T @ th_vars["C_p0s"][i] - torch.eye(3), p="fro")
-                ** 2
-            )
+        # Get variables from theseus output
+        r_p0s = vars_th["r_p0s"]
+        C_p0s = vars_th["C_p0s"]
+        # Generate loss
+        loss = get_outer_loss(r_p0s, C_p0s, r_p0s_gt, C_p0s_gt)
         # backprop
         loss.backward()
-        return loss
+        # Take a step
+        opt.step()
+        # Update initialization vars
+        r_p0s_init = vars_th["r_p0s"].clone()
+        C_p0s_init = vars_th["C_p0s"].clone()
+
+        return loss, r_p0s_init, C_p0s_init
 
     # Optimization loop
     max_iter = term_crit["max_iter"]
@@ -539,8 +553,8 @@ def tune_stereo_params_theseus(
     iter_info = []
     loss = torch.tensor(np.inf)
     while grad_sq > tol_grad_sq and n_iter < max_iter and loss > tol_loss:
-        # Take a step
-        loss = opt.step(closure_fcn)
+        # Take a step update initialization
+        loss, r_p0s_init, C_p0s_init = step_inner(r_p0s_init, C_p0s_init)
         # Store loss
         loss_stored += [loss.item()]
         grad = np.vstack([p.grad for p in params])
@@ -556,6 +570,7 @@ def tune_stereo_params_theseus(
                 n_iter=n_iter,
             )
         ]
+
         n_iter += 1
 
     return pd.DataFrame(iter_info)
