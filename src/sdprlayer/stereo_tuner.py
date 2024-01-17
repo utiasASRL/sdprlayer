@@ -176,6 +176,12 @@ def get_prob_data(camera=Camera(), N_map=30, N_batch=1):
     pixel_meass = np.stack(pixel_meass)
     r_ls = np.stack(r_ls)
 
+    # Convert to torch tensors
+    r_p0s = torch.tensor(r_p0s)
+    C_p0s = torch.tensor(C_p0s)
+    r_ls = torch.tensor(r_ls)
+    pixel_meass = torch.tensor(pixel_meass)
+
     return r_p0s, C_p0s, r_ls, pixel_meass
 
 
@@ -199,6 +205,8 @@ def get_data_mat(cam_torch: Camera, r_ls, pixel_meass):
     c = slice(1, 10)
     t = slice(10, 13)
     Q_batch = []
+    scales = torch.zeros(N_batch, dtype=torch.double)
+    offsets = torch.zeros(N_batch, dtype=torch.double)
     for b in range(N_batch):
         Q_es = []
         for i in range(meas.shape[-1]):
@@ -224,13 +232,15 @@ def get_data_mat(cam_torch: Camera, r_ls, pixel_meass):
             # Add to overall matrix
             Q_es += [Q_e]
         Q = torch.stack(Q_es).sum(dim=0)
-        # Rescale
+        # remove constant offset
+        offsets[b] = Q[0, 0].clone()
         Q[0, 0] = 0.0
+        # Rescale
+        scales[b] = torch.norm(Q, p="fro")
         Q = Q / torch.norm(Q, p="fro")
-        Q[0, 0] = 1.0
         Q_batch += [Q]
 
-    return torch.stack(Q_batch)
+    return torch.stack(Q_batch), scales, offsets
 
 
 # Loss Function
@@ -306,23 +316,25 @@ def tune_stereo_params_sdpr(
         # zero grad
         opt.zero_grad()
         # generate loss
-        Q = get_data_mat(cam_torch, r_ls, pixel_meass)
+        Qs, scales, offsets = get_data_mat(cam_torch, r_ls, pixel_meass)
         if solver == "SCS":
-            solver_args = {"solve_method": "SCS", "eps": 1e-7}
+            solver_args = {"solve_method": "SCS", "eps": 1e-9}
         elif solver == "mosek":
             solver_args = {"solve_method": "mosek"}
         else:
             raise ValueError("Invalid solver")
-        Xs = sdpr_layer(Q, solver_args=solver_args)[0]
+        Xs = sdpr_layer(Qs, solver_args=solver_args)[0]
+        # Compute and store inner loss
+        loss_inner = torch.vmap(torch.trace)(Xs @ Qs) * scales + offsets
         # Extract variables
         r_p0s, C_p0s = get_vars_from_mats(Xs)
         # Generate loss
-        loss = get_outer_loss(r_p0s, C_p0s, r_p0s_gt, C_p0s_gt)
+        loss_outer = get_outer_loss(r_p0s, C_p0s, r_p0s_gt, C_p0s_gt)
         # backprop
-        loss.backward()
+        loss_outer.backward()
         # take a step
         opt.step()
-        return loss, r_p0s, C_p0s
+        return loss_outer, loss_inner, r_p0s, C_p0s
 
     # Optimization loop
     max_iter = term_crit["max_iter"]
@@ -335,9 +347,9 @@ def tune_stereo_params_sdpr(
     loss = torch.tensor(np.inf)
     while grad_sq > tol_grad_sq and n_iter < max_iter and loss > tol_loss:
         start = time()
-        loss, r_p0s, C_p0s = closure()
+        loss_outer, loss_inner, r_p0s, C_p0s = closure()
         stop = time()
-        loss_stored += [loss.item()]
+        loss_stored += [loss_outer.item()]
         grad = np.vstack([p.grad for p in params])
         grad_sq = np.sum([g**2 for g in grad])
         if verbose:
@@ -350,6 +362,7 @@ def tune_stereo_params_sdpr(
                 grad_sq=grad_sq,
                 n_iter=n_iter,
                 solution=(r_p0s, C_p0s),
+                loss_inner=loss_inner.item(),
                 time_inner=stop - start,
             )
         ]
@@ -389,7 +402,8 @@ def build_theseus_layer(N_map, N_batch=1, opt_kwargs_in={}):
             meas_j = meas[:, :, j]
             # get weight (N_batch,N_map, 3, 3)
             W_ij = weights[:, j, :, :]
-            W_ij_half = torch.linalg.cholesky(W_ij)
+            # NOTE we want the transpose of the cholesky factor
+            W_ij_half = torch.linalg.cholesky(W_ij).transpose(-2, -1)
             # get measurement in camera frame (N_batch, 3)
             r_jp_in0 = r_ls.tensor[:, :, j] - r_p0s.tensor
             r_jp_inp = torch.einsum("bij,bj->bi", C_p0s.tensor, r_jp_in0)
@@ -410,15 +424,15 @@ def build_theseus_layer(N_map, N_batch=1, opt_kwargs_in={}):
         dim=N_map * 3,
         err_fn=error_fn,
         aux_vars=aux_vars,
-        cost_weight=th.ScaleCostWeight(1.0),
+        cost_weight=th.ScaleCostWeight(np.sqrt(2)),
         name="registration_cost",
     )
     objective.add(cost_function)
 
     # Build layer
     opt_kwargs = {
-        "abs_err_tolerance": 1e-14,
-        "rel_err_tolerance": 1e-14,
+        "abs_err_tolerance": 1e-8,
+        "rel_err_tolerance": 1e-8,
         "max_iterations": 100,
     }
     opt_kwargs.update(opt_kwargs_in)

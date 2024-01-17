@@ -249,8 +249,8 @@ def tune_baseline_theseus_single(local=True):
         "tol_loss": 1e-10,
     }
     opt_kwargs = {
-        "abs_err_tolerance": 1e-12,
-        "rel_err_tolerance": 1e-14,
+        "abs_err_tolerance": 1e-10,
+        "rel_err_tolerance": 1e-8,
         "max_iterations": 300,
         "step_size": 0.2,
     }
@@ -287,7 +287,7 @@ def tune_baseline_sdpr_single():
     # Define parameter and learning rate
     params = [cam_torch.b]
 
-    opt = torch.optim.SGD(params, lr=2e-5)
+    opt = torch.optim.SGD(params, lr=1e-5)
     # Termination criteria
     term_crit = {
         "max_iter": 15,
@@ -342,18 +342,19 @@ def compare_tune_baseline_single_pp():
     axs[0, 0].set_title("Outer Loss")
     axs[0, 0].legend()
 
-    # axs[1, 0].plot(info_l["loss_inner"], "-o", label="Theseus (local init)")
-    # axs[1, 0].plot(info_g["loss_inner"], "-o", label="Theseus (global init)")
-    # axs[1, 0].set_title("Inner Loss")
-    # axs[1, 0].set_xlabel("Iteration")
-    # axs[1, 0].legend()
-    axs[1, 0].plot(info_l["grad_sq"], "-o", label="Theseus (local init)")
-    axs[1, 0].plot(info_g["grad_sq"], "-o", label="Theseus (global init)")
-    axs[1, 0].plot(info_s["grad_sq"], "-o", label="SDPR")
-    axs[1, 0].set_title("Gradient Squared")
-    axs[1, 0].set_yscale("log")
+    axs[1, 0].plot(info_l["loss_inner"], "-o", label="Theseus (local init)")
+    axs[1, 0].plot(info_g["loss_inner"], "-o", label="Theseus (global init)")
+    axs[1, 0].plot(info_s["loss_inner"], "-o", label="SDPR")
+    axs[1, 0].set_title("Inner Loss")
     axs[1, 0].set_xlabel("Iteration")
     axs[1, 0].legend()
+    # axs[1, 0].plot(info_l["grad_sq"], "-o", label="Theseus (local init)")
+    # axs[1, 0].plot(info_g["grad_sq"], "-o", label="Theseus (global init)")
+    # axs[1, 0].plot(info_s["grad_sq"], "-o", label="SDPR")
+    # axs[1, 0].set_title("Gradient Squared")
+    # axs[1, 0].set_yscale("log")
+    # axs[1, 0].set_xlabel("Iteration")
+    # axs[1, 0].legend()
 
     # Plot parameter values
     axs[0, 1].plot(info_l["params"], "-o", label="Theseus (local init)")

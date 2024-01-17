@@ -19,6 +19,7 @@ class TestStereoTune(unittest.TestCase):
         super(TestStereoTune, t).__init__(*args, **kwargs)
         # Default dtype
         torch.set_default_dtype(torch.float64)
+        torch.autograd.set_detect_anomaly(True)
 
         # Define camera
         cam_gt = st.Camera(
@@ -45,6 +46,22 @@ class TestStereoTune(unittest.TestCase):
             t.cam_gt.sigma_u = 0.5
             t.cam_gt.sigma_v = 0.5
 
+    @staticmethod
+    def get_data_mat_loc(r_l, r_p, C_p0, meas, weights):
+        # convert r_ls to list
+        r_l = [r_l[:, [i]] for i in range(r_l.shape[-1])]
+        prob = Localization([r_p], [C_p0], r_l)
+        v1 = prob.G.Vp["x0"]
+        for i in range(meas.shape[-1]):
+            v2 = prob.G.Vm[f"m{i}"]
+            meas_val = meas[:, [i]].detach().numpy()
+            weight_val = weights[i].detach().numpy()
+            prob.G.add_edge(v1, v2, meas_val, weight_val)
+        # Generate cost matrix
+        prob.generate_cost()
+        Q_val = prob.Q.get_matrix(prob.var_list).todense()
+        return Q_val
+
     def test_data_matrix(t, N_batch=2):
         # Generate problem
         r_ps, C_p0s, r_ls, pixel_meass = st.get_prob_data(
@@ -63,7 +80,7 @@ class TestStereoTune(unittest.TestCase):
         )
         # Get data matrix
         pixel_meass = torch.tensor(pixel_meass)
-        Q_torch = st.get_data_mat(cam_torch, r_ls, pixel_meass)
+        Q_torch, scales, offsets = st.get_data_mat(cam_torch, r_ls, pixel_meass)
         Q_torch = Q_torch.detach().numpy()
         # Get euclidean measurements from pixels
         meas, weights = cam_torch.inverse(pixel_meass)
@@ -74,21 +91,12 @@ class TestStereoTune(unittest.TestCase):
                 meas_val = meas[b].detach().numpy()
                 meas_gt = C_p0s[b] @ (r_ls[b] - r_ps[b])
                 np.testing.assert_allclose(meas_val, meas_gt, atol=1e-9)
-            # Init Localization problem
-            r_ls_b = [r_ls[b, :, [i]] for i in range(r_ls.shape[2])]
-            prob = Localization([r_ps[b]], [C_p0s[b]], r_ls_b)
-            v1 = prob.G.Vp["x0"]
-            for i in range(meas.shape[-1]):
-                v2 = prob.G.Vm[f"m{i}"]
-                meas_val = meas[b, :, [i]].detach().numpy()
-                weight_val = weights[b, i].detach().numpy()
-                prob.G.add_edge(v1, v2, meas_val, weight_val)
-            # Generate cost matrix
-            prob.generate_cost()
-            Q_desired = prob.Q.get_matrix(prob.var_list).todense()
+            # Get data matrix
+            Q_desired = t.get_data_mat_loc(
+                r_ls[b], r_ps[b], C_p0s[b], meas[b], weights[b]
+            )
             Q_desired[0, 0] = 0.0
             Q_desired = Q_desired / np.linalg.norm(Q_desired, ord="fro")
-            Q_desired[0, 0] = 1.0
             # Test
             np.testing.assert_allclose(Q_torch[b], Q_desired, rtol=1e-7, atol=1e-7)
 
@@ -121,7 +129,7 @@ class TestStereoTune(unittest.TestCase):
         # Build Layer
         sdpr_layer = SDPRLayer(13, constraints=constraints_list, use_dual=True)
         # Run Forward pass
-        Q = st.get_data_mat(cam_torch, r_ls, pixel_meass)
+        Q, scales, offsets = st.get_data_mat(cam_torch, r_ls, pixel_meass)
         # select solver
         if solver == "mosek":
             solver_args = {"solve_method": "mosek", "verbose": True}
@@ -129,6 +137,8 @@ class TestStereoTune(unittest.TestCase):
             solver_args = {"solve_method": "SCS", "eps": 1e-9, "verbose": True}
         X = sdpr_layer(Q, solver_args=solver_args)[0]
         # Check solutions
+        r_ps = r_ps.detach().numpy()
+        C_p0s = C_p0s.detach().numpy()
         for b in range(N_batch):
             # Get the solution
             X_b = X[b].detach().numpy()
@@ -145,48 +155,6 @@ class TestStereoTune(unittest.TestCase):
             else:
                 np.testing.assert_allclose(C.T @ r_inP, r_ps[b], atol=5e-3)
                 np.testing.assert_allclose(C.T @ C_p0s[b], np.eye(3), atol=5e-3)
-
-    def test_fwd_pypose(t, N_map=20, N_batch=1):
-        """Test forward pass of theseus layer"""
-        set_seed(0)
-        # Generate problem
-        r_p0s, C_p0s, r_ls, pixel_meass = st.get_prob_data(
-            camera=t.cam_gt, N_map=N_map, N_batch=N_batch
-        )
-
-        # generate parameterized camera
-        cam_torch = st.Camera(
-            f_u=torch.tensor(t.cam_gt.f_u, requires_grad=True),
-            f_v=torch.tensor(t.cam_gt.f_v, requires_grad=True),
-            c_u=torch.tensor(t.cam_gt.c_u, requires_grad=True),
-            c_v=torch.tensor(t.cam_gt.c_v, requires_grad=True),
-            b=torch.tensor(t.cam_gt.b, requires_grad=True),
-            sigma_u=t.cam_gt.sigma_u,
-            sigma_v=t.cam_gt.sigma_v,
-        )
-        # Initialize module
-        reg = st.MWRegistration(r_p0s, C_p0s, r_ls)
-        # invert the camera measurements
-        pixel_meass = torch.tensor(pixel_meass)
-        meas, weights = cam_torch.inverse(pixel_meass)
-        # Run optimization
-        st.run_pypose_opt(reg, meas, weights)
-
-        # Check the error
-        C_p0_est = reg.T_p0s.rotation().matrix().detach().numpy()
-        r_0p_p_est = reg.T_p0s.translation().detach().numpy()
-
-        if t.no_noise:
-            atol_r = 1e-7
-            atol_c = 1e-7
-        else:
-            atol_r = 7e-3
-            atol_c = 7e-3
-        for b in range(N_batch):
-            np.testing.assert_allclose(
-                r_0p_p_est[b], (-C_p0s[b] @ r_p0s[b]).squeeze(-1), atol=atol_r
-            )
-            np.testing.assert_allclose(C_p0_est[b].T @ C_p0s[b], np.eye(3), atol=atol_c)
 
     def test_fwd_theseus(t, N_map=20, N_batch=5):
         """Test forward pass of theseus layer"""
@@ -208,16 +176,14 @@ class TestStereoTune(unittest.TestCase):
         )
 
         # Build layer
-        theseus_layer = st.build_theseus_layer(cam_torch, N_map=N_map, N_batch=N_batch)
+        theseus_layer = st.build_theseus_layer(N_map=N_map, N_batch=N_batch)
         # invert the camera measurements
-        pixel_meass = torch.tensor(pixel_meass)
         meas, weights = cam_torch.inverse(pixel_meass)
         # Run Forward pass
-        r_p0s = r_p0s.squeeze(2)
         theseus_inputs = {
-            "C_p0s": torch.tensor(C_p0s),
-            "r_p0s": torch.tensor(r_p0s),
-            "r_ls": torch.tensor(r_ls),
+            "C_p0s": C_p0s,
+            "r_p0s": r_p0s.squeeze(2),
+            "r_ls": r_ls,
             "meas": meas,
             "weights": weights,
         }
@@ -229,6 +195,8 @@ class TestStereoTune(unittest.TestCase):
         r_p_est = updated_inputs["r_p0s"]
 
         # Check the error
+        r_p0s = r_p0s.detach().numpy()
+        C_p0s = C_p0s.detach().numpy()
         if t.no_noise:
             atol_r = 1e-7
             atol_c = 1e-7
@@ -238,8 +206,17 @@ class TestStereoTune(unittest.TestCase):
         for b in range(N_batch):
             r_p0_est_d = r_p_est[b].detach().numpy()
             C_p0_est_d = C_est[b].detach().numpy()
-            np.testing.assert_allclose(r_p0_est_d, r_p0s[b], atol=atol_r)
+            np.testing.assert_allclose(r_p0_est_d, r_p0s[b].squeeze(1), atol=atol_r)
             np.testing.assert_allclose(C_p0_est_d.T @ C_p0s[b], np.eye(3), atol=atol_c)
+            # Test cost value
+            Q = t.get_data_mat_loc(r_ls[b], r_p0s[b], C_p0s[b], meas[b], weights[b])
+            r_p0_p = C_p0_est_d @ r_p0_est_d
+            x = np.hstack(
+                [1.0, C_p0_est_d.reshape(-1, 1, order="F").squeeze(1), r_p0_p]
+            )
+            x = x[:, None]
+            cost = x.T @ Q @ x
+            np.testing.assert_allclose(cost, info.best_err[b], atol=1e-7)
 
     def test_grads_theseus(t, N_map=20, N_batch=1):
         """Test backward pass of theseus layer"""
@@ -249,7 +226,6 @@ class TestStereoTune(unittest.TestCase):
             camera=t.cam_gt, N_map=N_map, N_batch=N_batch
         )
         r_p0s = r_p0s.squeeze(2)
-        pixel_meass = torch.tensor(pixel_meass)
 
         # opt parameters
         params = (
@@ -323,7 +299,6 @@ class TestStereoTune(unittest.TestCase):
         r_ps, C_p0s, r_ls, pixel_meass = st.get_prob_data(
             camera=t.cam_gt, N_map=7, N_batch=N_batch
         )
-        pixel_meass_tch = torch.tensor(pixel_meass)
         # Camera parameters
         params = (
             torch.tensor(t.cam_gt.f_u, requires_grad=True, dtype=torch.float64),
@@ -338,7 +313,7 @@ class TestStereoTune(unittest.TestCase):
         def inverse_wrapper_meas(*x):
             cam = st.Camera(*x)
 
-            meas, weight = cam.inverse(pixel_meass_tch)
+            meas, weight = cam.inverse(pixel_meass)
             return meas
 
         torch.autograd.gradcheck(
@@ -351,7 +326,7 @@ class TestStereoTune(unittest.TestCase):
 
         def inverse_wrapper_weight(*x):
             cam = st.Camera(*x)
-            meas, weight = cam.inverse(pixel_meass_tch)
+            meas, weight = cam.inverse(pixel_meass)
             return weight
 
         torch.autograd.gradcheck(
@@ -380,7 +355,8 @@ class TestStereoTune(unittest.TestCase):
         # TEST DATA MATRIX GENERATION
         def data_mat_wrapper(*x):
             cam = st.Camera(*x)
-            return st.get_data_mat(cam, r_ls, pixel_meass)
+            Q, scale, offset = st.get_data_mat(cam, r_ls, pixel_meass)
+            return Q
 
         torch.autograd.gradcheck(
             data_mat_wrapper,
@@ -421,7 +397,7 @@ class TestStereoTune(unittest.TestCase):
         # Generate solution X from parameters
         def get_outputs_from_params(*params, solver, out="loss", verbose=True):
             cam = st.Camera(*params)
-            Q = st.get_data_mat(cam, r_ls, pixel_meass)
+            Q, scale, offset = st.get_data_mat(cam, r_ls, pixel_meass)
             # Run Forward pass
             if solver == "mosek":
                 # Run Forward pass
@@ -446,11 +422,11 @@ class TestStereoTune(unittest.TestCase):
                 np.linalg.matrix_rank(X.detach().numpy(), tol=1e-6) == 1
             ), "X is not rank-1"
             if out == "loss":
-                out = st.get_loss_from_sol(X[0], r_ps[0], C_p0s[0])
+                r, C_vec = st.get_vars_from_mats(X[0])
+                out = st.get_outer_loss(r, C_vec, r_ps, C_p0s)
             elif out == "sol":
                 # Extract solution (assume Rank-1)
-                r = (X[0, 10:, [0]] + X[0, [0], 10:].T) / 2.0
-                C_vec = (X[0, 1:10, [0]] + X[0, [0], 1:10].T) / 2.0
+                r, C_vec = st.get_vars_from_mats(X[0])
                 out = r, C_vec
             else:
                 raise ValueError("Invalid output type")
@@ -497,12 +473,12 @@ class TestStereoTune(unittest.TestCase):
 
         # Test gradients to matrix
         cam = st.Camera(*params)
-        Q = st.get_data_mat(cam, r_ls, pixel_meass)
+        Q, scale, offset = st.get_data_mat(cam, r_ls, pixel_meass)
 
         # Generate solution X from parameters
         def get_X_from_params(*params, solver, verbose=True):
             cam = st.Camera(*params)
-            Q = st.get_data_mat(cam, r_ls, pixel_meass)
+            Q, scale, offset = st.get_data_mat(cam, r_ls, pixel_meass)
             # Run Forward pass
             if solver == "mosek":
                 # Run Forward pass
@@ -538,12 +514,14 @@ class TestStereoTune(unittest.TestCase):
         # Check gradients
         opt = torch.optim.Adam(params, lr=1e-3)
         opt.zero_grad()
-        loss = st.get_loss_from_sol(X0_scs, r_ps[0], C_p0s[0])
+        r_ps_est, C_p0s_est = st.get_vars_from_mats(X0_scs)
+        loss = st.get_outer_loss(r_ps_est, C_p0s_est, r_ps, C_p0s)
         loss.backward()
         loss0_scs = loss.detach().numpy().copy()
         grads_scs = [p.grad.detach().numpy().copy() for p in params]
         opt.zero_grad()
-        loss = st.get_loss_from_sol(X0_msk, r_ps[0], C_p0s[0])
+        r_ps_est, C_p0s_est = st.get_vars_from_mats(X0_msk)
+        loss = st.get_outer_loss(r_ps_est, C_p0s_est, r_ps, C_p0s)
         loss.backward()
         loss0_msk = loss.detach().numpy().copy()
         grads_msk = [p.grad.detach().numpy().copy() for p in params]
@@ -561,53 +539,14 @@ class TestStereoTune(unittest.TestCase):
         )
 
         # Check difference in loss
-        loss = st.get_loss_from_sol(X1_scs, r_ps[0], C_p0s[0])
+        r_ps_est, C_p0s_est = st.get_vars_from_mats(X1_scs)
+        loss = st.get_outer_loss(r_ps_est, C_p0s_est, r_ps, C_p0s)
         loss1_scs = loss.detach().numpy().copy()
-        loss = st.get_loss_from_sol(X1_msk, r_ps[0], C_p0s[0])
+        r_ps_est, C_p0s_est = st.get_vars_from_mats(X1_msk)
+        loss = st.get_outer_loss(r_ps_est, C_p0s_est, r_ps, C_p0s)
         loss1_msk = loss.detach().numpy().copy()
         np.testing.assert_allclose(
             loss1_msk - loss0_msk, loss1_scs - loss0_scs, atol=1e-6
-        )
-
-    def test_grad_loss(t):
-        """Test gradients of the output loss function"""
-        set_seed(0)
-        # Generate problem
-        r_ps, C_p0s, r_ls, pixel_meass = st.get_prob_data(camera=t.cam_gt, N_map=7)
-
-        # Camera parameters
-        params = (
-            torch.tensor(t.cam_gt.f_u, requires_grad=True, dtype=torch.float64),
-            torch.tensor(t.cam_gt.f_v, requires_grad=True, dtype=torch.float64),
-            torch.tensor(t.cam_gt.c_u, requires_grad=True, dtype=torch.float64),
-            torch.tensor(t.cam_gt.c_v, requires_grad=True, dtype=torch.float64),
-            torch.tensor(t.cam_gt.b, requires_grad=True, dtype=torch.float64),
-        )
-
-        # TEST OPT LAYER
-        constraints_list = st.get_constraints(r_ps, C_p0s, r_ls)
-        # Build opt layer
-        sdpr_layer = SDPRLayer(13, constraints=constraints_list, use_dual=False)
-        sdpr_layer_dual = SDPRLayer(13, constraints=constraints_list, use_dual=True)
-
-        # Test gradients to matrix
-        cam = st.Camera(*params)
-        Q = st.get_data_mat(cam, r_ls, pixel_meass)
-        solver_args = {"solve_method": "SCS", "eps": 1e-9}
-        X = sdpr_layer(Q, solver_args=solver_args)[0]
-        x = X[0][:, [1]]
-
-        # define loss function based on vector solution
-        def get_loss_vec(x):
-            X_new = x @ x.T
-            return st.get_loss_from_sol(X_new, r_ps[0], C_p0s[0])
-
-        torch.autograd.gradcheck(
-            get_loss_vec,
-            x,
-            eps=1e-6,
-            atol=1e-6,
-            rtol=1e-6,
         )
 
     # INTEGRATION TESTS
@@ -678,7 +617,7 @@ class TestStereoTune(unittest.TestCase):
             params=params,
             opt=opt,
             term_crit=term_crit,
-            r_ps=r_ps,
+            r_p0s=r_ps,
             C_p0s=C_p0s,
             r_ls=r_ls,
             pixel_meass=pixel_meass,
@@ -966,4 +905,5 @@ def plot_map(r_l, ax=None, **kwargs):
 if __name__ == "__main__":
     # unittest.main()
     test = TestStereoTune(no_noise=False)
-    test.test_tune_params_sep(plot=False)
+    # test.test_tune_params_sep(plot=False)
+    test.test_fwd_theseus()

@@ -74,9 +74,10 @@ class SDPRLayer(CvxpyLayer):
     def forward(self, Qs: torch.tensor, **kwargs):
         # get batch dimension
         if Qs.ndim > 2:
-            N_batch = range(Qs.shape[0])
+            N_batch = Qs.shape[0]
         else:
             N_batch = 1
+            Qs.unsqueeze_(0)
         # Define new kwargs to not affect original
         kwargs_new = deepcopy(kwargs)
         if "solver_args" in kwargs and "solve_method" in kwargs["solver_args"]:
@@ -85,15 +86,11 @@ class SDPRLayer(CvxpyLayer):
             if method == "local" or method == "mosek":
                 assert self.use_dual, "Primal not implemented. Set use_dual=True"
                 # detach
-                Qs_d = Qs.cpu().detach().double().numpy()
+                Qs_d = Qs.detach().numpy()
                 # TODO this loop should be set up so that we can run in parallel.
                 ext_vars_list = []
                 for i in range(N_batch):
-                    # this check is to facilitate batched or non-batched inputs
-                    if N_batch == 1:
-                        Q_val = Qs_d
-                    else:
-                        Q_val = Qs_d[i]
+                    Q_val = Qs_d[i]
                     # Get data matrix and make sure its symmetric
                     assert np.allclose(Q_val, Q_val.T), "Q must be symmetric"
 
