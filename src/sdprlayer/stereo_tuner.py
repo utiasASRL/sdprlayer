@@ -1,14 +1,16 @@
 #!/bin/bash/python
-import numpy as np
+from time import time
+
 import matplotlib.pyplot as plt
-import warnings
+import numpy as np
 import pandas as pd
-import torch
-from torch import nn
-import theseus as th
+from pylgmath.se3.transformation import Transformation as Trans
 import pypose as pp
 import spatialmath.base as sm
-from pylgmath.se3.transformation import Transformation as Trans
+import theseus as th
+import torch
+from torch import nn
+import warnings
 
 from sdprlayer import SDPRLayer
 from mwcerts.stereo_problems import (
@@ -268,6 +270,8 @@ term_crit_def = {
     "tol_loss": 1e-12,
 }  # Optimization termination criteria
 
+# SDPR OPTIMIZATION
+
 
 def get_constraints(r_p0s, C_p0s, r_ls):
     """Generate constraints for problem"""
@@ -298,13 +302,13 @@ def tune_stereo_params_sdpr(
     sdpr_layer = SDPRLayer(13, constraints=constraints_list, use_dual=False)
 
     # define closure
-    def closure_inner():
+    def closure():
         # zero grad
         opt.zero_grad()
         # generate loss
         Q = get_data_mat(cam_torch, r_ls, pixel_meass)
         if solver == "SCS":
-            solver_args = {"solve_method": "SCS", "eps": 1e-9}
+            solver_args = {"solve_method": "SCS", "eps": 1e-7}
         elif solver == "mosek":
             solver_args = {"solve_method": "mosek"}
         else:
@@ -318,7 +322,7 @@ def tune_stereo_params_sdpr(
         loss.backward()
         # take a step
         opt.step()
-        return loss
+        return loss, r_p0s, C_p0s
 
     # Optimization loop
     max_iter = term_crit["max_iter"]
@@ -330,7 +334,9 @@ def tune_stereo_params_sdpr(
     iter_info = []
     loss = torch.tensor(np.inf)
     while grad_sq > tol_grad_sq and n_iter < max_iter and loss > tol_loss:
-        loss = closure_inner()
+        start = time()
+        loss, r_p0s, C_p0s = closure()
+        stop = time()
         loss_stored += [loss.item()]
         grad = np.vstack([p.grad for p in params])
         grad_sq = np.sum([g**2 for g in grad])
@@ -343,62 +349,13 @@ def tune_stereo_params_sdpr(
                 loss=loss_stored[-1],
                 grad_sq=grad_sq,
                 n_iter=n_iter,
+                solution=(r_p0s, C_p0s),
+                time_inner=stop - start,
             )
         ]
         n_iter += 1
 
     return pd.DataFrame(iter_info)
-
-
-# PYPOSE OPTIMIZATION
-
-
-class MWRegistration(nn.Module):
-    def __init__(self, r_p0s_init, C_p0s_init, r_ls, **kwargs):
-        super().__init__()
-        self.N_map = r_ls.shape[-1]  # Number of map points
-        self.N_batch = C_p0s_init.shape[0]  # Number of instances
-
-        # Initialize the poses
-        if not isinstance(r_p0s_init, torch.Tensor):
-            r_p0s_init = torch.tensor(r_p0s_init).to(torch.get_default_dtype())
-        self.r_p0s = nn.Parameter(r_p0s_init)
-        if not isinstance(C_p0s_init, torch.Tensor):
-            C_p0s_init = torch.tensor(C_p0s_init).to(torch.get_default_dtype())
-        # Construct homogeneous transformation matrices
-        r_0p_p_s = -C_p0s_init @ r_p0s_init
-        T_p0s = torch.cat([C_p0s_init, r_0p_p_s], dim=2)
-        self.T_p0s = pp.Parameter(pp.mat2SE3(T_p0s))
-        # Store landmarks
-        if not isinstance(r_ls, torch.Tensor):
-            r_ls = torch.tensor(r_ls).to(torch.get_default_dtype())
-        self.r_ls = r_ls
-
-    def forward(self, meas):
-        # Homogenize map points
-        r_ls_h = pp.cart2homo(self.r_ls.transpose(-1, -2)).transpose(-1, -2)
-        # transform map points into camera frame
-        r_lp_inP = self.T_p0s.matrix() @ r_ls_h
-        # compute error
-        err = meas - r_lp_inP[:, :3, :]
-        return err
-
-
-def run_pypose_opt(reg: MWRegistration, meas, weights):
-    # Setup
-    solver = pp.optim.solver.Cholesky()
-    strategy = pp.optim.strategy.TrustRegion()
-    optimizer = pp.optim.LM(reg, solver=solver, strategy=strategy, min=1e-6)
-    scheduler = pp.optim.scheduler.StopOnPlateau(
-        optimizer, steps=10, patience=3, decreasing=1e-6, verbose=True
-    )
-    # Convert weights
-    weights_blocked = []
-    for i in range(reg.N_batch):
-        weights_blocked += [torch.block_diag(*(weights[i]))]
-    weights_blocked = torch.stack(weights_blocked)
-    # Run optimizer
-    scheduler.optimize(input=[meas], weight=weights_blocked)
 
 
 # THESEUS OPTIMIZATION
@@ -465,8 +422,8 @@ def build_theseus_layer(N_map, N_batch=1, opt_kwargs_in={}):
         "max_iterations": 100,
     }
     opt_kwargs.update(opt_kwargs_in)
-    # layer = th.TheseusLayer(th.GaussNewton(objective, **opt_kwargs))
-    layer = th.TheseusLayer(th.LevenbergMarquardt(objective, **opt_kwargs))
+    layer = th.TheseusLayer(th.GaussNewton(objective, **opt_kwargs))
+    # layer = th.TheseusLayer(th.LevenbergMarquardt(objective, **opt_kwargs))
 
     return layer
 
@@ -506,7 +463,7 @@ def tune_stereo_params_theseus(
     )
 
     # define closure function
-    def step_inner(r_p0s_init, C_p0s_init):
+    def closure_inner(r_p0s_init, C_p0s_init):
         # zero grad
         opt.zero_grad()
         # invert the camera measurements
@@ -524,7 +481,7 @@ def tune_stereo_params_theseus(
             theseus_inputs,
             optimizer_kwargs={
                 "track_best_solution": True,
-                "verbose": False,
+                "verbose": True,
                 "backward_mode": "implicit",
             },
         )
@@ -541,7 +498,7 @@ def tune_stereo_params_theseus(
         r_p0s_init = vars_th["r_p0s"].clone()
         C_p0s_init = vars_th["C_p0s"].clone()
 
-        return loss, r_p0s_init, C_p0s_init
+        return loss, info, r_p0s_init, C_p0s_init
 
     # Optimization loop
     max_iter = term_crit["max_iter"]
@@ -553,8 +510,10 @@ def tune_stereo_params_theseus(
     iter_info = []
     loss = torch.tensor(np.inf)
     while grad_sq > tol_grad_sq and n_iter < max_iter and loss > tol_loss:
-        # Take a step update initialization
-        loss, r_p0s_init, C_p0s_init = step_inner(r_p0s_init, C_p0s_init)
+        # Take a step and update initialization
+        start = time()
+        loss, info_inner, r_p0s_init, C_p0s_init = closure_inner(r_p0s_init, C_p0s_init)
+        stop = time()
         # Store loss
         loss_stored += [loss.item()]
         grad = np.vstack([p.grad for p in params])
@@ -567,13 +526,19 @@ def tune_stereo_params_theseus(
                 params=np.stack([p.detach().numpy() for p in params]),
                 loss=loss_stored[-1],
                 grad_sq=grad_sq,
+                loss_inner=info_inner.best_err,
                 n_iter=n_iter,
+                solution=(r_p0s_init, C_p0s_init),
+                time_inner=stop - start,
             )
         ]
 
         n_iter += 1
 
     return pd.DataFrame(iter_info)
+
+
+# TEST OPT WITHOUT PARAMETERS
 
 
 def tune_stereo_params_no_opt(
