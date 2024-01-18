@@ -342,19 +342,19 @@ def compare_tune_baseline_single_pp():
     axs[0, 0].set_title("Outer Loss")
     axs[0, 0].legend()
 
-    axs[1, 0].plot(info_l["loss_inner"], "-o", label="Theseus (local init)")
-    axs[1, 0].plot(info_g["loss_inner"], "-o", label="Theseus (global init)")
-    axs[1, 0].plot(info_s["loss_inner"], "-o", label="SDPR")
-    axs[1, 0].set_title("Inner Loss")
-    axs[1, 0].set_xlabel("Iteration")
-    axs[1, 0].legend()
-    # axs[1, 0].plot(info_l["grad_sq"], "-o", label="Theseus (local init)")
-    # axs[1, 0].plot(info_g["grad_sq"], "-o", label="Theseus (global init)")
-    # axs[1, 0].plot(info_s["grad_sq"], "-o", label="SDPR")
-    # axs[1, 0].set_title("Gradient Squared")
-    # axs[1, 0].set_yscale("log")
+    # axs[1, 0].plot(info_l["loss_inner"], "-o", label="Theseus (local init)")
+    # axs[1, 0].plot(info_g["loss_inner"], "-o", label="Theseus (global init)")
+    # axs[1, 0].plot(info_s["loss_inner"], "-o", label="SDPR")
+    # axs[1, 0].set_title("Inner Loss")
     # axs[1, 0].set_xlabel("Iteration")
     # axs[1, 0].legend()
+    axs[1, 0].plot(info_l["grad_sq"], "-o", label="Theseus (local init)")
+    axs[1, 0].plot(info_g["grad_sq"], "-o", label="Theseus (global init)")
+    axs[1, 0].plot(info_s["grad_sq"], "-o", label="SDPR")
+    axs[1, 0].set_title("Gradient Squared")
+    axs[1, 0].set_yscale("log")
+    axs[1, 0].set_xlabel("Iteration")
+    axs[1, 0].legend()
 
     # Plot parameter values
     axs[0, 1].plot(info_l["params"], "-o", label="Theseus (local init)")
@@ -410,9 +410,9 @@ def find_local_minima(N_inits=100, store_data=False):
     set_seed(0)
 
     # Generate data
-    offs = np.array([[0, 0, 3]]).T
+    offs = np.array([[0, 0, 4]]).T
     r_p0s, C_p0s, r_ls, pixel_meass = get_cal_data(
-        offs=offs, board_dims=[0.6, 1.0], N_squares=[8, 8], N_batch=1, plot=False
+        offs=offs, board_dims=[0.3, 0.3], N_squares=[8, 8], N_batch=1, plot=False
     )
     r_p0s = torch.tensor(r_p0s)
     C_p0s = torch.tensor(C_p0s)
@@ -496,8 +496,8 @@ def find_local_minima(N_inits=100, store_data=False):
 
     # Find local minima
     loss_min = np.min(losses)
-    ind_local = np.where(np.abs(losses - loss_min) > 20)[0]
-    ind_global = np.where(np.abs(losses - loss_min) < 20)[0]
+    ind_local = np.where(np.abs(losses - loss_min) > 5)[0]
+    ind_global = np.where(np.abs(losses - loss_min) < 5)[0]
 
     r_p0s_init_l = r_p0s_init[ind_local]
     C_p0s_init_l = C_p0s_init[ind_local]
@@ -626,10 +626,10 @@ def tune_baseline(
             C_p0s_init = torch.tensor(C_p0s_init)
         # opt parameters
         opt_kwargs = {
-            "abs_err_tolerance": 1e-10,
-            "rel_err_tolerance": 1e-10,
+            "abs_err_tolerance": 1e-8,
+            "rel_err_tolerance": 1e-8,
             "max_iterations": 500,
-            "step_size": 0.1,
+            "step_size": 1,
         }
         # Run Tuner
         iter_info = st.tune_stereo_params_theseus(
@@ -654,7 +654,7 @@ def compare_tune_baseline(N_batch=20):
     """Compare tuning of baseline parameters with SDPR and Theseus.
     Use actual batch of measurements"""
     offset = 0.003
-    n_iters = 100
+    n_iters = 15
     info_s = tune_baseline("spdr", b_offs=offset, n_outer_iter=n_iters, N_batch=N_batch)
     info_tg = tune_baseline(
         "theseus", b_offs=offset, n_outer_iter=n_iters, gt_init=True, N_batch=N_batch
@@ -667,15 +667,15 @@ def compare_tune_baseline(N_batch=20):
     data = dict(info_s=info_s, info_tg=info_tg, info_tl=info_tl)
     folder = os.path.dirname(os.path.realpath(__file__))
     folder = os.path.join(folder, "outputs")
-
     dump(data, open(folder + "/compare_tune_b0p003_batch.pkl", "wb"))
 
 
-def compare_tune_baseline_pp():
+def compare_tune_baseline_pp(filename="compare_tune_b0p003_batch.pkl"):
     # Load data
     folder = os.path.dirname(os.path.realpath(__file__))
     folder = os.path.join(folder, "outputs")
-    data = load(open(folder + "/compare_tune_b0p003_batch.pkl", "rb"))
+
+    data = load(open(folder + "/" + filename, "rb"))
     info_s = data["info_s"]
     info_tl = data["info_tl"]
     info_tg = data["info_tg"]
@@ -729,10 +729,10 @@ if __name__ == "__main__":
     # Comparison over a single instances:
 
     # find_local_minima(store_data=True)
-    compare_tune_baseline_single()
+    # compare_tune_baseline_single()
     # compare_tune_baseline_single_pp()
 
     # Comparison over multiple instances (batch):
 
     # compare_tune_baseline()
-    # compare_tune_baseline_pp()
+    compare_tune_baseline_pp(filename="compare_tune_b0p003_batch_2024-01-18.pkl")

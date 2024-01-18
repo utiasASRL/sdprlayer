@@ -348,6 +348,7 @@ def tune_stereo_params_sdpr(
     while grad_sq > tol_grad_sq and n_iter < max_iter and loss > tol_loss:
         start = time()
         loss_outer, loss_inner, r_p0s, C_p0s = closure()
+        loss_inner = torch.mean(loss_inner)
         stop = time()
         loss_stored += [loss_outer.item()]
         grad = np.vstack([p.grad for p in params])
