@@ -3,7 +3,9 @@ import os
 import matplotlib.pyplot as plt
 import numpy as np
 from pickle import dump, load
+from spatialmath import SO3
 import torch
+
 
 from mwcerts.stereo_problems import skew
 import sdprlayer.stereo_tuner as st
@@ -28,14 +30,39 @@ def set_seed(seed):
     torch.manual_seed(seed)
 
 
+def get_points_in_cone(radius, beta, N_batch):
+    """Generate N random points in a cone of radius and angle beta"""
+    # Generate N random azimuthal angles between 0 and 2*pi
+    polar = 2 * np.pi * np.random.rand(N_batch)
+
+    # Generate N random polar angles between 0 and beta
+    azimuth = beta * (2 * np.random.rand(N_batch) - 1)
+
+    # Z axis rotation
+    Cz = SO3.Rz(azimuth)
+    Cx = SO3.Rx(polar)
+    C = Cx * Cz
+    # get x axes
+    Cs = C.A
+    if isinstance(Cs, list):
+        points = [c[:, [0]] * radius for c in Cs]
+    else:
+        points = [Cs[:, [0]] * radius]
+
+    return points
+
+
 def get_cal_data(
     N_batch=3,  # Number of poses
     N_map=10,  # number of landmarks
-    offs=np.array([[0, 0, 2]]).T,  # offset between poses and landmarks
+    radius=2,  # offset between poses and landmarks
     n_turns=0.2,  # (circle) number of turns around the cluster
     board_dims=np.array([0.3, 0.3]),  # width and height of calibration board
     N_squares=[10, 10],  # number of squares in calibration board (width, height)
+    setup="circle",  # setup of GT poses
+    cone_angles=(np.pi / 4, np.pi / 4),  # camera FOV (alpha), region cone (beta)
     plot=False,
+    plot_pixel_meas=False,
 ):
     """Generate Ground truth pose and landmark data. Also generate pixel measurements"""
     # Ground Truth Map Points
@@ -49,27 +76,44 @@ def get_cal_data(
     # Ground Truth Poses
     r_p0s = []
     C_p0s = []
-
-    # GT poses equally spaced along n turns of a circle
-    radius = np.linalg.norm(offs)
     assert radius > 0.2, "Radius of trajectory circle should be larger"
-    if N_batch > 1:
-        delta_phi = n_turns * 2 * np.pi / (N_batch - 1)
-        phi = 0.0
-    else:
-        delta_phi = n_turns
-        phi = delta_phi
-    for i in range(N_batch):
-        # Location
-        r = radius * np.array([[np.cos(phi), 0.0, np.sin(phi)]]).T
-        r_p0s += [r]
-        # Z Axis points at origin
-        z = -r / np.linalg.norm(r)
-        y = np.array([[0.0, 1.0, 0.0]]).T
-        x = -skew(z) @ y
-        C_p0s += [np.hstack([x, y, z]).T]
-        # Update angle
-        phi = (phi + delta_phi) % (2 * np.pi)
+    if setup == "circle":  # GT poses equally spaced along n turns of a circle
+        offs = np.array([[0, 0, radius]]).T
+        if N_batch > 1:
+            delta_phi = n_turns * 2 * np.pi / (N_batch - 1)
+            phi = 0.0
+        else:
+            delta_phi = n_turns
+            phi = delta_phi
+        for i in range(N_batch):
+            # Location
+            r = radius * np.array([[np.cos(phi), 0.0, np.sin(phi)]]).T
+            r_p0s += [r]
+            # Z Axis points at origin
+            z = -r / np.linalg.norm(r)
+            y = np.array([[0.0, 1.0, 0.0]]).T
+            x = -skew(z) @ y
+            C_p0s += [np.hstack([x, y, z]).T]
+            # Update angle
+            phi = (phi + delta_phi) % (2 * np.pi)
+    elif setup == "cone":  # Setup GT poses in a cone
+        alpha, beta = cone_angles  # Note FOV divided by 2
+        # Pick location
+        r_p0s = get_points_in_cone(radius, beta, N_batch)
+        # FOV perturbations
+
+        C_p0s = []
+        for i in range(N_batch):
+            # random orientation pointing at origin
+            z = -r_p0s[i] / np.linalg.norm(r_p0s[i])
+            y = np.random.randn(3, 1)
+            y = y - y.T @ z * z
+            y = y / np.linalg.norm(y)
+            x = -skew(z) @ y
+            C = np.hstack([x, y, z]).T
+            # Perturb orientation
+            C = SO3.Rx((2 * np.random.random() - 1) * alpha) @ SO3(C)
+            C_p0s += [C.A]
 
     if plot:
         # Plot data
@@ -80,7 +124,7 @@ def get_cal_data(
         ax.set_xlabel("X")
         ax.set_ylabel("Y")
         ax.set_zlabel("Z")
-        r = np.linalg.norm(offs) * 1.1
+        r = np.linalg.norm(radius) * 1.1
         ax.set_xlim(-r, r)
         ax.set_ylim(-r, r)
         ax.set_zlim(-r, r)
@@ -94,12 +138,12 @@ def get_cal_data(
         r_ls += [r_l]
         r_l_inC = C_p0 @ (r_l - r_p)
         pixel_meass += [cam_gt.forward(r_l_inC)]
-        if plot:
+        if plot_pixel_meas:
             plot_pixel_meas(pixel_meass[-1])
-    pixel_meass = np.stack(pixel_meass)
-    r_ls = np.stack(r_ls)
-    r_p0s = np.stack(r_p0s)
-    C_p0s = np.stack(C_p0s)
+    pixel_meass = torch.tensor(np.stack(pixel_meass))
+    r_ls = torch.tensor(np.stack(r_ls))
+    C_p0s = torch.tensor(np.stack(C_p0s))
+    r_p0s = torch.tensor(np.stack(r_p0s))
 
     if plot:
         plt.show()
@@ -406,13 +450,17 @@ def compare_tune_baseline_single_pp():
     # plt.show()
 
 
-def find_local_minima(N_inits=100, store_data=False):
+def find_local_minima(N_inits=100, store_data=False, **kwargs):
     set_seed(0)
-
+    radius = 4
     # Generate data
-    offs = np.array([[0, 0, 4]]).T
     r_p0s, C_p0s, r_ls, pixel_meass = get_cal_data(
-        offs=offs, board_dims=[0.3, 0.3], N_squares=[8, 8], N_batch=1, plot=False
+        radius=radius,
+        board_dims=[0.4, 1.0],
+        N_squares=[8, 8],
+        N_batch=1,
+        plot=False,
+        **kwargs,
     )
     r_p0s = torch.tensor(r_p0s)
     C_p0s = torch.tensor(C_p0s)
@@ -443,7 +491,6 @@ def find_local_minima(N_inits=100, store_data=False):
     # invert the camera measurements
     meas, weights = cam_torch.inverse(pixel_meass)
     # Generate random initializations
-    radius = np.linalg.norm(offs)
     r_p0s_init, C_p0s_init = get_random_inits(
         radius=radius, N_batch=N_inits, plot=False
     )
@@ -532,6 +579,7 @@ def find_local_minima(N_inits=100, store_data=False):
             "weights": weights,
         }
         # Run theseus
+        assert len(r_p0s_init_l) > 0, "No local minima found"
         out, info = layer.forward(
             theseus_inputs,
             optimizer_kwargs={
@@ -571,16 +619,10 @@ def tune_baseline(
     gt_init=False,
     N_batch=20,
     n_outer_iter=15,
+    prob_data=(),
 ):
-    set_seed(seed)
-    # Generate data
-    offs = np.array([[0, 0, 3]]).T
-    r_p0s, C_p0s, r_ls, pixel_meass = get_cal_data(
-        offs=offs, board_dims=[0.6, 1.0], N_squares=[8, 8], N_batch=N_batch, plot=False
-    )
-    r_p0s = torch.tensor(r_p0s)
-    C_p0s = torch.tensor(C_p0s)
-    r_ls = torch.tensor(r_ls)
+    # Get problem data
+    r_p0s, C_p0s, r_ls, pixel_meass = prob_data
     N_map = r_ls.shape[2]
     # Convert to tensor
     pixel_meass = torch.tensor(pixel_meass)
@@ -623,7 +665,6 @@ def tune_baseline(
         )
     else:
         # Generate random initializations
-        radius = np.linalg.norm(offs)
         if gt_init:
             r_p0s_init = r_p0s.clone()
             C_p0s_init = C_p0s.clone()
@@ -659,43 +700,78 @@ def tune_baseline(
     return iter_info
 
 
-def compare_tune_baseline(N_batch=20):
+def compare_tune_baseline(N_batch=20, N_runs=10):
     """Compare tuning of baseline parameters with SDPR and Theseus.
-    Use actual batch of measurements"""
-    offset = 0.003
-    n_iters = 50
+    Run N_runs times with N_batch poses"""
+    offset = 0.003  # offset for init baseline
+    n_iters = 50  # Number of outer iterations
     opt_select = "sgd"
-    info_s = tune_baseline(
-        "spdr",
-        opt_select=opt_select,
-        b_offs=offset,
-        n_outer_iter=n_iters,
-        N_batch=N_batch,
-    )
-    info_tg = tune_baseline(
-        "theseus",
-        opt_select=opt_select,
-        b_offs=offset,
-        n_outer_iter=n_iters,
-        gt_init=True,
-        N_batch=N_batch,
-    )
-    info_tl = tune_baseline(
-        "theseus",
-        opt_select=opt_select,
-        b_offs=offset,
-        n_outer_iter=n_iters,
-        gt_init=False,
-        N_batch=N_batch,
-    )
+    info_p, info_s, info_tg, info_tl = [], [], [], []
+    set_seed(0)
+    for i in range(N_runs):
+        # Generate data
+        radius = 3
+        r_p0s, C_p0s, r_ls, pixel_meass = get_cal_data(
+            radius=radius,
+            board_dims=[0.6, 1.0],
+            N_squares=[8, 8],
+            N_batch=N_batch,
+            setup="cone",
+            plot=False,
+        )
+        info_p.append(
+            dict(r_p0s=r_p0s, C_pos=C_p0s, r_map=r_ls, pixel_meass=pixel_meass)
+        )
+        prob_data = (r_p0s, C_p0s, r_ls, pixel_meass)
+        # Run tuners
+        info_s.append(
+            tune_baseline(
+                "spdr",
+                seed=i,
+                opt_select=opt_select,
+                b_offs=offset,
+                n_outer_iter=n_iters,
+                N_batch=N_batch,
+                prob_data=prob_data,
+            )
+        )
+        info_tg.append(
+            tune_baseline(
+                "theseus",
+                seed=i,
+                opt_select=opt_select,
+                b_offs=offset,
+                n_outer_iter=n_iters,
+                gt_init=True,
+                N_batch=N_batch,
+                prob_data=prob_data,
+            )
+        )
+        info_tl.append(
+            tune_baseline(
+                "theseus",
+                seed=i,
+                opt_select=opt_select,
+                b_offs=offset,
+                n_outer_iter=n_iters,
+                gt_init=False,
+                N_batch=N_batch,
+                prob_data=prob_data,
+            )
+        )
 
     # Save data
-    data = dict(info_s=info_s, info_tg=info_tg, info_tl=info_tl)
+    data = dict(info_p=info_p, info_s=info_s, info_tg=info_tg, info_tl=info_tl)
     folder = os.path.dirname(os.path.realpath(__file__))
     folder = os.path.join(folder, "outputs")
     offset_str = str(offset).replace(".", "p")
     dump(
-        data, open(folder + f"/compare_tune_b{offset_str}_{opt_select}_batch.pkl", "wb")
+        data,
+        open(
+            folder
+            + f"/compare_tune_b{offset_str}_{opt_select}_{N_batch}btchs_{N_runs}runs.pkl",
+            "wb",
+        ),
     )
 
 
@@ -755,14 +831,25 @@ def compare_tune_baseline_pp(filename="compare_tune_b0p003_batch.pkl"):
 
 
 if __name__ == "__main__":
+    # Test generation of calibration data
+    # r_p0s, C_p0s, r_ls, pixel_meass = get_cal_data(
+    #     setup="cone", cone_angles=(0.0, np.pi / 4), N_batch=100, plot=True
+    # )
+    # r_p0s, C_p0s, r_ls, pixel_meass = get_cal_data(
+    #     setup="cone", cone_angles=(np.pi / 4, 0.0), N_batch=100, plot=True
+    # )
+    # r_p0s, C_p0s, r_ls, pixel_meass = get_cal_data(
+    #     setup="cone", cone_angles=(np.pi / 4, np.pi / 4), N_batch=100, plot=True
+    # )
+
     # Comparison over a single instances:
 
-    # find_local_minima(store_data=True)
+    find_local_minima(store_data=False)
     # compare_tune_baseline_single()
     # compare_tune_baseline_single_pp()
 
     # Comparison over multiple instances (batch):
 
-    # compare_tune_baseline()
+    # compare_tune_baseline(N_batch=20, N_runs=1)
     # compare_tune_baseline_pp(filename="compare_tune_b0p003_batch_2024-01-18.pkl")
-    compare_tune_baseline_pp(filename="compare_tune_b0p003_sgd_batch.pkl")
+    # compare_tune_baseline_pp(filename="compare_tune_b0p003_sgd_batch.pkl")
