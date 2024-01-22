@@ -564,7 +564,13 @@ def find_local_minima(N_inits=100, store_data=False):
 
 
 def tune_baseline(
-    tuner="spdr", b_offs=0.01, seed=0, gt_init=False, N_batch=20, n_outer_iter=15
+    tuner="spdr",
+    opt_select="sgd",
+    b_offs=0.01,
+    seed=0,
+    gt_init=False,
+    N_batch=20,
+    n_outer_iter=15,
 ):
     set_seed(seed)
     # Generate data
@@ -592,7 +598,10 @@ def tune_baseline(
     # Define parameter to tune
     params = [cam_torch.b]
     # Define optimizer
-    opt = torch.optim.SGD(params, lr=1e-5)
+    if opt_select == "sgd":
+        opt = torch.optim.SGD(params, lr=1e-4)
+    elif opt_select == "adam":
+        opt = torch.optim.Adam(params, lr=1e-3)
     # Termination criteria
     term_crit = {
         "max_iter": n_outer_iter,
@@ -626,8 +635,8 @@ def tune_baseline(
             C_p0s_init = torch.tensor(C_p0s_init)
         # opt parameters
         opt_kwargs = {
-            "abs_err_tolerance": 1e-8,
-            "rel_err_tolerance": 1e-8,
+            "abs_err_tolerance": 1e-10,
+            "rel_err_tolerance": 1e-10,
             "max_iterations": 500,
             "step_size": 1,
         }
@@ -654,20 +663,40 @@ def compare_tune_baseline(N_batch=20):
     """Compare tuning of baseline parameters with SDPR and Theseus.
     Use actual batch of measurements"""
     offset = 0.003
-    n_iters = 15
-    info_s = tune_baseline("spdr", b_offs=offset, n_outer_iter=n_iters, N_batch=N_batch)
+    n_iters = 50
+    opt_select = "sgd"
+    info_s = tune_baseline(
+        "spdr",
+        opt_select=opt_select,
+        b_offs=offset,
+        n_outer_iter=n_iters,
+        N_batch=N_batch,
+    )
     info_tg = tune_baseline(
-        "theseus", b_offs=offset, n_outer_iter=n_iters, gt_init=True, N_batch=N_batch
+        "theseus",
+        opt_select=opt_select,
+        b_offs=offset,
+        n_outer_iter=n_iters,
+        gt_init=True,
+        N_batch=N_batch,
     )
     info_tl = tune_baseline(
-        "theseus", b_offs=offset, n_outer_iter=n_iters, gt_init=False, N_batch=N_batch
+        "theseus",
+        opt_select=opt_select,
+        b_offs=offset,
+        n_outer_iter=n_iters,
+        gt_init=False,
+        N_batch=N_batch,
     )
 
     # Save data
     data = dict(info_s=info_s, info_tg=info_tg, info_tl=info_tl)
     folder = os.path.dirname(os.path.realpath(__file__))
     folder = os.path.join(folder, "outputs")
-    dump(data, open(folder + "/compare_tune_b0p003_batch.pkl", "wb"))
+    offset_str = str(offset).replace(".", "p")
+    dump(
+        data, open(folder + f"/compare_tune_b{offset_str}_{opt_select}_batch.pkl", "wb")
+    )
 
 
 def compare_tune_baseline_pp(filename="compare_tune_b0p003_batch.pkl"):
@@ -705,9 +734,10 @@ def compare_tune_baseline_pp(filename="compare_tune_b0p003_batch.pkl"):
     axs[1, 0].legend()
 
     # Plot parameter values
-    axs[0, 1].plot(info_tl["params"] - cam_gt.b, "-o", label="Theseus (rand init)")
-    axs[0, 1].plot(info_tg["params"] - cam_gt.b, "-o", label="Theseus (gt init)")
-    axs[0, 1].plot(info_s["params"] - cam_gt.b, "-o", label="SDPR")
+    axs[0, 1].plot(info_tl["params"], "-o", label="Theseus (rand init)")
+    axs[0, 1].plot(info_tg["params"], "-o", label="Theseus (gt init)")
+    axs[0, 1].plot(info_s["params"], "-o", label="SDPR")
+    axs[0, 1].axhline(cam_gt.b, color="k", linestyle="--", label="Actual Value")
     axs[0, 1].set_title("Baseline Error to GT")
     axs[0, 1].legend()
 
@@ -720,7 +750,6 @@ def compare_tune_baseline_pp(filename="compare_tune_b0p003_batch.pkl"):
     axs[1, 1].set_title("Inner Optimization Time")
     axs[1, 1].set_xlabel("Iteration")
     axs[1, 1].set_ylabel("Time (s)")
-    plt.title("Batch Problem")
     plt.tight_layout()
     plt.show()
 
@@ -735,4 +764,5 @@ if __name__ == "__main__":
     # Comparison over multiple instances (batch):
 
     # compare_tune_baseline()
-    compare_tune_baseline_pp(filename="compare_tune_b0p003_batch_2024-01-18.pkl")
+    # compare_tune_baseline_pp(filename="compare_tune_b0p003_batch_2024-01-18.pkl")
+    compare_tune_baseline_pp(filename="compare_tune_b0p003_sgd_batch.pkl")

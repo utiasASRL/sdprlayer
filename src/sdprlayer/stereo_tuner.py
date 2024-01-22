@@ -318,7 +318,7 @@ def tune_stereo_params_sdpr(
         # generate loss
         Qs, scales, offsets = get_data_mat(cam_torch, r_ls, pixel_meass)
         if solver == "SCS":
-            solver_args = {"solve_method": "SCS", "eps": 1e-9}
+            solver_args = {"solve_method": "SCS", "eps": 1e-10}
         elif solver == "mosek":
             solver_args = {"solve_method": "mosek"}
         else:

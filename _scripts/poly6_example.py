@@ -9,6 +9,7 @@ import torch
 
 from sdprlayer import SDPRLayer
 from sdprlayer import PolyMinLayer, polyval
+from utils import savefig
 
 torch.set_default_dtype(torch.float64)
 
@@ -233,7 +234,7 @@ def run_analysis(n_iters=5000, x_targ=1.7, p_targ=7.3, lr=1e-2):
 
 
 # POST PROCESSING
-def plot_poly_evolution(filename="poly6_sdpr.pkl", label="SDPR", N_pts=10):
+def plot_poly_evolution(ax, filename="poly6_sdpr.pkl", step=None, N_pts=10):
     # Load data
     folder = "/home/cho/research/sdpr_backprop/_scripts/outputs"
     filename = os.path.join(folder, filename)
@@ -242,35 +243,41 @@ def plot_poly_evolution(filename="poly6_sdpr.pkl", label="SDPR", N_pts=10):
     xmins = info["x_min"].values
     losses = info["loss"].values
     n_iters = len(losses)
-    step = n_iters // (N_pts - 1)
+    if step is None:
+        step = n_iters // (N_pts - 1)
 
     # Plot polynomial evolution
     cmap = cm.get_cmap("coolwarm")
     pvals = []
-    plt.figure()
     for ind in range(0, n_iters, step):
+        if ind == 0 or ind == n_iters:
+            alpha = 1
+        else:
+            alpha = 0.5
         color = cmap(ind / n_iters)
         x = np.linspace(-2.5, 2.5, 100)
         y = np.polyval(polys[ind][::-1], x)
-        plt.plot(x, y, color=color, label=None)
+        ax.plot(x, y, color=color, alpha=alpha)
         # store min location
         pvals += [np.polyval(polys[ind][::-1], xmins[ind])]
-        plt.scatter(
-            xmins[ind], pvals[-1], color=color, marker="o", alpha=0.5
+        ax.scatter(
+            xmins[ind],
+            pvals[-1],
+            color="black",
+            marker=".",
         )  # plot points
-    plt.ylim([0, 13])
-    plt.title("Polynomial Evolution - " + label)
+    ax.set_ylim([0, 13])
+    ax.set_xlabel("x-values")
     # plot minimas
     x_vals = xmins[::step]
     pvals = np.stack(pvals)
-    plt.plot(x_vals, pvals, "k--", alpha=0.5)  # plot lines
+    ax.plot(x_vals, pvals, "k:", alpha=0.5, linewidth=1)  # plot lines
 
-    # Plot motion of minimum
-    plt.figure()
-    plt.plot(xmins)
-    plt.title("Motion of Minimum - " + label)
-    plt.ylabel("Minimum")
-    plt.xlabel("Iteration")
+    x_targ = 1.7
+    p_targ = 7.3
+    ax.plot(x_targ, p_targ, "k+", markersize=20)
+
+    print(f"{filename}\tfinal loss:\t{losses[-1]}\tnum_iters:\t{n_iters}")
 
 
 def plot_final_polys():
@@ -290,7 +297,7 @@ def plot_final_polys():
 
     # Plot
     prob = Poly6Example()
-    plt.figure()
+    fig = plt.figure()
     plot_polynomial(prob.p_vals)
     plot_polynomial(p_opt_sdpr)
     plot_polynomial(p_opt_th1)
@@ -303,16 +310,37 @@ def plot_final_polys():
     plt.title(f"Converged Polynomials")
     plt.show()
 
+    return fig
 
-def plot_all():
-    plot_poly_evolution(filename="poly6_th1.pkl", label="Torch Init=-2", N_pts=30)
-    plot_poly_evolution(filename="poly6_th2.pkl", label="Torch Init=2", N_pts=30)
-    plot_poly_evolution(filename="poly6_sdpr.pkl", label="SDPR", N_pts=30)
-    plot_final_polys()
+
+def plot_all(save=False, make_title=False):
+    step = 20
+    N_pts = 30
+
+    fig, axs = plt.subplots(1, 3, figsize=(15, 4))
+    plot_poly_evolution(axs[0], filename="poly6_th2.pkl", step=20, N_pts=N_pts)
+    plot_poly_evolution(axs[1], filename="poly6_th1.pkl", N_pts=N_pts)
+    plot_poly_evolution(axs[2], filename="poly6_sdpr.pkl", N_pts=N_pts)
+    if make_title:
+        axs[0].set_title("Gradient Descent (init at x=2)")
+        axs[1].set_title("Gradient Descent (init at x=-2)")
+        axs[2].set_title("SDPRLayers (ours)")
+    else:
+        axs[0].set_title(" ")
+        axs[1].set_title(" ")
+        axs[2].set_title(" ")
+    axs[0].set_ylabel("y-values")
+    plt.tight_layout()
+
+    fig2 = plot_final_polys()
     plt.show()
+
+    if save:
+        savefig(fig, "poly_opt_evo")
+        savefig(fig2, "poly_opt_final")
 
 
 if __name__ == "__main__":
     # test_poly_torch()
     # run_analysis()
-    plot_all()
+    plot_all(save=True)
