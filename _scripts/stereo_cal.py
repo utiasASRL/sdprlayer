@@ -260,214 +260,26 @@ def run_sdpr_cal(r_p0s, C_p0s, r_ls, pixel_meass):
     )
 
 
-# SINGLE INSTANCE TUNING COMPARISON
-
-
-def tune_baseline_theseus_single(local=True):
-    """Comparison of baseline tunings when inner optimization starts
-    from either local or global minimum"""
-    # load data
-    folder = os.path.dirname(os.path.realpath(__file__))
-    folder = os.path.join(folder, "outputs")
-    prob_data = load(open(folder + "/stereo_cal_local_min_init.pkl", "rb"))
-    r_p0s = prob_data["r_p0s"]
-    C_p0s = prob_data["C_p0s"]
-    r_ls = prob_data["r_ls"]
-    pixel_meass = prob_data["pixel_meass"]
-    if local:
-        r_p0s_init = prob_data["r_p0s_init_l"].unsqueeze(0)
-        C_p0s_init = prob_data["C_p0s_init_l"].unsqueeze(0)
-    else:
-        r_p0s_init = prob_data["r_p0s_init_g"].unsqueeze(0)
-        C_p0s_init = prob_data["C_p0s_init_g"].unsqueeze(0)
-    cam_torch = prob_data["cam_torch"]
-
-    # Define parameter
-    params = [cam_torch.b]
-    # Define optimizer
-    opt = torch.optim.SGD(params, lr=1e-5)
-    # Termination criteria
-    term_crit = {
-        "max_iter": 15,
-        "tol_grad_sq": 1e-10,
-        "tol_loss": 1e-10,
-    }
-    opt_kwargs = {
-        "abs_err_tolerance": 1e-10,
-        "rel_err_tolerance": 1e-8,
-        "max_iterations": 300,
-        "step_size": 0.2,
-    }
-    # Run Tuner
-    iter_info = st.tune_stereo_params_theseus(
-        cam_torch=cam_torch,
-        params=params,
-        opt=opt,
-        term_crit=term_crit,
-        r_p0s_gt=r_p0s,
-        C_p0s_gt=C_p0s,
-        r_ls=r_ls,
-        pixel_meass=pixel_meass,
-        r_p0s_init=r_p0s_init,
-        C_p0s_init=C_p0s_init,
-        verbose=True,
-        opt_kwargs=opt_kwargs,
-    )
-
-    return iter_info
-
-
-def tune_baseline_sdpr_single():
-    # load data
-    folder = os.path.dirname(os.path.realpath(__file__))
-    folder = os.path.join(folder, "outputs")
-    prob_data = load(open(folder + "/stereo_cal_local_min_init.pkl", "rb"))
-    r_p0s = prob_data["r_p0s"]
-    C_p0s = prob_data["C_p0s"]
-    r_ls = prob_data["r_ls"]
-    pixel_meass = prob_data["pixel_meass"]
-    cam_torch = prob_data["cam_torch"]
-
-    # Define parameter and learning rate
-    params = [cam_torch.b]
-
-    opt = torch.optim.SGD(params, lr=1e-5)
-    # Termination criteria
-    term_crit = {
-        "max_iter": 15,
-        "tol_grad_sq": 1e-10,
-        "tol_loss": 1e-10,
-    }
-    # Run Tuner
-    iter_info = st.tune_stereo_params_sdpr(
-        cam_torch=cam_torch,
-        params=params,
-        opt=opt,
-        term_crit=term_crit,
-        r_p0s_gt=r_p0s,
-        C_p0s_gt=C_p0s,
-        r_ls=r_ls,
-        pixel_meass=pixel_meass,
-        verbose=True,
-    )
-
-    return iter_info
-
-
-def compare_tune_baseline_single():
-    """Compare tuning of baseline parameters with SDPR and Theseus.
-    Use a single currated inner opttimization with local and global min"""
-    info_s = tune_baseline_sdpr_single()
-    info_l = tune_baseline_theseus_single(local=True)
-    info_g = tune_baseline_theseus_single(local=False)
-
-    data = dict(info_s=info_s, info_l=info_l, info_g=info_g)
-
-    folder = os.path.dirname(os.path.realpath(__file__))
-    folder = os.path.join(folder, "outputs")
-    dump(data, open(folder + "/compare_tune_b_single.pkl", "wb"))
-
-
-def compare_tune_baseline_single_pp():
-    # Load data
-    folder = os.path.dirname(os.path.realpath(__file__))
-    folder = os.path.join(folder, "outputs")
-    data = load(open(folder + "/compare_tune_b_single.pkl", "rb"))
-    info_s = data["info_s"]
-    info_l = data["info_l"]
-    info_g = data["info_g"]
-
-    # Plot loss
-    fig, axs = plt.subplots(2, 2, figsize=(12, 12))
-    axs[0, 0].plot(info_l["loss"], "-o", label="Theseus (local init)")
-    axs[0, 0].plot(info_g["loss"], "-o", label="Theseus (global init)")
-    axs[0, 0].plot(info_s["loss"], "-o", label="SDPR")
-    axs[0, 0].set_yscale("log")
-    axs[0, 0].set_title("Outer Loss")
-    axs[0, 0].legend()
-
-    # axs[1, 0].plot(info_l["loss_inner"], "-o", label="Theseus (local init)")
-    # axs[1, 0].plot(info_g["loss_inner"], "-o", label="Theseus (global init)")
-    # axs[1, 0].plot(info_s["loss_inner"], "-o", label="SDPR")
-    # axs[1, 0].set_title("Inner Loss")
-    # axs[1, 0].set_xlabel("Iteration")
-    # axs[1, 0].legend()
-    axs[1, 0].plot(info_l["grad_sq"], "-o", label="Theseus (local init)")
-    axs[1, 0].plot(info_g["grad_sq"], "-o", label="Theseus (global init)")
-    axs[1, 0].plot(info_s["grad_sq"], "-o", label="SDPR")
-    axs[1, 0].set_title("Gradient Squared")
-    axs[1, 0].set_yscale("log")
-    axs[1, 0].set_xlabel("Iteration")
-    axs[1, 0].legend()
-
-    # Plot parameter values
-    axs[0, 1].plot(info_l["params"], "-o", label="Theseus (local init)")
-    axs[0, 1].plot(info_g["params"], "-o", label="Theseus (global init)")
-    axs[0, 1].plot(info_s["params"], "-o", label="SDPR")
-    axs[0, 1].set_title("Baseline Value")
-    axs[0, 1].legend()
-
-    # Inner loop optimization time
-    axs[1, 1].plot(info_l["time_inner"], "-o", label="Theseus (local init)")
-    axs[1, 1].plot(info_g["time_inner"], "-o", label="Theseus (global init)")
-    axs[1, 1].plot(info_s["time_inner"], "-o", label="SDPR")
-    axs[1, 1].set_yscale("log")
-    axs[1, 1].legend()
-    axs[1, 1].set_title("Inner Optimization Time")
-    axs[1, 1].set_xlabel("Iteration")
-    axs[1, 1].set_ylabel("Time (s)")
-    plt.tight_layout()
-    plt.show()
-
-    # Plot actual solutions - verification
-    # # Load problem data
-    # folder = os.path.dirname(os.path.realpath(__file__))
-    # folder = os.path.join(folder, "outputs")
-    # prob_data = load(open(folder + "/stereo_cal_local_min_init.pkl", "rb"))
-    # r_p0s_gt = prob_data["r_p0s"]
-    # C_p0s_gt = prob_data["C_p0s"]
-    # fig = plt.figure()
-    # ax = fig.add_subplot(111, projection="3d")
-    # r_p0s, C_p0s = info_l.iloc[-1]["solution"]
-    # r_p0s = r_p0s.detach().numpy()
-    # C_p0s = C_p0s.detach().numpy()
-    # plot_poses(C_p0s, r_p0s, ax=ax, color="r", label="Theseus (local init)")
-    # r_p0s, C_p0s = info_g.iloc[-1]["solution"]
-    # r_p0s = r_p0s.detach().numpy()
-    # C_p0s = C_p0s.detach().numpy()
-    # plot_poses(C_p0s, r_p0s, ax=ax, color="g", label="Theseus (global init)")
-    # r_p0s, C_p0s = info_s.iloc[-1]["solution"]
-    # r_p0s = r_p0s.detach().numpy()
-    # C_p0s = C_p0s.detach().numpy()
-    # plot_poses(C_p0s, r_p0s, ax=ax, color="b", label="SDPR")
-    # plot_poses(C_p0s_gt, r_p0s_gt, ax=ax, color="k", label="Ground Truth")
-    # ax.set_title("Final Solutions")
-    # ax.set_xlabel("X")
-    # ax.set_ylabel("Y")
-    # ax.set_zlabel("Z")
-    # ax.axis("equal")
-    # ax.legend()
-    # plt.show()
-
-
 def find_local_minima(N_inits=100, store_data=False, **kwargs):
-    set_seed(0)
-    radius = 4
+    set_seed(5)
+    radius = 3
     # Generate data
     r_p0s, C_p0s, r_ls, pixel_meass = get_cal_data(
         radius=radius,
-        board_dims=[0.4, 1.0],
+        board_dims=[0.6, 1.0],
         N_squares=[8, 8],
         N_batch=1,
         plot=False,
+        setup="cone",
         **kwargs,
     )
     r_p0s = torch.tensor(r_p0s)
     C_p0s = torch.tensor(C_p0s)
     r_ls = torch.tensor(r_ls)
+    pixel_meass = torch.tensor(pixel_meass)
     N_map = r_ls.shape[2]
     # Convert to tensor
-    pixel_meass = torch.tensor(pixel_meass)
+
     # generate parameterized camera
     cam_torch = st.Camera(
         f_u=torch.tensor(cam_gt.f_u, requires_grad=True),
@@ -615,17 +427,24 @@ def tune_baseline(
     tuner="spdr",
     opt_select="sgd",
     b_offs=0.01,
-    seed=0,
     gt_init=False,
     N_batch=20,
-    n_outer_iter=15,
+    radius=3,
     prob_data=(),
+    term_crit={},
 ):
     # Get problem data
     r_p0s, C_p0s, r_ls, pixel_meass = prob_data
     N_map = r_ls.shape[2]
-    # Convert to tensor
-    pixel_meass = torch.tensor(pixel_meass)
+    # termination criteria
+    default_term_crit = {
+        "max_iter": 15,
+        "tol_grad_sq": 1e-8,
+        "tol_loss": 1e-10,
+    }
+    default_term_crit.update(term_crit)
+    term_crit = default_term_crit
+
     # generate parameterized camera
     cam_torch = st.Camera(
         f_u=torch.tensor(cam_gt.f_u, requires_grad=True),
@@ -644,12 +463,6 @@ def tune_baseline(
         opt = torch.optim.SGD(params, lr=1e-4)
     elif opt_select == "adam":
         opt = torch.optim.Adam(params, lr=1e-3)
-    # Termination criteria
-    term_crit = {
-        "max_iter": n_outer_iter,
-        "tol_grad_sq": 1e-10,
-        "tol_loss": 1e-10,
-    }
     # Run Tuner
     if tuner == "spdr":
         iter_info = st.tune_stereo_params_sdpr(
@@ -677,7 +490,7 @@ def tune_baseline(
         # opt parameters
         opt_kwargs = {
             "abs_err_tolerance": 1e-10,
-            "rel_err_tolerance": 1e-10,
+            "rel_err_tolerance": 1e-8,
             "max_iterations": 500,
             "step_size": 1,
         }
@@ -705,11 +518,19 @@ def compare_tune_baseline(N_batch=20, N_runs=10):
     Run N_runs times with N_batch poses"""
     offset = 0.003  # offset for init baseline
     n_iters = 50  # Number of outer iterations
-    opt_select = "sgd"
+    opt_select = "sgd"  # optimizer to use
+    # termination criteria
+    term_crit = {
+        "max_iter": 100,
+        "tol_grad_sq": 1e-6,
+        "tol_loss": 1e-10,
+    }
     info_p, info_s, info_tg, info_tl = [], [], [], []
     set_seed(0)
     for i in range(N_runs):
         # Generate data
+        print("__________________________________________________________")
+        print(f"Run {i} of {N_runs}: Gen Data")
         radius = 3
         r_p0s, C_p0s, r_ls, pixel_meass = get_cal_data(
             radius=radius,
@@ -720,43 +541,43 @@ def compare_tune_baseline(N_batch=20, N_runs=10):
             plot=False,
         )
         info_p.append(
-            dict(r_p0s=r_p0s, C_pos=C_p0s, r_map=r_ls, pixel_meass=pixel_meass)
+            dict(r_p0s=r_p0s, C_p0s=C_p0s, r_map=r_ls, pixel_meass=pixel_meass)
         )
         prob_data = (r_p0s, C_p0s, r_ls, pixel_meass)
         # Run tuners
-        info_s.append(
-            tune_baseline(
-                "spdr",
-                seed=i,
-                opt_select=opt_select,
-                b_offs=offset,
-                n_outer_iter=n_iters,
-                N_batch=N_batch,
-                prob_data=prob_data,
-            )
-        )
-        info_tg.append(
-            tune_baseline(
-                "theseus",
-                seed=i,
-                opt_select=opt_select,
-                b_offs=offset,
-                n_outer_iter=n_iters,
-                gt_init=True,
-                N_batch=N_batch,
-                prob_data=prob_data,
-            )
-        )
+        # print(f"Run {i} of {N_runs}: SDPR")
+        # info_s.append(
+        #     tune_baseline(
+        #         "spdr",
+        #         opt_select=opt_select,
+        #         b_offs=offset,
+        #         N_batch=N_batch,
+        #         prob_data=prob_data,
+        #         term_crit=term_crit,
+        #     )
+        # )
+        # print(f"Run {i} of {N_runs}: Theseus (gt init)")
+        # info_tg.append(
+        #     tune_baseline(
+        #         "theseus",
+        #         opt_select=opt_select,
+        #         b_offs=offset,
+        #         gt_init=True,
+        #         N_batch=N_batch,
+        #         prob_data=prob_data,
+        #         term_crit=term_crit,
+        #     )
+        # )
+        print(f"Run {i} of {N_runs}: Theseus (rand init)")
         info_tl.append(
             tune_baseline(
                 "theseus",
-                seed=i,
                 opt_select=opt_select,
                 b_offs=offset,
-                n_outer_iter=n_iters,
                 gt_init=False,
                 N_batch=N_batch,
                 prob_data=prob_data,
+                term_crit=term_crit,
             )
         )
 
@@ -775,20 +596,20 @@ def compare_tune_baseline(N_batch=20, N_runs=10):
     )
 
 
-def compare_tune_baseline_pp(filename="compare_tune_b0p003_batch.pkl"):
+def compare_tune_baseline_pp(filename="compare_tune_b0p003_batch.pkl", ind=0):
     # Load data
     folder = os.path.dirname(os.path.realpath(__file__))
     folder = os.path.join(folder, "outputs")
 
     data = load(open(folder + "/" + filename, "rb"))
-    info_s = data["info_s"]
-    info_tl = data["info_tl"]
-    info_tg = data["info_tg"]
+    info_s = data["info_s"][ind]
+    info_tl = data["info_tl"][ind]
+    info_tg = data["info_tg"][ind]
     # Plot loss
     fig, axs = plt.subplots(2, 2, figsize=(10, 10))
-    axs[0, 0].plot(info_tl["loss"], "-o", label="Theseus (rand init)")
-    axs[0, 0].plot(info_tg["loss"], "-o", label="Theseus (gt init)")
-    axs[0, 0].plot(info_s["loss"], "-o", label="SDPR")
+    axs[0, 0].plot(info_tl["loss"], label="Theseus (rand init)")
+    axs[0, 0].plot(info_tg["loss"], label="Theseus (gt init)")
+    axs[0, 0].plot(info_s["loss"], label="SDPR")
     axs[0, 0].set_yscale("log")
     axs[0, 0].set_title("Outer Loss")
     axs[0, 0].legend()
@@ -801,32 +622,66 @@ def compare_tune_baseline_pp(filename="compare_tune_b0p003_batch.pkl"):
         lambda x: torch.sum(x).detach().numpy()
     )
 
-    axs[1, 0].plot(info_tl["grad_sq"], "-o", label="Theseus (rand init)")
-    axs[1, 0].plot(info_tg["grad_sq"], "-o", label="Theseus (gt init)")
-    axs[1, 0].plot(info_s["grad_sq"], "-o", label="SDPR")
+    axs[1, 0].plot(info_tl["grad_sq"], label="Theseus (rand init)")
+    axs[1, 0].plot(info_tg["grad_sq"], label="Theseus (gt init)")
+    axs[1, 0].plot(info_s["grad_sq"], label="SDPR")
     axs[1, 0].set_title("Gradient Squared")
     axs[1, 0].set_xlabel("Iteration")
     axs[1, 0].set_yscale("log")
     axs[1, 0].legend()
 
     # Plot parameter values
-    axs[0, 1].plot(info_tl["params"], "-o", label="Theseus (rand init)")
-    axs[0, 1].plot(info_tg["params"], "-o", label="Theseus (gt init)")
-    axs[0, 1].plot(info_s["params"], "-o", label="SDPR")
+    axs[0, 1].plot(info_tl["params"], label="Theseus (rand init)")
+    axs[0, 1].plot(info_tg["params"], label="Theseus (gt init)")
+    axs[0, 1].plot(info_s["params"], label="SDPR")
     axs[0, 1].axhline(cam_gt.b, color="k", linestyle="--", label="Actual Value")
     axs[0, 1].set_title("Baseline Error to GT")
     axs[0, 1].legend()
 
     # Inner loop optimization time
-    axs[1, 1].plot(info_tl["time_inner"], "-o", label="Theseus (rand init)")
-    axs[1, 1].plot(info_tg["time_inner"], "-o", label="Theseus (gt init)")
-    axs[1, 1].plot(info_s["time_inner"], "-o", label="SDPR")
+    axs[1, 1].plot(info_tl["time_inner"], label="Theseus (rand init)")
+    axs[1, 1].plot(info_tg["time_inner"], label="Theseus (gt init)")
+    axs[1, 1].plot(info_s["time_inner"], label="SDPR")
     axs[1, 1].set_yscale("log")
     axs[1, 1].legend()
     axs[1, 1].set_title("Inner Optimization Time")
     axs[1, 1].set_xlabel("Iteration")
     axs[1, 1].set_ylabel("Time (s)")
     plt.tight_layout()
+    plt.show()
+
+
+def plot_converged_vals(filename="compare_tune_b0p003_batch.pkl", ind=0):
+    # Load data
+    folder = os.path.dirname(os.path.realpath(__file__))
+    folder = os.path.join(folder, "outputs")
+
+    data = load(open(folder + "/" + filename, "rb"))
+    # info_s = data["info_s"][ind]
+    # info_tl = data["info_tl"][ind]
+    info_tg = data["info_tg"][ind]
+    info_p = data["info_p"][ind]
+
+    # Plot final solutions
+    r_p0s, C_p0s = info_tg.iloc[-1]["solution"]
+    r_p0s = r_p0s.detach().numpy()
+    C_p0s = C_p0s.detach().numpy()
+    r_p0s_gt = info_p["r_p0s"].detach().numpy()
+    C_p0s_gt = info_p["C_pos"].detach().numpy()
+
+    # Plot final solutions
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection="3d")
+    plot_poses(C_p0s_gt, r_p0s_gt, ax=ax, color="k")
+    plot_poses(C_p0s, r_p0s, ax=ax)
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    ax.set_zlabel("Z")
+    r = 3 * 1.1
+    ax.set_xlim(-r, r)
+    ax.set_ylim(-r, r)
+    ax.set_zlim(-r, r)
+
     plt.show()
 
 
@@ -842,14 +697,12 @@ if __name__ == "__main__":
     #     setup="cone", cone_angles=(np.pi / 4, np.pi / 4), N_batch=100, plot=True
     # )
 
-    # Comparison over a single instances:
-
-    find_local_minima(store_data=False)
-    # compare_tune_baseline_single()
-    # compare_tune_baseline_single_pp()
+    # Local minimum search
+    # find_local_minima(store_data=False)
 
     # Comparison over multiple instances (batch):
-
-    # compare_tune_baseline(N_batch=20, N_runs=1)
-    # compare_tune_baseline_pp(filename="compare_tune_b0p003_batch_2024-01-18.pkl")
-    # compare_tune_baseline_pp(filename="compare_tune_b0p003_sgd_batch.pkl")
+    compare_tune_baseline(N_batch=20, N_runs=1)
+    # compare_tune_baseline_pp(
+    #     filename="compare_tune_b0p003_sgd_20btchs_2runs.pkl", ind=0
+    # )
+    # plot_converged_vals(filename="compare_tune_b0p003_sgd_20btchs_1runs.pkl")

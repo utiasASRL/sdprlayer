@@ -254,7 +254,7 @@ def get_vars_from_mats(Xs):
         # Check rank
         sorted_eigs = np.sort(np.linalg.eigvalsh(X.detach().numpy()))
         sorted_eigs = np.abs(sorted_eigs)
-        assert sorted_eigs[-1] / sorted_eigs[-2] > 1e5, "X is not rank-1"
+        assert sorted_eigs[-1] / sorted_eigs[-2] > 1e6, "X is not rank-1"
         # extract solutions
         r_p0_inP = (X[10:, [0]] + X[[0], 10:].T) / 2.0
         C_vec = (X[1:10, [0]] + X[[0], 1:10].T) / 2.0
@@ -268,17 +268,21 @@ def get_vars_from_mats(Xs):
 
 def get_outer_loss(r_p0s, C_p0s, r_p0s_gt, C_p0s_gt):
     "Outer optimization losses"
+    # Translation error
     loss = torch.norm(r_p0s - r_p0s_gt) ** 2
+    # Rotation error
     C_diff = C_p0s.transpose(-2, -1) @ C_p0s_gt
     loss += torch.norm(C_diff - torch.eye(3), p="fro") ** 2
+    # Sum across batch
     return loss.sum()
 
 
 term_crit_def = {
     "max_iter": 500,
-    "tol_grad_sq": 1e-14,
-    "tol_loss": 1e-12,
+    "tol_grad_sq": 1e-10,
+    "tol_loss": 1e-10,
 }  # Optimization termination criteria
+
 
 # SDPR OPTIMIZATION
 
@@ -318,7 +322,7 @@ def tune_stereo_params_sdpr(
         # generate loss
         Qs, scales, offsets = get_data_mat(cam_torch, r_ls, pixel_meass)
         if solver == "SCS":
-            solver_args = {"solve_method": "SCS", "eps": 1e-10}
+            solver_args = {"solve_method": "SCS", "eps": 1e-9}
         elif solver == "mosek":
             solver_args = {"solve_method": "mosek"}
         else:
@@ -469,8 +473,13 @@ def tune_stereo_params_theseus(
         assert r_p0s_init.shape == (N_batch, 3, 1)
         r_p0s_init.squeeze_(-1)  # Remove last dimension
         assert C_p0s_init.shape == (N_batch, 3, 3)
-    r_p0s_gt = torch.tensor(r_p0s_gt, dtype=torch.double).squeeze(-1)
-    C_p0s_gt = torch.tensor(C_p0s_gt, dtype=torch.double)
+
+    if not torch.is_tensor(r_p0s_gt):
+        r_p0s_gt = torch.tensor(r_p0s_gt, dtype=torch.double).squeeze(-1)
+        C_p0s_gt = torch.tensor(C_p0s_gt, dtype=torch.double)
+    else:
+        assert r_p0s_gt.shape == (N_batch, 3, 1)
+        r_p0s_gt.squeeze_(-1)
 
     # Build layer
     theseus_layer = build_theseus_layer(
