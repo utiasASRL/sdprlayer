@@ -2,6 +2,7 @@ import os
 
 import matplotlib.pyplot as plt
 import numpy as np
+from pandas import DataFrame
 from pickle import dump, load
 from spatialmath import SO3
 import torch
@@ -492,7 +493,7 @@ def tune_baseline(
             "abs_err_tolerance": 1e-10,
             "rel_err_tolerance": 1e-8,
             "max_iterations": 500,
-            "step_size": 1,
+            "step_size": 1.0,
         }
         # Run Tuner
         iter_info = st.tune_stereo_params_theseus(
@@ -517,7 +518,7 @@ def compare_tune_baseline(N_batch=20, N_runs=10):
     """Compare tuning of baseline parameters with SDPR and Theseus.
     Run N_runs times with N_batch poses"""
     offset = 0.003  # offset for init baseline
-    n_iters = 50  # Number of outer iterations
+    n_iters = 100  # Number of outer iterations
     opt_select = "sgd"  # optimizer to use
     # termination criteria
     term_crit = {
@@ -530,7 +531,7 @@ def compare_tune_baseline(N_batch=20, N_runs=10):
     for i in range(N_runs):
         # Generate data
         print("__________________________________________________________")
-        print(f"Run {i} of {N_runs}: Gen Data")
+        print(f"Run {i+1} of {N_runs}: Gen Data")
         radius = 3
         r_p0s, C_p0s, r_ls, pixel_meass = get_cal_data(
             radius=radius,
@@ -545,30 +546,30 @@ def compare_tune_baseline(N_batch=20, N_runs=10):
         )
         prob_data = (r_p0s, C_p0s, r_ls, pixel_meass)
         # Run tuners
-        # print(f"Run {i} of {N_runs}: SDPR")
-        # info_s.append(
-        #     tune_baseline(
-        #         "spdr",
-        #         opt_select=opt_select,
-        #         b_offs=offset,
-        #         N_batch=N_batch,
-        #         prob_data=prob_data,
-        #         term_crit=term_crit,
-        #     )
-        # )
-        # print(f"Run {i} of {N_runs}: Theseus (gt init)")
-        # info_tg.append(
-        #     tune_baseline(
-        #         "theseus",
-        #         opt_select=opt_select,
-        #         b_offs=offset,
-        #         gt_init=True,
-        #         N_batch=N_batch,
-        #         prob_data=prob_data,
-        #         term_crit=term_crit,
-        #     )
-        # )
-        print(f"Run {i} of {N_runs}: Theseus (rand init)")
+        print(f"Run {i+1} of {N_runs}: SDPR")
+        info_s.append(
+            tune_baseline(
+                "spdr",
+                opt_select=opt_select,
+                b_offs=offset,
+                N_batch=N_batch,
+                prob_data=prob_data,
+                term_crit=term_crit,
+            )
+        )
+        print(f"Run {i+1} of {N_runs}: Theseus (gt init)")
+        info_tg.append(
+            tune_baseline(
+                "theseus",
+                opt_select=opt_select,
+                b_offs=offset,
+                gt_init=True,
+                N_batch=N_batch,
+                prob_data=prob_data,
+                term_crit=term_crit,
+            )
+        )
+        print(f"Run {i+1} of {N_runs}: Theseus (rand init)")
         info_tl.append(
             tune_baseline(
                 "theseus",
@@ -590,7 +591,7 @@ def compare_tune_baseline(N_batch=20, N_runs=10):
         data,
         open(
             folder
-            + f"/compare_tune_b{offset_str}_{opt_select}_{N_batch}btchs_{N_runs}runs.pkl",
+            + f"/compare_tune_b{offset_str}_{opt_select}_{N_batch}b_{N_runs}r.pkl",
             "wb",
         ),
     )
@@ -615,12 +616,8 @@ def compare_tune_baseline_pp(filename="compare_tune_b0p003_batch.pkl", ind=0):
     axs[0, 0].legend()
 
     # process inner losses
-    info_tl["loss_inner_sum"] = info_tl["loss_inner"].apply(
-        lambda x: torch.sum(x).detach().numpy()
-    )
-    info_tg["loss_inner_sum"] = info_tg["loss_inner"].apply(
-        lambda x: torch.sum(x).detach().numpy()
-    )
+    info_tl["loss_inner_sum"] = info_tl["loss_inner"].apply(lambda x: np.sum(x))
+    info_tg["loss_inner_sum"] = info_tg["loss_inner"].apply(lambda x: np.sum(x))
 
     axs[1, 0].plot(info_tl["grad_sq"], label="Theseus (rand init)")
     axs[1, 0].plot(info_tg["grad_sq"], label="Theseus (gt init)")
@@ -685,6 +682,198 @@ def plot_converged_vals(filename="compare_tune_b0p003_batch.pkl", ind=0):
     plt.show()
 
 
+def get_statistics(filename="compare_tune_b0p003_sgd_20btchs_50runs.pkl"):
+    # Load data
+    folder = os.path.dirname(os.path.realpath(__file__))
+    folder = os.path.join(folder, "outputs")
+    data = load(open(folder + "/" + filename, "rb"))
+    info_s = data["info_s"]
+    info_tl = data["info_tl"]
+    info_tg = data["info_tg"]
+    b_true = cam_gt.b
+    # Get data arrays
+    n_runs = len(info_s)
+    param = np.zeros((3, n_runs))
+    n_iters = np.zeros((3, n_runs))
+    t_iter = np.zeros((3, n_runs))
+    loss = np.zeros((3, n_runs))
+    loss_inner = np.zeros((3, n_runs))
+    for i in range(n_runs):
+        param[0, i] = info_s[i]["params"].iloc[-1]
+        param[1, i] = info_tl[i]["params"].iloc[-1]
+        param[2, i] = info_tg[i]["params"].iloc[-1]
+        n_iters[0, i] = info_s[i].shape[0]
+        n_iters[1, i] = info_tl[i].shape[0]
+        n_iters[2, i] = info_tg[i].shape[0]
+        t_iter[0, i] = np.mean(info_s[i]["time_inner"].values)
+        t_iter[1, i] = np.mean(info_tl[i]["time_inner"].values)
+        t_iter[2, i] = np.mean(info_tg[i]["time_inner"].values)
+        loss[0, i] = info_s[i]["loss"].values[-1]
+        loss[1, i] = info_tl[i]["loss"].values[-1]
+        loss[2, i] = info_tg[i]["loss"].values[-1]
+
+    # Get stats
+    param_err_mean = np.mean(param - b_true, axis=1)
+    param_err_std = np.std(param - b_true, axis=1)
+    n_iters_mean = np.mean(n_iters, axis=1)
+    n_iters_std = np.std(n_iters, axis=1)
+    t_iter_mean = np.mean(t_iter, axis=1)
+    loss_mean = np.mean(loss, axis=1)
+    desc = ["SDPR", "Theseus (rand init)", "Theseus (gt init)"]
+
+    # Make dataframe
+
+    df = DataFrame(
+        {
+            "Method": desc,
+            "Final Baseline (avg)": param_err_mean,
+            "Final Baseline (std)": param_err_std,
+            "Number of Iterations (avg)": n_iters_mean,
+            "Number of Iterations (std)": n_iters_std,
+            "Avg Time per Iter": t_iter_mean,
+            "Outer Loss (avg)": loss_mean,
+        }
+    )
+    # df.style.format(precision=3)
+    print("Results:")
+    print(df)
+    print("Latex:")
+    print(df.to_latex(float_format="{:0.3e}".format))
+
+
+def baseline_param_plots(filename="compare_tune_b0p003_sgd_20btchs_50runs.pkl"):
+    # Load data
+    folder = os.path.dirname(os.path.realpath(__file__))
+    folder = os.path.join(folder, "outputs")
+    data = load(open(folder + "/" + filename, "rb"))
+    info_s = data["info_s"]
+    info_tl = data["info_tl"]
+    info_tg = data["info_tg"]
+    err_init = 0.003
+    # Get data arrays
+    n_runs = len(info_s)
+    plt.figure()
+    for i in range(n_runs):
+        if i == 0:
+            label1 = "SDPR"
+            label2 = "Theseus (rand init)"
+            label3 = "Theseus (gt init)"
+        else:
+            label1 = "_SDPR"
+            label2 = "_Theseus (rand init)"
+            label3 = "_Theseus (gt init)"
+        alpha = 0.5
+        p_s = np.vstack([err_init, np.vstack(info_s[i]["params"].values) - 0.24])
+        p_tl = np.vstack([err_init, np.vstack(info_tl[i]["params"].values) - 0.24])
+        p_tg = np.vstack([err_init, np.vstack(info_tg[i]["params"].values) - 0.24])
+        plt.plot(p_s, color="g", alpha=alpha, label=label1)
+        plt.plot(p_tl, color="r", alpha=alpha, label=label2)
+        plt.plot(p_tg, color="b", alpha=alpha, label=label3)
+    plt.xlabel("Iteration")
+    plt.ylabel("Baseline Error")
+    plt.yscale("log")
+    plt.legend()
+    plt.show()
+
+
+def baseline_noise_analysis(N_batch=20, N_runs=10):
+    """Compare tuning of baseline parameters with SDPR and Theseus.
+    Run N_runs times with N_batch poses at each noise level"""
+    noise_lvls = np.logspace(-3, 0, 5)
+    offset = 0.003  # offset for init baseline
+    n_iters = 100  # Number of max outer iterations
+    opt_select = "sgd"  # optimizer to use
+    # termination criteria
+    term_crit = {
+        "max_iter": 100,
+        "tol_grad_sq": 1e-6,
+        "tol_loss": 1e-10,
+    }
+
+    info_p, info_s, info_tg, info_tl = [], [], [], []
+    noise_lvl = []
+    set_seed(0)
+    for noise in noise_lvls:
+        cam_gt.sigma_u = noise
+        cam_gt.sigma_v = noise
+        print(f"NOISE LEVEL: {noise}")
+        for i in range(N_runs):
+            # Record noise value
+            noise_lvl.append(noise)
+            # Generate data
+            print("__________________________________________________________")
+            print(f"Run {i+1} of {N_runs}: Gen Data")
+            radius = 3
+            r_p0s, C_p0s, r_ls, pixel_meass = get_cal_data(
+                radius=radius,
+                board_dims=[0.6, 1.0],
+                N_squares=[8, 8],
+                N_batch=N_batch,
+                setup="cone",
+                plot=False,
+            )
+            info_p.append(
+                dict(r_p0s=r_p0s, C_p0s=C_p0s, r_map=r_ls, pixel_meass=pixel_meass)
+            )
+            prob_data = (r_p0s, C_p0s, r_ls, pixel_meass)
+            # Run tuners
+            print(f"Run {i+1} of {N_runs}: SDPR")
+            info_s.append(
+                tune_baseline(
+                    "spdr",
+                    opt_select=opt_select,
+                    b_offs=offset,
+                    N_batch=N_batch,
+                    prob_data=prob_data,
+                    term_crit=term_crit,
+                )
+            )
+            print(f"Run {i+1} of {N_runs}: Theseus (gt init)")
+            info_tg.append(
+                tune_baseline(
+                    "theseus",
+                    opt_select=opt_select,
+                    b_offs=offset,
+                    gt_init=True,
+                    N_batch=N_batch,
+                    prob_data=prob_data,
+                    term_crit=term_crit,
+                )
+            )
+            print(f"Run {i+1} of {N_runs}: Theseus (rand init)")
+            info_tl.append(
+                tune_baseline(
+                    "theseus",
+                    opt_select=opt_select,
+                    b_offs=offset,
+                    gt_init=False,
+                    N_batch=N_batch,
+                    prob_data=prob_data,
+                    term_crit=term_crit,
+                )
+            )
+
+    # Save data
+    data = dict(
+        noise_lvl=noise_lvl,
+        info_p=info_p,
+        info_s=info_s,
+        info_tg=info_tg,
+        info_tl=info_tl,
+    )
+    folder = os.path.dirname(os.path.realpath(__file__))
+    folder = os.path.join(folder, "outputs")
+    offset_str = str(offset).replace(".", "p")
+    dump(
+        data,
+        open(
+            folder
+            + f"/baseline_noise_{offset_str}o_{opt_select}_{N_batch}b_{N_runs}r.pkl",
+            "wb",
+        ),
+    )
+
+
 if __name__ == "__main__":
     # Test generation of calibration data
     # r_p0s, C_p0s, r_ls, pixel_meass = get_cal_data(
@@ -701,8 +890,14 @@ if __name__ == "__main__":
     # find_local_minima(store_data=False)
 
     # Comparison over multiple instances (batch):
-    compare_tune_baseline(N_batch=20, N_runs=1)
+    compare_tune_baseline(N_batch=20, N_runs=50)
+
+    # Post Processing
     # compare_tune_baseline_pp(
-    #     filename="compare_tune_b0p003_sgd_20btchs_2runs.pkl", ind=0
+    #     filename="compare_tune_b0p003_sgd_20btchs_1runs.pkl", ind=0
     # )
-    # plot_converged_vals(filename="compare_tune_b0p003_sgd_20btchs_1runs.pkl")
+    # get_statistics()
+    # baseline_param_plots()
+
+    # Noise analysis
+    # baseline_noise_analysis(N_batch=20, N_runs=10)
