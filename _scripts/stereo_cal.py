@@ -9,6 +9,7 @@ import torch
 
 
 from mwcerts.stereo_problems import skew
+from utils import make_dirs_safe
 import sdprlayer.stereo_tuner as st
 
 
@@ -445,7 +446,6 @@ def tune_baseline(
     }
     default_term_crit.update(term_crit)
     term_crit = default_term_crit
-
     # generate parameterized camera
     cam_torch = st.Camera(
         f_u=torch.tensor(cam_gt.f_u, requires_grad=True),
@@ -461,7 +461,7 @@ def tune_baseline(
     params = [cam_torch.b]
     # Define optimizer
     if opt_select == "sgd":
-        opt = torch.optim.SGD(params, lr=1e-4)
+        opt = torch.optim.SGD(params, lr=1.0e-4)
     elif opt_select == "adam":
         opt = torch.optim.Adam(params, lr=1e-3)
     # Run Tuner
@@ -491,9 +491,9 @@ def tune_baseline(
         # opt parameters
         opt_kwargs = {
             "abs_err_tolerance": 1e-10,
-            "rel_err_tolerance": 1e-8,
+            "rel_err_tolerance": 1e-6,
             "max_iterations": 500,
-            "step_size": 1.0,
+            "step_size": 0.2,
         }
         # Run Tuner
         iter_info = st.tune_stereo_params_theseus(
@@ -514,98 +514,112 @@ def tune_baseline(
     return iter_info
 
 
-def compare_tune_baseline(N_batch=20, N_runs=10):
+def compare_tune_baseline(N_batch=20, N_runs=10, mode="prob_data"):
     """Compare tuning of baseline parameters with SDPR and Theseus.
     Run N_runs times with N_batch poses"""
     offset = 0.003  # offset for init baseline
-    n_iters = 100  # Number of outer iterations
+    radius = 3
     opt_select = "sgd"  # optimizer to use
     # termination criteria
     term_crit = {
-        "max_iter": 100,
+        "max_iter": 150,
         "tol_grad_sq": 1e-6,
         "tol_loss": 1e-10,
     }
-    info_p, info_s, info_tg, info_tl = [], [], [], []
-    set_seed(0)
-    for i in range(N_runs):
-        # Generate data
-        print("__________________________________________________________")
-        print(f"Run {i+1} of {N_runs}: Gen Data")
-        radius = 3
-        r_p0s, C_p0s, r_ls, pixel_meass = get_cal_data(
-            radius=radius,
-            board_dims=[0.6, 1.0],
-            N_squares=[8, 8],
-            N_batch=N_batch,
-            setup="cone",
-            plot=False,
-        )
-        info_p.append(
-            dict(r_p0s=r_p0s, C_p0s=C_p0s, r_map=r_ls, pixel_meass=pixel_meass)
-        )
-        prob_data = (r_p0s, C_p0s, r_ls, pixel_meass)
-        # Run tuners
-        print(f"Run {i+1} of {N_runs}: SDPR")
-        info_s.append(
-            tune_baseline(
-                "spdr",
-                opt_select=opt_select,
-                b_offs=offset,
-                N_batch=N_batch,
-                prob_data=prob_data,
-                term_crit=term_crit,
-            )
-        )
-        print(f"Run {i+1} of {N_runs}: Theseus (gt init)")
-        info_tg.append(
-            tune_baseline(
-                "theseus",
-                opt_select=opt_select,
-                b_offs=offset,
-                gt_init=True,
-                N_batch=N_batch,
-                prob_data=prob_data,
-                term_crit=term_crit,
-            )
-        )
-        print(f"Run {i+1} of {N_runs}: Theseus (rand init)")
-        info_tl.append(
-            tune_baseline(
-                "theseus",
-                opt_select=opt_select,
-                b_offs=offset,
-                gt_init=False,
-                N_batch=N_batch,
-                prob_data=prob_data,
-                term_crit=term_crit,
-            )
-        )
-
-    # Save data
-    data = dict(info_p=info_p, info_s=info_s, info_tg=info_tg, info_tl=info_tl)
+    # Folder name
     folder = os.path.dirname(os.path.realpath(__file__))
     folder = os.path.join(folder, "outputs")
     offset_str = str(offset).replace(".", "p")
+    folder = os.path.join(
+        folder, f"str_tune_b{offset_str}_{opt_select}_{N_batch}b_{N_runs}r"
+    )
+
+    info = []
+    if mode == "prob_data":
+        for i in range(N_runs):
+            print(f"Run {i+1} of {N_runs}: Gen Data")
+            # Generate problem data
+            prob_data = get_cal_data(
+                radius=radius,
+                board_dims=[1.0, 1.0],
+                N_squares=[8, 8],
+                N_batch=N_batch,
+                setup="cone",
+                plot=False,
+            )
+            info.append(prob_data)
+    elif mode == "spdr":
+        info_p = load(open(folder + "/stereo_tune_prob_data.pkl", "rb"))
+        for i in range(N_runs):
+            # Run tuners
+            print(f"Run {i+1} of {N_runs}: SDPR")
+            info.append(
+                tune_baseline(
+                    "spdr",
+                    opt_select=opt_select,
+                    b_offs=offset,
+                    N_batch=N_batch,
+                    prob_data=info_p[i],
+                    term_crit=term_crit,
+                )
+            )
+    elif mode == "theseus_gt":
+        info_p = load(open(folder + "/stereo_tune_prob_data.pkl", "rb"))
+        for i in range(N_runs):
+            print(f"Run {i+1} of {N_runs}: Theseus (gt init)")
+            info.append(
+                tune_baseline(
+                    "theseus",
+                    opt_select=opt_select,
+                    b_offs=offset,
+                    gt_init=True,
+                    N_batch=N_batch,
+                    prob_data=info_p[i],
+                    term_crit=term_crit,
+                )
+            )
+    elif mode == "theseus_rand":
+        info_p = load(open(folder + "/stereo_tune_prob_data.pkl", "rb"))
+        for i in range(N_runs):
+            # Need try clause because can sometimes diverge
+            try:
+                print(f"Run {i+1} of {N_runs}: Theseus (rand init)")
+                res = tune_baseline(
+                    "theseus",
+                    opt_select=opt_select,
+                    b_offs=offset,
+                    gt_init=False,
+                    N_batch=N_batch,
+                    prob_data=info_p[i],
+                    term_crit=term_crit,
+                )
+            except:
+                print(f"Run {i+1} failed with random init")
+                res = None
+            # append
+            info.append(res)
+
+    # Save data
+    filename = folder + f"/stereo_tune_{mode}.pkl"
+    make_dirs_safe(filename)
     dump(
-        data,
+        info,
         open(
-            folder
-            + f"/compare_tune_b{offset_str}_{opt_select}_{N_batch}b_{N_runs}r.pkl",
+            filename,
             "wb",
         ),
     )
 
 
-def compare_tune_baseline_pp(filename="compare_tune_b0p003_batch.pkl", ind=0):
+def compare_tune_baseline_pp(fname="str_tune_b0p003_sgd_20b_50r", ind=0):
     # Load data
     folder = os.path.dirname(os.path.realpath(__file__))
     folder = os.path.join(folder, "outputs")
+    folder = os.path.join(folder, fname)
 
-    data = load(open(folder + "/" + filename, "rb"))
-    info_s = data["info_s"][ind]
-    info_tl = data["info_tl"][ind]
-    info_tg = data["info_tg"][ind]
+    info_s = load(open(folder + "/stereo_tune_spdr.pkl", "rb"))[ind]
+    info_tl = load(open(folder + "/stereo_tune_theseus_rand.pkl", "rb"))[ind]
+    info_tg = load(open(folder + "/stereo_tune_theseus_gt.pkl", "rb"))[ind]
     # Plot loss
     fig, axs = plt.subplots(2, 2, figsize=(10, 10))
     axs[0, 0].plot(info_tl["loss"], label="Theseus (rand init)")
@@ -682,14 +696,15 @@ def plot_converged_vals(filename="compare_tune_b0p003_batch.pkl", ind=0):
     plt.show()
 
 
-def get_statistics(filename="compare_tune_b0p003_sgd_20btchs_50runs.pkl"):
+def get_statistics(fname="str_tune_b0p003_sgd_20b_50r"):
     # Load data
     folder = os.path.dirname(os.path.realpath(__file__))
     folder = os.path.join(folder, "outputs")
-    data = load(open(folder + "/" + filename, "rb"))
-    info_s = data["info_s"]
-    info_tl = data["info_tl"]
-    info_tg = data["info_tg"]
+    folder = os.path.join(folder, fname)
+
+    info_s = load(open(folder + "/stereo_tune_spdr.pkl", "rb"))
+    info_tl = load(open(folder + "/stereo_tune_theseus_rand.pkl", "rb"))
+    info_tg = load(open(folder + "/stereo_tune_theseus_gt.pkl", "rb"))
     b_true = cam_gt.b
     # Get data arrays
     n_runs = len(info_s)
@@ -741,14 +756,15 @@ def get_statistics(filename="compare_tune_b0p003_sgd_20btchs_50runs.pkl"):
     print(df.to_latex(float_format="{:0.3e}".format))
 
 
-def baseline_param_plots(filename="compare_tune_b0p003_sgd_20btchs_50runs.pkl"):
+def baseline_param_plots(fname="str_tune_b0p003_sgd_20b_50r"):
     # Load data
     folder = os.path.dirname(os.path.realpath(__file__))
     folder = os.path.join(folder, "outputs")
-    data = load(open(folder + "/" + filename, "rb"))
-    info_s = data["info_s"]
-    info_tl = data["info_tl"]
-    info_tg = data["info_tg"]
+    folder = os.path.join(folder, fname)
+
+    info_s = load(open(folder + "/stereo_tune_spdr.pkl", "rb"))
+    info_tl = load(open(folder + "/stereo_tune_theseus_rand.pkl", "rb"))
+    info_tg = load(open(folder + "/stereo_tune_theseus_gt.pkl", "rb"))
     err_init = 0.003
     # Get data arrays
     n_runs = len(info_s)
@@ -771,7 +787,7 @@ def baseline_param_plots(filename="compare_tune_b0p003_sgd_20btchs_50runs.pkl"):
         plt.plot(p_tg, color="b", alpha=alpha, label=label3)
     plt.xlabel("Iteration")
     plt.ylabel("Baseline Error")
-    plt.yscale("log")
+    # plt.yscale("log")
     plt.legend()
     plt.show()
 
@@ -890,12 +906,13 @@ if __name__ == "__main__":
     # find_local_minima(store_data=False)
 
     # Comparison over multiple instances (batch):
-    compare_tune_baseline(N_batch=20, N_runs=50)
+    # compare_tune_baseline(N_batch=20, N_runs=50, mode="prob_data")
+    # compare_tune_baseline(N_batch=20, N_runs=50, mode="spdr")
+    # compare_tune_baseline(N_batch=20, N_runs=50, mode="theseus_gt")
+    # compare_tune_baseline(N_batch=20, N_runs=50, mode="theseus_rand")
 
     # Post Processing
-    # compare_tune_baseline_pp(
-    #     filename="compare_tune_b0p003_sgd_20btchs_1runs.pkl", ind=0
-    # )
+    compare_tune_baseline_pp(ind=0)
     # get_statistics()
     # baseline_param_plots()
 

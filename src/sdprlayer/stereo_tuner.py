@@ -442,6 +442,7 @@ def build_theseus_layer(N_map, N_batch=1, opt_kwargs_in={}):
     }
     opt_kwargs.update(opt_kwargs_in)
     layer = th.TheseusLayer(th.GaussNewton(objective, **opt_kwargs))
+    # layer = th.TheseusLayer(th.Dogleg(objective, **opt_kwargs))
     # layer = th.TheseusLayer(th.LevenbergMarquardt(objective, **opt_kwargs))
 
     return layer
@@ -477,8 +478,7 @@ def tune_stereo_params_theseus(
     if not torch.is_tensor(r_p0s_gt):
         r_p0s_gt = torch.tensor(r_p0s_gt, dtype=torch.double).squeeze(-1)
         C_p0s_gt = torch.tensor(C_p0s_gt, dtype=torch.double)
-    else:
-        assert r_p0s_gt.shape == (N_batch, 3, 1)
+    elif r_p0s_gt.ndim == 3:
         r_p0s_gt.squeeze_(-1)
 
     # Build layer
@@ -550,12 +550,17 @@ def tune_stereo_params_theseus(
                 params=np.stack([p.detach().numpy() for p in params]),
                 loss=loss_stored[-1],
                 grad_sq=grad_sq,
-                loss_inner=info_inner.best_err,
+                loss_inner=info_inner.best_err.detach().numpy(),
                 n_iter=n_iter,
-                solution=(r_p0s_init, C_p0s_init),
+                solution=(r_p0s_init.detach().numpy(), C_p0s_init.detach().numpy()),
                 time_inner=stop - start,
+                n_iter_inner=torch.max(info_inner.converged_iter).detach().numpy(),
+                opt_status=info_inner.status,
             )
         ]
+        # Make sure that optimization actually converges
+        flags = np.array([status.value for status in info_inner.status])
+        assert all(flags == 1), "Inner optimization did not converge"
 
         n_iter += 1
 
