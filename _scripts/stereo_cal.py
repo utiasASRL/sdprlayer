@@ -9,7 +9,7 @@ import torch
 
 
 from mwcerts.stereo_problems import skew
-from utils import make_dirs_safe
+from utils import make_dirs_safe, savefig, make_axes_transparent
 import sdprlayer.stereo_tuner as st
 
 
@@ -227,7 +227,7 @@ def plot_map(r_l, ax=None, **kwargs):
         fig = plt.figure()
         ax = fig.add_subplot(111, projection="3d")
 
-    ax.plot(*r_l, ".", color="k")
+    ax.plot(*r_l, "*", color="k", markersize=2, **kwargs)
 
 
 def run_sdpr_cal(r_p0s, C_p0s, r_ls, pixel_meass):
@@ -262,13 +262,13 @@ def run_sdpr_cal(r_p0s, C_p0s, r_ls, pixel_meass):
     )
 
 
-def find_local_minima(N_inits=100, store_data=False, **kwargs):
+def find_local_minima(N_inits=100, store_data=False, check=False, **kwargs):
     set_seed(5)
     radius = 3
     # Generate data
     r_p0s, C_p0s, r_ls, pixel_meass = get_cal_data(
         radius=radius,
-        board_dims=[0.6, 1.0],
+        board_dims=[1.0, 1.0],
         N_squares=[8, 8],
         N_batch=1,
         plot=False,
@@ -345,7 +345,7 @@ def find_local_minima(N_inits=100, store_data=False, **kwargs):
     ax = fig.add_subplot(111, projection="3d")
     plot_poses(C_sols, r_sols, ax=ax, alpha=0.2)
     plot_poses(C_p0s, r_p0s, ax=ax, color="k")
-    plot_map(r_ls[0].detach().numpy(), ax=ax)
+    plot_map(r_ls[0].detach().numpy(), ax=ax, alpha=0.5)
 
     ax.set_xlabel("X")
     ax.set_ylabel("Y")
@@ -365,44 +365,30 @@ def find_local_minima(N_inits=100, store_data=False, **kwargs):
     r_p0s_init_g = r_p0s_init[ind_global]
     C_p0s_init_g = C_p0s_init[ind_global]
 
-    fig = plt.figure()
-    ax = fig.add_subplot(111, projection="3d")
-    plot_poses(C_sols, r_sols, ax=ax, alpha=0.2)
-    plot_poses(C_p0s, r_p0s, ax=ax, color="k")
-    plot_map(r_ls[0].detach().numpy(), ax=ax)
-    plot_poses(C_p0s_init_l, r_p0s_init_l, ax=ax, color="r")
-    plot_poses(C_p0s_init_g, r_p0s_init_g, ax=ax, color="g")
-    plt.title("Local (red) and Global (green) Initializations")
-    ax.set_xlabel("X")
-    ax.set_ylabel("Y")
-    ax.set_zlabel("Z")
-    r = radius * 1.1
-    ax.set_xlim(-r, r)
-    ax.set_ylim(-r, r)
-    ax.set_zlim(-r, r)
-    plt.show()
-
     # Double check
-    with torch.no_grad():
-        # Set initializations and measurements
-        theseus_inputs = {
-            "C_p0s": C_p0s_init_l,
-            "r_p0s": r_p0s_init_l[:, :, 0],
-            "r_ls": r_ls,
-            "meas": meas,
-            "weights": weights,
-        }
-        # Run theseus
-        assert len(r_p0s_init_l) > 0, "No local minima found"
-        out, info = layer.forward(
-            theseus_inputs,
-            optimizer_kwargs={
-                "track_best_solution": True,
-                "verbose": True,
-                "backward_mode": "implicit",
-            },
-        )
-        assert torch.all(info.best_err > 120.0), "Local minima should have higher loss"
+    if check:
+        with torch.no_grad():
+            # Set initializations and measurements
+            theseus_inputs = {
+                "C_p0s": C_p0s_init_l,
+                "r_p0s": r_p0s_init_l[:, :, 0],
+                "r_ls": r_ls,
+                "meas": meas,
+                "weights": weights,
+            }
+            # Run theseus
+            assert len(r_p0s_init_l) > 0, "No local minima found"
+            out, info = layer.forward(
+                theseus_inputs,
+                optimizer_kwargs={
+                    "track_best_solution": True,
+                    "verbose": True,
+                    "backward_mode": "implicit",
+                },
+            )
+            assert torch.all(
+                info.best_err > 120.0
+            ), "Local minima should have higher loss"
 
     # Store data
     if store_data:
@@ -412,14 +398,61 @@ def find_local_minima(N_inits=100, store_data=False, **kwargs):
             C_p0s=C_p0s,
             r_ls=r_ls,
             pixel_meass=pixel_meass,
-            r_p0s_init_l=r_p0s_init_l[0],
-            C_p0s_init_l=C_p0s_init_l[0],
-            r_p0s_init_g=r_p0s_init_g[0],
-            C_p0s_init_g=C_p0s_init_g[0],
+            r_p0s_init_l=r_p0s_init_l,
+            C_p0s_init_l=C_p0s_init_l,
+            r_p0s_init_g=r_p0s_init_g,
+            C_p0s_init_g=C_p0s_init_g,
+            C_sols=C_sols,
+            r_sols=r_sols,
         )
         folder = os.path.dirname(os.path.realpath(__file__))
         folder = os.path.join(folder, "outputs")
         dump(prob_data, open(folder + "/stereo_cal_local_min_init.pkl", "wb"))
+
+
+def intialization_plots():
+    """Generate initialization and setup plots"""
+    folder = os.path.dirname(os.path.realpath(__file__))
+    folder = os.path.join(folder, "outputs")
+    data = load(open(folder + "/stereo_cal_local_min_init.pkl", "rb"))
+    C_p0s = data["C_p0s"]
+    r_p0s = data["r_p0s"]
+    r_ls = data["r_ls"]
+    C_p0s_init_l = data["C_p0s_init_l"]
+    r_p0s_init_l = data["r_p0s_init_l"]
+    C_p0s_init_g = data["C_p0s_init_g"]
+    r_p0s_init_g = data["r_p0s_init_g"]
+    C_sols = data["C_sols"]
+    r_sols = data["r_sols"]
+
+    fig_localmin = plt.figure(figsize=(10, 10))
+    ax = fig_localmin.add_subplot(111, projection="3d")
+    plot_poses(C_sols, r_sols, ax=ax, color="orange", alpha=0.8)
+    plot_poses(C_p0s, r_p0s, ax=ax, color="magenta", linewidth=5)
+    plot_map(r_ls[0].detach().numpy(), ax=ax)
+    plot_poses(C_p0s_init_l, r_p0s_init_l, ax=ax, color="r", alpha=0.7)
+    plot_poses(C_p0s_init_g, r_p0s_init_g, ax=ax, color="g", alpha=0.7)
+    # plt.title("Local (red) and Global (green) Initializations")
+    radius = 3
+    r = radius * 0.9
+    ax.set_xlim(-r, r)
+    ax.set_ylim(-r, r)
+    ax.set_zlim(-r, r)
+    ax.axis("equal")
+    make_axes_transparent(ax)
+
+    fig_setup = plt.figure(figsize=(10, 10))
+    ax = fig_setup.add_subplot(111, projection="3d")
+    plot_map(r_ls[0].detach().numpy(), ax=ax)
+    plot_poses(C_p0s, r_p0s, ax=ax)
+    make_axes_transparent(ax)
+    r = radius * 0.7
+    ax.set_xlim(-r, r)
+    ax.set_ylim(-r, r)
+    ax.set_zlim(-r, r)
+    plt.show()
+    savefig(fig_localmin, "stereo_cal_local_min_init.png", dpi=400)
+    savefig(fig_setup, "stereo_setup.png", dpi=400)
 
 
 # BATCH TUNING COMPARISON
@@ -697,6 +730,7 @@ def plot_converged_vals(filename="compare_tune_b0p003_batch.pkl", ind=0):
 
 
 def get_statistics(fname="str_tune_b0p003_sgd_20b_50r"):
+    """Generate statisitics tables for baseline tuning"""
     # Load data
     folder = os.path.dirname(os.path.realpath(__file__))
     folder = os.path.join(folder, "outputs")
@@ -738,14 +772,23 @@ def get_statistics(fname="str_tune_b0p003_sgd_20b_50r"):
 
     # Make dataframe
 
+    # df = DataFrame(
+    #     {
+    #         "Method": desc,
+    #         "Final Baseline (avg)": param_err_mean,
+    #         "Final Baseline (std)": param_err_std,
+    #         "Number of Iterations (avg)": n_iters_mean,
+    #         "Number of Iterations (std)": n_iters_std,
+    #         "Avg Time per Iter": t_iter_mean,
+    #         "Outer Loss (avg)": loss_mean,
+    #     }
+    # )
     df = DataFrame(
         {
             "Method": desc,
             "Final Baseline (avg)": param_err_mean,
             "Final Baseline (std)": param_err_std,
             "Number of Iterations (avg)": n_iters_mean,
-            "Number of Iterations (std)": n_iters_std,
-            "Avg Time per Iter": t_iter_mean,
             "Outer Loss (avg)": loss_mean,
         }
     )
@@ -757,6 +800,7 @@ def get_statistics(fname="str_tune_b0p003_sgd_20b_50r"):
 
 
 def baseline_param_plots(fname="str_tune_b0p003_sgd_20b_50r"):
+    """Plots all parameter trajectories for baseline tuning"""
     # Load data
     folder = os.path.dirname(os.path.realpath(__file__))
     folder = os.path.join(folder, "outputs")
@@ -768,28 +812,94 @@ def baseline_param_plots(fname="str_tune_b0p003_sgd_20b_50r"):
     err_init = 0.003
     # Get data arrays
     n_runs = len(info_s)
-    plt.figure()
-    for i in range(n_runs):
-        if i == 0:
-            label1 = "SDPR"
-            label2 = "Theseus (rand init)"
-            label3 = "Theseus (gt init)"
-        else:
-            label1 = "_SDPR"
-            label2 = "_Theseus (rand init)"
-            label3 = "_Theseus (gt init)"
-        alpha = 0.5
-        p_s = np.vstack([err_init, np.vstack(info_s[i]["params"].values) - 0.24])
-        p_tl = np.vstack([err_init, np.vstack(info_tl[i]["params"].values) - 0.24])
-        p_tg = np.vstack([err_init, np.vstack(info_tg[i]["params"].values) - 0.24])
-        plt.plot(p_s, color="g", alpha=alpha, label=label1)
-        plt.plot(p_tl, color="r", alpha=alpha, label=label2)
-        plt.plot(p_tg, color="b", alpha=alpha, label=label3)
+
+    def plot_figure():
+        for i in range(n_runs):
+            if i == 0:
+                label1 = "SDPRLayer"
+                label2 = "Theseus (rand init)"
+                label3 = "Theseus (gt init)"
+            else:
+                label1 = "_SDPRLayer"
+                label2 = "_Theseus (rand init)"
+                label3 = "_Theseus (gt init)"
+            alpha = 0.5
+            linewidth = 1
+            p_s = np.vstack([err_init, np.vstack(info_s[i]["params"].values) - 0.24])
+            p_tl = np.vstack([err_init, np.vstack(info_tl[i]["params"].values) - 0.24])
+            p_tg = np.vstack([err_init, np.vstack(info_tg[i]["params"].values) - 0.24])
+            plt.plot(p_tl, color="r", alpha=alpha, linewidth=linewidth, label=label2)
+            plt.plot(p_tg, color="b", alpha=alpha, linewidth=linewidth, label=label3)
+            plt.plot(p_s, color="g", alpha=alpha, linewidth=linewidth, label=label1)
+
+    fsize = 7
+    fig = plt.figure(figsize=(5, 4))
+    plot_figure()
+    plt.legend(loc="upper right")
+    plt.grid(True)
+    plt.ylabel("Parameter Error")
     plt.xlabel("Iteration")
-    plt.ylabel("Baseline Error")
-    # plt.yscale("log")
-    plt.legend()
+    plt.tight_layout()
     plt.show()
+    # save
+    savefig(fig, "baseline_param_err.png", dpi=500)
+    # zoom into region of interest
+    fig = plt.figure(figsize=(5, 2))
+    plot_figure()
+    plt.grid(True)
+    plt.ylabel("Parameter Error")
+    plt.xlabel("Iteration")
+    plt.ylim([-2e-3, 4e-3])
+    plt.xlim([0, 60])
+    plt.tight_layout()
+    plt.show()
+    savefig(fig, "baseline_param_err_zoom.png", dpi=500)
+
+
+def plot_grad_innerloss(fname="str_tune_b0p003_sgd_20b_50r", ind=0):
+    # Load data
+    folder = os.path.dirname(os.path.realpath(__file__))
+    folder = os.path.join(folder, "outputs")
+    folder = os.path.join(folder, fname)
+
+    info_s = load(open(folder + "/stereo_tune_spdr.pkl", "rb"))[ind]
+    info_tl = load(open(folder + "/stereo_tune_theseus_rand.pkl", "rb"))[ind]
+    info_tg = load(open(folder + "/stereo_tune_theseus_gt.pkl", "rb"))[ind]
+    # process inner losses
+    info_tl["loss_inner_avg"] = info_tl["loss_inner"].apply(lambda x: np.mean(x))
+    info_tg["loss_inner_avg"] = info_tg["loss_inner"].apply(lambda x: np.mean(x))
+    info_s["loss_inner_avg"] = info_s["loss_inner"]  # already averaged
+
+    fig, axs = plt.subplots(2, 1, figsize=(6, 4))
+    axs[0].plot(info_tl["loss_inner_avg"], label="Theseus (rand init)")
+    axs[0].plot(info_tg["loss_inner_avg"], label="Theseus (gt init)")
+    axs[0].plot(info_s["loss_inner_avg"], label="SDPRLayer")
+    axs[0].set_yscale("log")
+    axs[0].set_ylabel("Inner Loss\n(Batch Avg)")
+    axs[0].grid(True)
+    axs[0].tick_params(
+        axis="x",  # changes apply to the x-axis
+        which="both",  # both major and minor ticks are affected
+        bottom=False,  # ticks along the bottom edge are off
+        top=False,  # ticks along the top edge are off
+        labelbottom=False,
+    )  # labels along the bottom edge are off
+    axs[0].legend()
+
+    # plot gradient
+    axs[1].plot(info_tl["grad_sq"].apply(np.sqrt), label="Theseus (rand init)")
+    axs[1].plot(info_tg["grad_sq"].apply(np.sqrt), label="Theseus (gt init)")
+    axs[1].plot(info_s["grad_sq"].apply(np.sqrt), label="SDPRLayer")
+    axs[1].set_ylabel("Gradient (Mag.)")
+    axs[1].set_xlabel("Iteration")
+    axs[1].set_yscale("log")
+    axs[1].grid(True)
+    plt.tight_layout()
+    # Move plots closer together
+    plt.subplots_adjust(hspace=0.1)
+    plt.show()
+
+    savefig(fig, "baseline_grad_innerloss.png", dpi=500)
 
 
 def baseline_noise_analysis(N_batch=20, N_runs=10):
@@ -902,8 +1012,9 @@ if __name__ == "__main__":
     #     setup="cone", cone_angles=(np.pi / 4, np.pi / 4), N_batch=100, plot=True
     # )
 
-    # Local minimum search
-    # find_local_minima(store_data=False)
+    # Local minimum search and setup plots
+    # find_local_minima(store_data=True)
+    intialization_plots()
 
     # Comparison over multiple instances (batch):
     # compare_tune_baseline(N_batch=20, N_runs=50, mode="prob_data")
@@ -912,9 +1023,10 @@ if __name__ == "__main__":
     # compare_tune_baseline(N_batch=20, N_runs=50, mode="theseus_rand")
 
     # Post Processing
-    compare_tune_baseline_pp(ind=0)
+    # compare_tune_baseline_pp(ind=0)
     # get_statistics()
     # baseline_param_plots()
+    # plot_grad_innerloss()
 
     # Noise analysis
     # baseline_noise_analysis(N_batch=20, N_runs=10)

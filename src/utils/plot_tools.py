@@ -16,10 +16,22 @@ def make_dirs_safe(path):
         os.makedirs(dirname)
 
 
-def savefig(fig, name, verbose=True):
+def make_axes_transparent(ax):
+    # make the panes transparent
+    ax.xaxis.set_pane_color((1.0, 1.0, 1.0, 0.0))
+    ax.yaxis.set_pane_color((1.0, 1.0, 1.0, 0.0))
+    ax.zaxis.set_pane_color((1.0, 1.0, 1.0, 0.0))
+    # make the grid lines transparent
+    ax.xaxis._axinfo["grid"]["color"] = (1, 1, 1, 0)
+    ax.yaxis._axinfo["grid"]["color"] = (1, 1, 1, 0)
+    ax.zaxis._axinfo["grid"]["color"] = (1, 1, 1, 0)
+    ax.set_axis_off()
+
+
+def savefig(fig, name, dpi=200, verbose=True):
     name = os.path.join(fig_dir, name)
     make_dirs_safe(name)
     ext = name.split(".")[-1]
-    fig.savefig(name, bbox_inches="tight", pad_inches=0.1, transparent=True, dpi=200)
+    fig.savefig(name, bbox_inches="tight", pad_inches=0.1, transparent=True, dpi=dpi)
     if verbose:
         print(f"saved plot as {name}")
