@@ -14,9 +14,9 @@ from sdprlayer import SDPRLayer
 root_dir = os.path.abspath(os.path.dirname(__file__) + "/../")
 
 
-class testSDPRPoly8(unittest.TestCase):
+class testSDPRPoly6(unittest.TestCase):
     def __init__(self, *args, **kwargs):
-        super(testSDPRPoly8, self).__init__(*args, **kwargs)
+        super(testSDPRPoly6, self).__init__(*args, **kwargs)
 
 
 def get_prob_data():

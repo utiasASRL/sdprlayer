@@ -190,4 +190,5 @@ if __name__ == "__main__":
     # unittest.main()
     # TestSDPRLayer().test_scs_compare_primaldual
     # TestSDPRLayer().test_scs_msk_compare_dual()
-    TestSDPRLayer().test_dual_mosek()
+    TestSDPRLayer().test_primal_scs()
+    # TestSDPRLayer().test_dual_mosek()
