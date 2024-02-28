@@ -24,7 +24,7 @@ def get_prob_data():
     p_vals = np.array(
         [5.0000, 1.3167 * 2, -1.4481 * 3, 0 * 4, 0.2685 * 3, -0.0667 * 2, 0.0389]
     )
-
+    # homogenizing constraint not included here as it is added by the layer
     constraints = []
     A = sp.csc_array((4, 4))  # x^2 = x*x
     A[2, 0] = 1 / 2
@@ -142,9 +142,9 @@ def test_prob_sdp(display=False):
     def gen_loss(p_val, **kwargs):
         x_target = -1
         sdp_solver_args = {"eps": 1e-9}
-        (sol,) = optlayer(build_data_mat(p_val), solver_args=sdp_solver_args)
-        loss = 1 / 2 * (sol[1, 0] - x_target) ** 2
-        return loss, sol
+        X, x = optlayer(build_data_mat(p_val), solver_args=sdp_solver_args)
+        loss = 1 / 2 * (x[0, 0] - x_target) ** 2
+        return loss, X
 
     # Define Optimizer
     opt = torch.optim.Adam(params=[p], lr=1e-2)
@@ -453,4 +453,5 @@ if __name__ == "__main__":
     # test_grad_sdp()
     # test_grad_sdp_mosek()
     # test_grad_local()
-    test_run_sdp()
+    # test_run_sdp()
+    test_prob_sdp(display=True)

@@ -33,7 +33,6 @@ class SDPRLayer(CvxpyLayer):
         objective=None,
         homogenize=False,
         use_dual=True,
-        add_homog_constr=True,
         local_solver=None,
         local_args={},
         certifier=None,
@@ -43,8 +42,8 @@ class SDPRLayer(CvxpyLayer):
         call. If homogenize input is True, it is assumed that the problem is in the standard
         non-convex, non-homogenized form.
 
-        min x^T F x + _f^T x + f
-        s.t. x^T G_i x + _g_i^T x + g_i = 0
+        min x^T F x + fvec^T x + f
+        s.t. x^T G_i x + gvec_i^T x + g_i = 0
 
         These matrices are then converted into homogenized form (below).
         If homogenize flag is set False then it is assumed that the problem is already in
@@ -82,6 +81,8 @@ class SDPRLayer(CvxpyLayer):
         if homogenize:
             n_vars = n_vars + 1
         # parameter list (for cvxpylayers)
+        # NOTE: parameters are the optimization matrices and are always
+        # stored in homogenized form
         params = []
         # objective matrix
         if objective is None:
@@ -155,44 +156,61 @@ class SDPRLayer(CvxpyLayer):
             parameters=params,
         )
 
-    def forward(self, objective=None, constraints=None, **kwargs):
-        """Run (differentiable) optimization using the provided input tensors"""
+    def forward(self, *params, **kwargs):
+        """Solve problem (or a batch of problems) corresponding to params
+        Args:
+          params: a sequence of torch Tensors. If the "homogenize" flag was
+                  set to true for the problem, then these tensors are assumed
+                  to come in triplets that define the parameterized objective
+                  and constraints. That is,
+                    params = F, fvec, f, G_1, gvec_1, g_1, ... , G_m, gvec_m, g_m
+                  If the homoginize flag is set to False for the problem,
+                  then these tensors must be the homogenized objective and
+                  constraint matrices. That is,
+                    params = Q, A_1, ..., A_m
+                  These Tensors can have either 2 or 3 dimenstions. If a
+                  Tensor has 3 dimensions, then its first dimension is
+                  interpreted as the batch size. These Tensors must all have
+                  the same dtype and device.
+          kwargs: key word arguments to be passed into the cvxpylayer. For
+                  example, `solver_args'
 
-        # get objective function values
-        if objective is not None:
-            if self.homogenize:
+        Returns:
+          a list of optimal variable values, one for each CVXPY Variable
+          supplied to the constructor.
+
+        """
+
+        if self.homogenize:
+            assert len(self.param_ids) * 3 == len(
+                params
+            ), "Expected 3 inputs per parameter to homogenize constraints"
+            params_homog = []
+            ind = 0
+            while ind < len(params):
+                # Unpack
+                mat, vec, const = params[ind : ind + 3]
+                # check dimensions
                 assert (
-                    objective is tuple
-                ), "objective input must be tuple if homogenize flag is active."
-                # Convert to batch
-                if objective[0].ndim == 2:
-                    Qs = self.homog_matrix(*objective).unsqueeze(0)
-                else:  # batch
-                    Qs = torch.vmap(self.homog_matrix)(*objective)
-            else:
-                if objective[0].ndim == 2:
-                    Qs = objective.unsqueeze(0)
-                else:
-                    Qs = objective
-        else:
-            Qs = []
-        # Get constraint values
-        if constraints is not None:
-            As = []
-            for constraint in constraints:
-                if self.homogenize:
+                    mat.ndims == vec.ndims and vec.ndims == const.ndims
+                ), "Inconsistent dimensions on inputs"
+                # check batch dimension
+                if mat.ndims > 2:
+                    if ind == 0:  # get batch dimension
+                        N_batch = mat.shape[0]
                     assert (
-                        constraint is tuple
-                    ), "constraint must be list of tuples if homogenize flag is active"
-                    if constraint[0].ndims == 2:
-                        As += [self.homog_matrix(*constraint).unsqueeze(0)]
-                    else:  # batch
-                        As += [torch.vmap(self.homog_matrix)(*constraint)]
+                        mat.shape[0] == N_batch
+                        and vec.shape[0] == N_batch
+                        and const.shape[0] == N_batch
+                    ), "Inconsistent batch dimesion"
+                    # Homogenize
+                    params_homog += [torch.vmap(self.homog_matrix)(mat, vec, const)]
+                else:
+                    params_homog += [self.homog_matrix(mat, vec, const)]
         else:
-            As = []
-        N_batch = Qs.shape[0]
-        # Store parameter values
-        param_vals = [Qs] + As
+            params_homog = params
+            N_batch = params_homog[0].shape[0]
+
         # Define new kwargs to not affect original
         kwargs_new = deepcopy(kwargs)
         # If using external solver then we need to solve and then inject solution
@@ -206,7 +224,7 @@ class SDPRLayer(CvxpyLayer):
                 for iBatch in range(N_batch):
                     # Populate CVXPY Parameters with batch values
                     for i in range(len(self.params)):
-                        self.params[i].value = param_vals[i][iBatch].detach().numpy()
+                        self.params[i].value = params_homog[i][iBatch].detach().numpy()
                     # Solve the problem
                     if method == "mosek":
                         assert "MOSEK" in cp.installed_solvers(), "MOSEK not installed"
@@ -261,7 +279,7 @@ class SDPRLayer(CvxpyLayer):
                     kwargs_new["solver_args"] = solver_args
 
         # Call cvxpylayers forward function
-        res = super().forward(*param_vals, **kwargs_new)
+        res = super().forward(*params_homog, **kwargs_new)
 
         # TODO If using mosek or local then overwrite the primal solution for better numerical accuracy?
 
