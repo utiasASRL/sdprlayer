@@ -1,15 +1,11 @@
 import unittest
 
-import cvxpy as cp
 import numpy as np
 import numpy.random as npr
+import scipy.linalg as la
 import torch
-from torch.autograd import grad
-import matplotlib.pyplot as plt
 
-from cvxpylayers.torch import CvxpyLayer
 from sdprlayer import SDPRLayer
-import diffcp
 
 torch.set_default_dtype(torch.double)
 
@@ -25,6 +21,30 @@ class TestSDPRLayer(unittest.TestCase):
         self.n = 4
         self.p = 2
 
+    def test_if_1(self):
+        # Interface test 1: cost parameterized, constraints fixed, no batch
+        set_seed(2)
+        n = self.n
+        p = self.p
+        constraints = []
+        for i in range(p):
+            A = np.random.rand(n - 1, n - 1)
+            A = A @ A.T
+            b = np.random.rand(1, 1)
+            A = la.block_diag(b, A)
+            constraints.append(A)
+        constraints.append(A)
+        layer = SDPRLayer(n, constraints=constraints, use_dual=False)
+        C_tch = torch.randn(n, n, requires_grad=True).double()
+        C_tch_symm = (C_tch + C_tch.t()) / 2
+        torch.autograd.gradcheck(
+            lambda *x: layer(*x, solver_args={"eps": 1e-12, "verbose": True}),
+            [C_tch_symm],
+            eps=1e-6,
+            atol=1e-5,
+            rtol=1e-5,
+        )
+
     def test_primal_scs(self):
         set_seed(2)
         n = self.n
@@ -33,8 +53,7 @@ class TestSDPRLayer(unittest.TestCase):
         for i in range(p):
             A = np.random.rand(n, n)
             A = A @ A.T
-            b = np.random.rand(1)
-            constraints.append((A, b))
+            constraints.append(A)
         layer = SDPRLayer(n, constraints=constraints, use_dual=False)
         C_tch = torch.randn(n, n, requires_grad=True).double()
         C_tch_symm = (C_tch + C_tch.t()) / 2
@@ -190,5 +209,5 @@ if __name__ == "__main__":
     # unittest.main()
     # TestSDPRLayer().test_scs_compare_primaldual
     # TestSDPRLayer().test_scs_msk_compare_dual()
-    TestSDPRLayer().test_primal_scs()
     # TestSDPRLayer().test_dual_mosek()
+    TestSDPRLayer().test_if_1()

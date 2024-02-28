@@ -30,22 +30,24 @@ class SDPRLayer(CvxpyLayer):
         self,
         n_vars,
         constraints,
-        cost=None,
-        homog=False,  # Indicates whether formulation is already homogenized
+        objective=None,
+        homogenize=False,
+        use_dual=True,
+        add_homog_constr=True,
         local_solver=None,
         local_args={},
         certifier=None,
-        use_dual=True,
     ):
         """Initialize the SDPRLayer class. This functions sets up the SDP relaxation
         using CVXPY, adding in parameters to be filled in later during forward function
-        call. If homog input is False, it is assumed that the problem is in the standard
-        non-convex, non-homogenized form:
+        call. If homogenize input is True, it is assumed that the problem is in the standard
+        non-convex, non-homogenized form.
 
         min x^T F x + _f^T x + f
         s.t. x^T G_i x + _g_i^T x + g_i = 0
 
-        If homog flag is set true then it is assumed that the problem is already in
+        These matrices are then converted into homogenized form (below).
+        If homogenize flag is set False then it is assumed that the problem is already in
         homogenized form:
 
         min x^T Q x
@@ -54,70 +56,76 @@ class SDPRLayer(CvxpyLayer):
 
         NOTE: The homogenization variable is assumed to be at the first position of x.
         NOTE: The homogenization constraint is assumed to come last.
-        If any of the cost or constraints are meant to be parameterized, then they should
+        If any of the objective or constraints are meant to be parameterized, then they should
         be set to None. Otherwise, they should be set to the fixed values.
 
         Functionality for local_solvers and certifiers is currently not fully implemented.
 
         Args:
-            n_vars (_type_): _description_
-            constraints (_type_): _description_
-            homog (bool, optional): _description_. Defaults to False.
-            local_args (dict, optional): _description_. Defaults to {}.
-            certifier (_type_, optional): _description_. Defaults to None.
-            use_dual (bool, optional): _description_. Defaults to True.
+            n_vars (int): dimension of variable vector x
+            constraints (list): list of constraints, either 3-tuple or matrices
+            objective (tuple or array): objective function, either 3-tuple or matrix
+            homogenize (boolean): defaults to False. If true, constraints and objective are converted to matrices from 3-tuples
+            local_solver=None,
+            local_args={},
+            certifier=None,
+            use_dual=True,
         """
         # Store information
+        self.homogenize = homogenize
+        self.constraints = constraints
+        self.use_dual = use_dual
         self.local_solver = local_solver
         self.local_args = local_args
         self.certifier = certifier
-        self.homog = homog
-        self.constraints = constraints
-        self.use_dual = use_dual
-        # Check if problem is alread
-        if not homog:
+        # Add homogenization variable
+        if homogenize:
             n_vars = n_vars + 1
         # parameter list (for cvxpylayers)
         params = []
-        # cost matrix
-        if cost is None:
+        # objective matrix
+        if objective is None:
             Q = cp.Parameter((n_vars, n_vars), symmetric=True)
             params += [Q]
+        elif self.homogenize:
+            assert (
+                objective is tuple
+            ), "objective input must be tuple if homogenize flag is active"
+            Q = self.homog_matrix(*objective)
         else:
-            if not homog:
-                Q = self.homogenize(cost[0], cost[1], cost[2])
+            Q = objective
 
-        m = len(self.constraints)
         # check constraints set to None are asssumed to be parameterized
         for iConstr in range(len(constraints)):
             if self.constraints[iConstr] is None:
                 self.constraints[iConstr] = cp.Parameter(
                     (n_vars, n_vars), symmetric=True
                 )
+                # Add constraint to the list of parameters
                 params += list(self.constraints[iConstr])
             else:
-                if not homog:
-                    self.constraints[iConstr] = self.homogenize(
-                        self.constraints[iConstr][0],
-                        self.constraints[iConstr][1],
-                        self.constraints[iConstr][2],
+                if self.homogenize:
+                    assert (
+                        self.constraints[iConstr] is tuple
+                    ), "constraint must be list of tuples if homogenize flag is active"
+                    self.constraints[iConstr] = self.homog_matrix(
+                        *self.constraints[iConstr]
                     )
-
-        # Add constraint for homogenization if required - homogenization
-        # variable is assumed to be at the first index
-        if not homog:
-            A_0 = sp.csc_array((n_vars, n_vars))
-            A_0[0, 0] = 1.0
-            self.constraints += [(A_0, 1.0)]
-
+                else:  # otherwise constraint is already set up properly
+                    continue
+        N_constrs = len(self.constraints)
+        # homenization constraint matrix
+        A_0 = sp.csc_array((n_vars, n_vars))
+        A_0[0, 0] = 1.0
         # Set Standard Formulation (Homogenized SDP)
         # If using local solver then must use dual formulation to avoid
         # definition of extra slacks by CVXPY
         if use_dual or local_solver is not None:
-            y = cp.Variable(shape=(m,))
-            # objective always corresponds to the lagrange mult of the last constraint
-            objective = cp.Maximize(y[-1])
+            y = cp.Variable(shape=(N_constrs,))
+            rho = cp.Variable(shape=(1,))  # homog constraint
+            objective = cp.Maximize(rho)
             LHS = cp.sum([y[i] * Ai for (i, Ai) in enumerate(self.constraints)])
+            LHS += rho * A_0
             constraint = LHS << Q
             problem = cp.Problem(objective, [constraint])
             variables = []
@@ -129,7 +137,8 @@ class SDPRLayer(CvxpyLayer):
             X = cp.Variable((n_vars, n_vars), symmetric=True)
             constraints = [X >> 0]
             for A in self.constraints:
-                constraints += [cp.trace(A @ X) == 0]
+                constraints += [cp.trace(A @ X) == 0.0]
+            constraints += [cp.trace(A_0 @ X) == 1.0]
             objective = cp.Minimize(cp.trace(Q @ X))
             problem = cp.Problem(objective=objective, constraints=constraints)
             variables = [X]
@@ -146,36 +155,44 @@ class SDPRLayer(CvxpyLayer):
             parameters=params,
         )
 
-    def forward(self, cost=None, constraints=None, **kwargs):
+    def forward(self, objective=None, constraints=None, **kwargs):
         """Run (differentiable) optimization using the provided input tensors"""
 
-        if cost is not None:
-            if self.homog:
-                Qs = cost[0]
+        # get objective function values
+        if objective is not None:
+            if self.homogenize:
+                assert (
+                    objective is tuple
+                ), "objective input must be tuple if homogenize flag is active."
+                # Convert to batch
+                if objective[0].ndim == 2:
+                    Qs = self.homog_matrix(*objective).unsqueeze(0)
+                else:  # batch
+                    Qs = torch.vmap(self.homog_matrix)(*objective)
             else:
-                # If not homogenized, then homogenize the cost function
-                Qs = torch.vmap(self.homogenize)(cost[0], cost[1], cost[2])
-        if constraints is not None:
-            if self.homog:
-                As = constraints
-            else:
-                As = []
-                for iConstr in range(len(constraints)):
-                    # If not homogenized, then homogenize the constraints
-                    As += [
-                        torch.vmap(self.homogenize)(
-                            constraints[iConstr][0],
-                            constraints[iConstr][1],
-                            constraints[iConstr][2],
-                        )
-                    ]
-        # Store parameter values in a list
-        param_vals = Qs + As
-        # get batch dimension and unsqueeze if not batched
-        if Qs.ndim == 2:
-            N_batch = 1
+                if objective[0].ndim == 2:
+                    Qs = objective.unsqueeze(0)
+                else:
+                    Qs = objective
         else:
-            N_batch = Qs.shape[0]
+            Qs = []
+        # Get constraint values
+        if constraints is not None:
+            As = []
+            for constraint in constraints:
+                if self.homogenize:
+                    assert (
+                        constraint is tuple
+                    ), "constraint must be list of tuples if homogenize flag is active"
+                    if constraint[0].ndims == 2:
+                        As += [self.homog_matrix(*constraint).unsqueeze(0)]
+                    else:  # batch
+                        As += [torch.vmap(self.homog_matrix)(*constraint)]
+        else:
+            As = []
+        N_batch = Qs.shape[0]
+        # Store parameter values
+        param_vals = [Qs] + As
         # Define new kwargs to not affect original
         kwargs_new = deepcopy(kwargs)
         # If using external solver then we need to solve and then inject solution
@@ -244,24 +261,24 @@ class SDPRLayer(CvxpyLayer):
                     kwargs_new["solver_args"] = solver_args
 
         # Call cvxpylayers forward function
-        res = super().forward(param_vals, **kwargs_new)
-        # TODO If using mosek or local then overwrite the results for
-        # better accuracy.
+        res = super().forward(*param_vals, **kwargs_new)
+
+        # TODO If using mosek or local then overwrite the primal solution for better numerical accuracy?
+
         # Extract non-homogenized solution
         Xs = res[0]
         xs = self.recovery_map(Xs)
-
         return Xs, xs
 
     @staticmethod
-    def recovery_map(self, Xs, round=False):
+    def recovery_map(Xs, round=False):
         """Extract the rank-1 solution from the SDP matrix solution"""
         # Expand dimension if not batched.
         if Xs.ndim == 2:
             Xs = Xs.unsqueeze(0)
         # recovery vector QCQP variable
         if not round:
-            extract = torch.vmap(self.extract_rowcol)
+            extract = torch.vmap(SDPRLayer.extract_rowcol)
             xs = extract(Xs)
         else:
             # Not yet implemented, use SVD to get singular vector with max
@@ -270,11 +287,16 @@ class SDPRLayer(CvxpyLayer):
         return xs
 
     @staticmethod
-    def homogenize(F, fvec, f):
+    def homog_matrix(F, fvec, f):
         """Convert quadratic function to homogenized form (matrix)"""
-        Q_left = torch.vstack([f, 0.5 * fvec])
-        Q_right = torch.vstack([0.5 * fvec.transpose(), F])
-        Q = torch.hstack([Q_left, Q_right])
+        if torch.is_tensor(F) and torch.is_tensor(fvec) and torch.is_tensor(f):
+            Q_left = torch.hstack([f, 0.5 * fvec]).unsqueeze(1)
+            Q_right = torch.vstack([0.5 * fvec, F])
+            Q = torch.hstack([Q_left, Q_right])
+        else:
+            Q_left = np.hstack([f, 0.5 * fvec])
+            Q_right = np.vstack([0.5 * fvec, F])
+            Q = np.hstack([Q_left, Q_right])
         return Q
 
     @staticmethod

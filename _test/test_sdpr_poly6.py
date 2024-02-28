@@ -26,25 +26,22 @@ def get_prob_data():
     )
 
     constraints = []
-    A = sp.csc_array((4, 4))  # w^2 = 1
-    A[0, 0] = 1
-    constraints += [(A, 1.0)]
     A = sp.csc_array((4, 4))  # x^2 = x*x
     A[2, 0] = 1 / 2
     A[0, 2] = 1 / 2
     A[1, 1] = -1
-    constraints += [(A, 0.0)]
+    constraints += [A]
     A = sp.csc_array((4, 4))  # x^3 = x^2*x
     A[3, 0] = 1
     A[0, 3] = 1
     A[1, 2] = -1
     A[2, 1] = -1
-    constraints += [(A, 0.0)]
+    constraints += [A]
     A = sp.csc_array((4, 4))  # x^3*x = x^2*x^2
     A[3, 1] = 1 / 2
     A[1, 3] = 1 / 2
     A[2, 2] = -1
-    constraints += [(A, 0.0)]
+    constraints += [A]
 
     # Candidate solution
     x_cand = np.array([[1.0000, -1.4871, 2.2115, -3.2888]]).T
@@ -107,6 +104,24 @@ def certifier(Q, constraints, x_cand):
         raise ValueError("Unable to certify solution")
     # diffcp assumes the form:  H = Q - A*mult
     return output["H"], -output["mults"]
+
+
+def test_run_sdp():
+    """The goal of this script is to shift the optimum of the polynomial
+    to a different point by using backpropagtion on rank-1 SDPs"""
+    np.random.seed(2)
+    # Get data from data function
+    data = get_prob_data()
+    constraints = data["constraints"]
+    # Create SDPR Layer
+    optlayer = SDPRLayer(n_vars=4, constraints=constraints, use_dual=False)
+
+    # Set up polynomial parameter tensor
+    p = torch.tensor(data["p_vals"], requires_grad=True)
+    sdp_solver_args = {"eps": 1e-9, "verbose": True}
+    X, x = optlayer(build_data_mat(p), solver_args=sdp_solver_args)
+    x_vals = x.detach().numpy()
+    np.testing.assert_allclose(x_vals[0], data["x_cand"][1:, :], rtol=1e-3, atol=1e-3)
 
 
 def test_prob_sdp(display=False):
@@ -434,7 +449,8 @@ def test_grad_local(autograd_test=True):
 
 if __name__ == "__main__":
     # test_prob_sdp()
-    test_prob_local(display=True)
+    # test_prob_local(display=True)
     # test_grad_sdp()
     # test_grad_sdp_mosek()
     # test_grad_local()
+    test_run_sdp()
