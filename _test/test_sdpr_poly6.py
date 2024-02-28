@@ -94,11 +94,11 @@ def local_solver(p: torch.Tensor, x_init=0.0):
     return x_hat
 
 
-def certifier(Q, constraints, x_cand):
+def certifier(objective, constraints, x_cand):
     opts = opts_cut_dflt
     method = "cuts"
     _, output = solve_eopt(
-        Q=Q, Constraints=constraints, x_cand=x_cand, opts=opts, method=method
+        Q=objective, Constraints=constraints, x_cand=x_cand, opts=opts, method=method
     )
     if not output["status"] == "POS_LB":
         raise ValueError("Unable to certify solution")
@@ -121,7 +121,7 @@ def test_run_sdp():
     sdp_solver_args = {"eps": 1e-9, "verbose": True}
     X, x = optlayer(build_data_mat(p), solver_args=sdp_solver_args)
     x_vals = x.detach().numpy()
-    np.testing.assert_allclose(x_vals[0], data["x_cand"][1:, :], rtol=1e-3, atol=1e-3)
+    np.testing.assert_allclose(x_vals, data["x_cand"][1:, :], rtol=1e-3, atol=1e-3)
 
 
 def test_prob_sdp(display=False):
@@ -219,7 +219,7 @@ def test_prob_local(display=False):
     def gen_loss(p_val):
         x_target = -1
         sdp_solver_args = {"eps": 1e-9, "solve_method": "local"}
-        (sol,) = optlayer(build_data_mat(p_val), solver_args=sdp_solver_args)
+        sol, x = optlayer(build_data_mat(p_val), solver_args=sdp_solver_args)
         loss = 1 / 2 * (sol[1, 0] - x_target) ** 2
         return loss, sol
 
@@ -286,8 +286,8 @@ def test_grad_sdp(autograd_test=True, use_dual=True):
     # Define loss
     def gen_loss(p_val, **kwargs):
         x_target = -1
-        (sol,) = optlayer(build_data_mat(p_val), **kwargs)
-        x_val = (sol[1, 0] + sol[0, 1]) / 2
+        sol, x = optlayer(build_data_mat(p_val), **kwargs)
+        x_val = x[0, 0]
         loss = 1 / 2 * (x_val - x_target) ** 2
         return loss, sol
 
@@ -344,19 +344,19 @@ def test_grad_sdp_mosek(use_dual=True):
     # Define loss
     def gen_loss(p_val, **kwargs):
         x_target = -1
-        (sol,) = optlayer(build_data_mat(p_val), **kwargs)
-        x_val = (sol[1, 0] + sol[0, 1]) / 2
+        sol, x = optlayer(build_data_mat(p_val), **kwargs)
+        x_val = x[0, 0]
         loss = 1 / 2 * (x_val - x_target) ** 2
         return loss, sol
 
     # arguments for sdp solver
     mosek_params = {
         "MSK_IPAR_INTPNT_MAX_ITERATIONS": 500,
-        "MSK_DPAR_INTPNT_CO_TOL_PFEAS": 1e-9,
-        "MSK_DPAR_INTPNT_CO_TOL_REL_GAP": 1e-9,
-        "MSK_DPAR_INTPNT_CO_TOL_MU_RED": 1e-9,
-        "MSK_DPAR_INTPNT_CO_TOL_INFEAS": 1e-9,
-        "MSK_DPAR_INTPNT_CO_TOL_DFEAS": 1e-9,
+        "MSK_DPAR_INTPNT_CO_TOL_PFEAS": 1e-12,
+        "MSK_DPAR_INTPNT_CO_TOL_REL_GAP": 1e-12,
+        "MSK_DPAR_INTPNT_CO_TOL_MU_RED": 1e-12,
+        "MSK_DPAR_INTPNT_CO_TOL_INFEAS": 1e-12,
+        "MSK_DPAR_INTPNT_CO_TOL_DFEAS": 1e-12,
     }
     sdp_solver_args = {
         "solve_method": "mosek",
@@ -397,16 +397,16 @@ def test_grad_local(autograd_test=True):
     # Define loss
     def gen_loss_sdp(p_val, **kwargs):
         x_target = -1
-        (sol,) = optlayer_sdp(build_data_mat(p_val), **kwargs)
-        x_val = (sol[1, 0] + sol[0, 1]) / 2
+        sol, x = optlayer_sdp(build_data_mat(p_val), **kwargs)
+        x_val = x[0, 0]
         loss = 1 / 2 * (x_val - x_target) ** 2
         return loss, sol
 
     def gen_loss_local(p_val, **kwargs):
         x_target = -1
         kwargs.update(dict(solver_args=dict(solve_method="local")))
-        (sol,) = optlayer_local(build_data_mat(p_val), **kwargs)
-        x_val = (sol[1, 0] + sol[0, 1]) / 2
+        sol, x = optlayer_local(build_data_mat(p_val), **kwargs)
+        x_val = x[0, 0]
         loss = 1 / 2 * (x_val - x_target) ** 2
         return loss, sol
 
@@ -451,7 +451,7 @@ if __name__ == "__main__":
     # test_prob_sdp()
     # test_prob_local(display=True)
     # test_grad_sdp()
-    # test_grad_sdp_mosek()
+    test_grad_sdp_mosek()
     # test_grad_local()
     # test_run_sdp()
-    test_prob_sdp(display=True)
+    # test_prob_local()

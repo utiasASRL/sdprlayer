@@ -72,7 +72,7 @@ class SDPRLayer(CvxpyLayer):
         """
         # Store information
         self.homogenize = homogenize
-        self.constraints = constraints
+        self.constr_list = constraints
         self.use_dual = use_dual
         self.local_solver = local_solver
         self.local_args = local_args
@@ -95,37 +95,39 @@ class SDPRLayer(CvxpyLayer):
             Q = self.homog_matrix(*objective)
         else:
             Q = objective
+        # Store objective matrix (for use in certifier)
+        self.Q = Q
 
         # check constraints set to None are asssumed to be parameterized
         for iConstr in range(len(constraints)):
-            if self.constraints[iConstr] is None:
-                self.constraints[iConstr] = cp.Parameter(
+            if self.constr_list[iConstr] is None:  # Parameterized constraint
+                self.constr_list[iConstr] = cp.Parameter(
                     (n_vars, n_vars), symmetric=True
                 )
                 # Add constraint to the list of parameters
-                params += list(self.constraints[iConstr])
-            else:
+                params += list(self.constr_list[iConstr])
+            else:  # Fixed Constraint
                 if self.homogenize:
                     assert (
-                        self.constraints[iConstr] is tuple
+                        self.constr_list[iConstr] is tuple
                     ), "constraint must be list of tuples if homogenize flag is active"
-                    self.constraints[iConstr] = self.homog_matrix(
-                        *self.constraints[iConstr]
+                    self.constr_list[iConstr] = self.homog_matrix(
+                        *self.constr_list[iConstr]
                     )
                 else:  # otherwise constraint is already set up properly
                     continue
-        N_constrs = len(self.constraints)
+        N_constrs = len(self.constr_list)
         # homenization constraint matrix
-        A_0 = sp.csc_array((n_vars, n_vars))
+        A_0 = sp.lil_array((n_vars, n_vars))
         A_0[0, 0] = 1.0
         # Set Standard Formulation (Homogenized SDP)
         # If using local solver then must use dual formulation to avoid
         # definition of extra slacks by CVXPY
         if use_dual or local_solver is not None:
-            y = cp.Variable(shape=(N_constrs,))
-            rho = cp.Variable(shape=(1,))  # homog constraint
+            y = cp.Variable(shape=(N_constrs + 1,))
+            rho = y[-1]
             objective = cp.Maximize(rho)
-            LHS = cp.sum([y[i] * Ai for (i, Ai) in enumerate(self.constraints)])
+            LHS = cp.sum([y[i] * Ai for (i, Ai) in enumerate(self.constr_list)])
             LHS += rho * A_0
             constraint = LHS << Q
             problem = cp.Problem(objective, [constraint])
@@ -137,7 +139,7 @@ class SDPRLayer(CvxpyLayer):
             # the problem is defined using the primal form.
             X = cp.Variable((n_vars, n_vars), symmetric=True)
             constraints = [X >> 0]
-            for A in self.constraints:
+            for A in self.constr_list:
                 constraints += [cp.trace(A @ X) == 0.0]
             constraints += [cp.trace(A_0 @ X) == 1.0]
             objective = cp.Minimize(cp.trace(Q @ X))
@@ -180,7 +182,7 @@ class SDPRLayer(CvxpyLayer):
           supplied to the constructor.
 
         """
-
+        # homogenize if required
         if self.homogenize:
             assert len(self.param_ids) * 3 == len(
                 params
@@ -191,11 +193,12 @@ class SDPRLayer(CvxpyLayer):
                 # Unpack
                 mat, vec, const = params[ind : ind + 3]
                 # check dimensions
+                ndims = mat.ndim
                 assert (
-                    mat.ndims == vec.ndims and vec.ndims == const.ndims
+                    ndims == vec.ndim and ndims == const.ndim
                 ), "Inconsistent dimensions on inputs"
                 # check batch dimension
-                if mat.ndims > 2:
+                if ndims > 2:
                     if ind == 0:  # get batch dimension
                         N_batch = mat.shape[0]
                     assert (
@@ -207,13 +210,27 @@ class SDPRLayer(CvxpyLayer):
                     params_homog += [torch.vmap(self.homog_matrix)(mat, vec, const)]
                 else:
                     params_homog += [self.homog_matrix(mat, vec, const)]
-        else:
+        else:  # problem already homogenized
             params_homog = params
-            N_batch = params_homog[0].shape[0]
+            # Check dimensions and ensure consistency
+            ndims = params_homog[0].ndim
+            if ndims > 2:
+                N_batch = params_homog[0].shape[0]
+            else:
+                N_batch = 1
+            for param in params_homog:
+                assert param.ndim == ndims, "Parameter dimensions inconsistent"
+                if ndims > 2:
+                    assert param.shape[0] == N_batch, "Inconsistent batch dimension"
+                else:
+                    param.unsqueeze_(0)
 
         # Define new kwargs to not affect original
         kwargs_new = deepcopy(kwargs)
-        # If using external solver then we need to solve and then inject solution
+
+        # This section constructs a solution using an 'external' solver (MOSEK or
+        # user-provided local solver). The solution is then injected into diffcp to
+        # compute the gradients.
         if "solver_args" in kwargs and "solve_method" in kwargs["solver_args"]:
             method = kwargs["solver_args"]["solve_method"]
             # Check if we are injecting a solution
@@ -244,24 +261,25 @@ class SDPRLayer(CvxpyLayer):
                         H = np.array(self.H.value)
                         mults = self.problem.variables()[0].value
                     elif method == "local":
-                        raise NotImplementedError("Local solver not implemented")
-                        # # Check if local solution methods have been defined.
-                        # assert (
-                        #     self.local_solver is not None
-                        # ), "Local solver not defined."
-                        # assert self.certifier is not None, "Certifier not defined."
-                        # # Run Local Solver
-                        # x_cand = self.local_solver(**self.local_args)
-                        # X = x_cand @ x_cand.T
-                        # # Certify Local Solution
-                        # H, mults = self.certifier(
-                        #     Q=Q_val, constraints=self.constraints, x_cand=x_cand
-                        # )
-                        # # TODO Improve this check using some other library
-                        # min_eig = np.min(np.linalg.eigvalsh(H))
-                        # if min_eig < -1e-8:
-                        #     # TODO this should queue a reinitialization
-                        #     raise ValueError("Local solution not certified")
+                        # Check if local solution methods have been defined.
+                        assert (
+                            self.local_solver is not None
+                        ), "Local solver not defined."
+                        assert self.certifier is not None, "Certifier not defined."
+                        # Run Local Solver
+                        x_cand = self.local_solver(**self.local_args)
+                        X = x_cand @ x_cand.T
+                        # Certify Local Solution
+                        H, mults = self.certifier_wrapper(
+                            objective=self.Q,
+                            constraints=self.constr_list,
+                            x_cand=x_cand,
+                        )
+                        # TODO Improve this check using some other library
+                        min_eig = np.min(np.linalg.eigvalsh(H))
+                        if min_eig < -1e-8:
+                            # TODO this should queue a reinitialization
+                            raise ValueError("Local solution not certified")
 
                     # Add to list of solutions
                     ext_vars_list += [
@@ -271,6 +289,7 @@ class SDPRLayer(CvxpyLayer):
                             s=cones.vec_symm(H),
                         )
                     ]
+
                 # Update solver arguments (copy required here)
                 solver_args = dict(solve_method="external", ext_vars_list=ext_vars_list)
                 if "solver_args" in kwargs_new:
@@ -280,13 +299,49 @@ class SDPRLayer(CvxpyLayer):
 
         # Call cvxpylayers forward function
         res = super().forward(*params_homog, **kwargs_new)
-
-        # TODO If using mosek or local then overwrite the primal solution for better numerical accuracy?
+        # If using mosek or local then overwrite the primal solution for better numerical accuracy?
 
         # Extract non-homogenized solution
         Xs = res[0]
         xs = self.recovery_map(Xs)
+        # Adjust dimensions
+        if ndims < 3:
+            xs = xs.squeeze(0)
+            Xs = Xs.squeeze(0)
         return Xs, xs
+
+    def certifier_wrapper(self, objective, constraints, x_cand, **kwargs):
+        """Wrapper for certifier function. This function extracts parameter
+        values if necessary and then calls the (user-provided) certifier function."""
+        # Get Cost
+        if isinstance(objective, cp.Parameter):
+            Q = objective.value
+        elif isinstance(objective, np.ndarray) or sp.issparse(constraint):
+            Q = objective
+        else:
+            raise ValueError("Objective must be a parameter or a numpy array")
+        # Get constraints
+        constraint_list = []
+        for constraint in constraints:
+            if isinstance(constraint, cp.Parameter):
+                constraint_list += [(constraint.value, 0.0)]
+            elif isinstance(constraint, np.ndarray) or sp.issparse(constraint):
+                constraint_list += [(constraint, 0.0)]
+            else:
+                raise ValueError("Constraint must be a parameter or a numpy array")
+        # Add homogenizing constraint
+        n_vars = Q.shape[0]
+        A_0 = sp.lil_array((n_vars, n_vars))
+        A_0[0, 0] = 1.0
+        constraint_list += [(A_0, 1.0)]
+
+        # Call certifier
+        return self.certifier(
+            objective=Q,
+            constraints=constraint_list,
+            x_cand=x_cand,
+            **kwargs,
+        )
 
     @staticmethod
     def recovery_map(Xs, round=False):
