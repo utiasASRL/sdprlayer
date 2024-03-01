@@ -105,7 +105,7 @@ class SDPRLayer(CvxpyLayer):
                     (n_vars, n_vars), symmetric=True
                 )
                 # Add constraint to the list of parameters
-                params += list(self.constr_list[iConstr])
+                params += [self.constr_list[iConstr]]
             else:  # Fixed Constraint
                 if self.homogenize:
                     assert (
@@ -116,13 +116,14 @@ class SDPRLayer(CvxpyLayer):
                     )
                 else:  # otherwise constraint is already set up properly
                     continue
+
+        # Set Standard Formulation (Homogenized SDP)
+        # If using local solver then must use dual formulation to avoid
+        # definition of extra slacks by CVXPY
         N_constrs = len(self.constr_list)
         # homenization constraint matrix
         A_0 = sp.lil_array((n_vars, n_vars))
         A_0[0, 0] = 1.0
-        # Set Standard Formulation (Homogenized SDP)
-        # If using local solver then must use dual formulation to avoid
-        # definition of extra slacks by CVXPY
         if use_dual or local_solver is not None:
             y = cp.Variable(shape=(N_constrs + 1,))
             rho = y[-1]
@@ -142,14 +143,15 @@ class SDPRLayer(CvxpyLayer):
             for A in self.constr_list:
                 constraints += [cp.trace(A @ X) == 0.0]
             constraints += [cp.trace(A_0 @ X) == 1.0]
-            objective = cp.Minimize(cp.trace(Q @ X))
-            problem = cp.Problem(objective=objective, constraints=constraints)
+            objective_cvx = cp.Minimize(cp.trace(Q @ X))
+            problem = cp.Problem(objective=objective_cvx, constraints=constraints)
             variables = [X]
             constraints_ = []
         assert problem.is_dpp()
         # store problem and parameters
         self.problem = problem
-        self.params = params
+        self.parameters = params
+        assert len(params) > 0, ValueError("No parameters defined")
         # Call CvxpyLayers init
         super(SDPRLayer, self).__init__(
             problem=problem,
@@ -158,18 +160,18 @@ class SDPRLayer(CvxpyLayer):
             parameters=params,
         )
 
-    def forward(self, *params, **kwargs):
-        """Solve problem (or a batch of problems) corresponding to params
+    def forward(self, *param_vals, **kwargs):
+        """Solve problem (or a batch of problems) corresponding to param_vals
         Args:
-          params: a sequence of torch Tensors. If the "homogenize" flag was
+          param_vals: a sequence of torch Tensors. If the "homogenize" flag was
                   set to true for the problem, then these tensors are assumed
                   to come in triplets that define the parameterized objective
                   and constraints. That is,
-                    params = F, fvec, f, G_1, gvec_1, g_1, ... , G_m, gvec_m, g_m
+                    param_vals = F, fvec, f, G_1, gvec_1, g_1, ... , G_m, gvec_m, g_m
                   If the homoginize flag is set to False for the problem,
                   then these tensors must be the homogenized objective and
                   constraint matrices. That is,
-                    params = Q, A_1, ..., A_m
+                    param_vals = Q, A_1, ..., A_m
                   These Tensors can have either 2 or 3 dimenstions. If a
                   Tensor has 3 dimensions, then its first dimension is
                   interpreted as the batch size. These Tensors must all have
@@ -185,18 +187,18 @@ class SDPRLayer(CvxpyLayer):
         # homogenize if required
         if self.homogenize:
             assert len(self.param_ids) * 3 == len(
-                params
+                param_vals
             ), "Expected 3 inputs per parameter to homogenize constraints"
-            params_homog = []
+            param_vals_h = []
             ind = 0
-            while ind < len(params):
+            while ind < len(param_vals):
                 # Unpack
-                mat, vec, const = params[ind : ind + 3]
+                mat, vec, const = param_vals[ind : ind + 3]
                 # check dimensions
                 ndims = mat.ndim
                 assert (
                     ndims == vec.ndim and ndims == const.ndim
-                ), "Inconsistent dimensions on inputs"
+                ), "Inputs must be 2 or 3 dimensional"
                 # check batch dimension
                 if ndims > 2:
                     if ind == 0:  # get batch dimension
@@ -207,25 +209,30 @@ class SDPRLayer(CvxpyLayer):
                         and const.shape[0] == N_batch
                     ), "Inconsistent batch dimesion"
                     # Homogenize
-                    params_homog += [torch.vmap(self.homog_matrix)(mat, vec, const)]
+                    param_vals_h += [torch.vmap(self.homog_matrix)(mat, vec, const)]
                 else:
-                    params_homog += [self.homog_matrix(mat, vec, const)]
+                    param_vals_h += [self.homog_matrix(mat, vec, const)]
                 # Increment index
                 ind += 3
         else:  # problem already homogenized
-            params_homog = params
-            # Check dimensions and ensure consistency
-            ndims = params_homog[0].ndim
-            if ndims > 2:
-                N_batch = params_homog[0].shape[0]
-            else:
-                N_batch = 1
-            for param in params_homog:
-                assert param.ndim == ndims, "Parameter dimensions inconsistent"
+            param_vals_h = list(param_vals)
+            if len(param_vals_h) > 0:
+                # Check dimensions and ensure consistency
+                ndims = param_vals_h[0].ndim
                 if ndims > 2:
-                    assert param.shape[0] == N_batch, "Inconsistent batch dimension"
+                    N_batch = param_vals_h[0].shape[0]
                 else:
-                    param = param.unsqueeze(0)
+                    N_batch = 1
+                for i in range(len(param_vals_h)):
+                    assert (
+                        param_vals_h[i].ndim == ndims
+                    ), "Parameter dimensions inconsistent"
+                    if ndims > 2:
+                        assert (
+                            param_vals_h[i].shape[0] == N_batch
+                        ), "Inconsistent batch dimension"
+                    else:
+                        param_vals_h[i] = param_vals_h[i].unsqueeze(0)
 
         # Define new kwargs to not affect original
         kwargs_new = deepcopy(kwargs)
@@ -242,8 +249,11 @@ class SDPRLayer(CvxpyLayer):
                 ext_vars_list = []
                 for iBatch in range(N_batch):
                     # Populate CVXPY Parameters with batch values
-                    for i in range(len(self.params)):
-                        self.params[i].value = params_homog[i][iBatch].detach().numpy()
+                    parameters = self.problem.parameters()
+                    for i in range(len(parameters)):
+                        val = param_vals_h[i][iBatch].detach().numpy()
+                        # Enforce symmetry
+                        parameters[i].value = (val + val.T) / 2.0
                     # Solve the problem
                     if method == "mosek":
                         assert "MOSEK" in cp.installed_solvers(), "MOSEK not installed"
@@ -300,7 +310,7 @@ class SDPRLayer(CvxpyLayer):
                     kwargs_new["solver_args"] = solver_args
 
         # Call cvxpylayers forward function
-        res = super().forward(*params_homog, **kwargs_new)
+        res = super().forward(*param_vals_h, **kwargs_new)
         # If using mosek or local then overwrite the primal solution for better numerical accuracy?
 
         # Extract non-homogenized solution

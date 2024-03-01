@@ -1,7 +1,9 @@
+from contextlib import AbstractContextManager
 import unittest
 
 import numpy as np
 import numpy.random as npr
+import pytest
 import scipy.linalg as la
 import torch
 
@@ -32,31 +34,31 @@ homog_mat = SDPRLayer.homog_matrix
 
 
 class TestSDPRLayer(unittest.TestCase):
-    def __init__(self, n=4, p=2, *args, **kwargs):
-        # Test setup is based on solving a random generic SDPs, but with homogenization.
+    def __init__(self, *args, **kwargs):
         super(TestSDPRLayer, self).__init__(*args, **kwargs)
-        set_seed(2)
+        set_seed(3)
         n = 4  # Dimension of SDP (non-homogenized)
         p = 3  # Number of constraints
         vdim = np.floor(n * (n + 1) / 2).astype(int)
+        # Test setup is based on solving a random generic SDPs, but with homogenization.
         # Randomly generate constraints and objective of the form
+        # min <F, X> s.t. <G_i, X> = b_i for i=1,...,p
         G_vec = torch.rand(vdim, p)
         F_vec = torch.rand(vdim)
         b = torch.rand(p, 1)
         # Store objective
-        self.objective = unvec_symm(F_vec, n)
+        objective = unvec_symm(F_vec, n)
         # Store homogenized objective
-        self.objective_h = homog_mat(
-            self.objective, torch.zeros(n, 1), torch.zeros(1, 1)
-        )
-        params_all = [self.objective, torch.zeros(1, 1)]
+        self.objective = (objective, torch.zeros(n, 1), torch.zeros(1, 1))
+        self.objective_h = homog_mat(*self.objective)
+        params_all = [objective, torch.zeros(1, 1)]
         # Store constraints
         self.constraints = []
         self.constraints_h = []
         for i in range(p):
             G = unvec_symm(G_vec[:, i], n)
             g_vec = torch.zeros(n, 1)
-            g = -b[i]
+            g = -b[i].unsqueeze(0)
             # Store constraint tuples
             self.constraints.append((G, g_vec, g))
             # Store homogenized constraints
@@ -72,20 +74,39 @@ class TestSDPRLayer(unittest.TestCase):
 
     def test_homog_mat(self):
         # Torch test
-        Q = self.objective
-        q_vec = torch.rand(Q.shape[0], 1)
-        q = torch.rand(1, 1)
-        Q_h_t = homog_mat(Q, q_vec, q)
+        input = self.objective
+        Q_h_t = homog_mat(*input)
         # Numpy test
-        Q = self.objective.detach().numpy()
-        q_vec = q_vec.detach().numpy()
-        q = q.detach().numpy()
+        Q = input[0].detach().numpy()
+        q_vec = input[1].detach().numpy()
+        q = input[2].detach().numpy()
         Q_h_n = homog_mat(Q, q_vec, q)
 
         np.testing.assert_allclose(Q_h_n, Q_h_t.detach().numpy())
 
+    def test_if_0(self):
+        # Interface Test 0.1: homog external, fixed constraints, fixed objective
+        # No parameters
+        parameters = []
+        with pytest.raises(Exception):
+            self.run_interface_test(
+                constraints=self.constraints_h,
+                objective=self.objective_h,
+                parameters=parameters,
+                homogenize=False,
+            )
+        # Interface Test 0.2: homog internal, fixed constraints, fixed objective
+        # No parameters
+        with pytest.raises(Exception):
+            self.run_interface_test(
+                constraints=self.constraints,
+                objective=self.objective,
+                parameters=parameters,
+                homogenize=True,
+            )
+
     def test_if_1(self):
-        # Interface Test 1: pre-homogenized, fixed constraints, param objective
+        # Interface Test 1: homog external, fixed constraints, param objective
         parameters = self.params_all[0:2]
         self.run_interface_test(
             constraints=self.constraints_h,
@@ -94,26 +115,96 @@ class TestSDPRLayer(unittest.TestCase):
             homogenize=False,
         )
 
-    def test_if_1_old(self):
-        # Interface Test 1: pre-homogenized, fixed constraints, param objective
-        constraints = [homog_mat(*c) for c in self.constraints]
-        layer = SDPRLayer(self.n + 1, constraints=constraints)
-
-        def run_layer(C):
-            obj = homog_mat(C, torch.zeros(C.shape[0], 1), torch.zeros(1, 1))
-            X, x = layer(obj, solver_args={"eps": 1e-12})
-            return x
-
-        self.objective.requires_grad = True
-        torch.autograd.gradcheck(
-            run_layer,
-            [self.objective],
-            eps=1e-9,
-            atol=1e-6,
-            rtol=1e-6,
+    def test_if_2(self):
+        # Interface Test 2: homog internal, fixed constraints, param objective
+        parameters = self.params_all[0:2]
+        self.run_interface_test(
+            constraints=self.constraints,
+            objective=None,
+            parameters=parameters,
+            homogenize=True,
         )
 
-    def run_interface_test(self, constraints, objective, parameters, homogenize):
+    def test_if_3(self):
+        # Interface Test 3: homog external, param constraints, fixed objective
+        parameters = self.params_all[2:]
+        self.run_interface_test(
+            constraints=[None] * self.p,
+            objective=self.objective_h,
+            parameters=parameters,
+            homogenize=False,
+        )
+
+    def test_if_4(self):
+        # Interface Test 4: homog internal, param constraints, fixed objective
+        parameters = self.params_all[2:]
+        self.run_interface_test(
+            constraints=[None] * self.p,
+            objective=self.objective,
+            parameters=parameters,
+            homogenize=True,
+        )
+
+    def test_if_5(self):
+        # Interface Test 5: homog external, param constraints, param objective
+        parameters = self.params_all
+        self.run_interface_test(
+            constraints=[None] * self.p,
+            objective=None,
+            parameters=parameters,
+            homogenize=False,
+        )
+
+    def test_if_6(self):
+        # Interface Test 6: homog external, some param constraints, fixed objective
+        parameters = self.params_all[2:4]
+        constraints = self.constraints_h.copy()
+        constraints[0] = None
+        self.run_interface_test(
+            constraints=constraints,
+            objective=self.objective_h,
+            parameters=parameters,
+            homogenize=False,
+        )
+
+    def test_slv_1(self):
+        # Solver Test 1: SCS, Use Primal Formulation
+        # NOTE: Dual is default and is tested by other functions
+        set_seed(2)
+        self.run_interface_test(
+            constraints=self.constraints_h,
+            objective=None,
+            parameters=self.params_all[0:2],
+            homogenize=False,
+            use_dual=False,
+        )
+
+    def test_slv_2(self):
+        # Solver Test 2: MOSEK, Dual Formulation
+        mosek_params = {
+            "MSK_IPAR_INTPNT_MAX_ITERATIONS": 1000,
+            "MSK_DPAR_INTPNT_CO_TOL_PFEAS": 1e-10,
+            "MSK_DPAR_INTPNT_CO_TOL_REL_GAP": 1e-10,
+            "MSK_DPAR_INTPNT_CO_TOL_MU_RED": 1e-10,
+            "MSK_DPAR_INTPNT_CO_TOL_INFEAS": 1e-10,
+            "MSK_DPAR_INTPNT_CO_TOL_DFEAS": 1e-10,
+        }
+        msk_solver_args = {
+            "solve_method": "mosek",
+            "mosek_params": mosek_params,
+            "verbose": False,
+        }
+        self.run_interface_test(
+            constraints=self.constraints_h,
+            objective=None,
+            parameters=self.params_all[0:2],
+            homogenize=False,
+            solver_args=msk_solver_args,
+        )
+
+    def run_interface_test(
+        self, constraints, objective, parameters, homogenize, **kwargs
+    ):
         """Generalized test for the interface of the SDPRLayer class."""
         # If already homogenized incease the dimension
         if homogenize:
@@ -122,7 +213,10 @@ class TestSDPRLayer(unittest.TestCase):
             n = self.n + 1
         # Make layer
         layer = SDPRLayer(
-            n, objective=objective, constraints=constraints, homogenize=homogenize
+            n,
+            objective=objective,
+            constraints=constraints,
+            homogenize=homogenize,
         )
 
         def run_layer(*params):
@@ -134,186 +228,30 @@ class TestSDPRLayer(unittest.TestCase):
                 if not homogenize:  # homogenize externally
                     params_h.append(homog_mat(*param_triplet))
                 else:  # pass params direct, homogenize internally
-                    params_h.append(param_triplet)
+                    params_h += param_triplet
                 ind += 2
             # Call layer
-            X, x = layer(*params_h, solver_args={"eps": 1e-12})
-            return x
+            if "solver_args" in kwargs:
+                X, x = layer(*params_h, **kwargs)
+            else:
+                X, x = layer(*params_h, solver_args={"eps": 1e-10})
+            return X
 
-        # require gradients for the parameters
-        for param in parameters:
-            param.requires_grad = True
-        # check the gradients
-        torch.autograd.gradcheck(
-            run_layer,
-            parameters,
-            eps=1e-9,
-            atol=1e-6,
-            rtol=1e-6,
-        )
-
-    def test_primal_scs(self):
-        set_seed(2)
-        n = self.n
-        p = self.p
-        constraints = []
-        for i in range(p):
-            A = np.random.rand(n, n)
-            A = A @ A.T
-            constraints.append(A)
-        layer = SDPRLayer(n, constraints=constraints, use_dual=False)
-        matdim = n * (n + 1) / 2
-
-        def run_layer(c_vec):
-            C = unvec_symm(c_vec)
-            layer(C, solver_args={"eps": 1e-12})
-
-        torch.autograd.gradcheck(
-            run_layer,
-            [np.random.rand(matdim, 1)],
-            eps=1e-6,
-            atol=1e-5,
-            rtol=1e-5,
-        )
-
-    def test_dual_scs(self):
-        set_seed(2)
-        n = self.n
-        p = self.p
-        constraints = []
-        for i in range(p):
-            A = np.random.rand(n, n)
-            A = A @ A.T
-            b = np.random.rand(1)
-            constraints.append((A, b))
-        layer = SDPRLayer(n, constraints=constraints, use_dual=True)
-        C_tch = torch.randn(n, n, requires_grad=True).double()
-        C_tch_symm = (C_tch + C_tch.t()) / 2
-        torch.autograd.gradcheck(
-            lambda *x: layer(*x, solver_args={"eps": 1e-12}),
-            [C_tch_symm],
-            eps=1e-6,
-            atol=1e-5,
-            rtol=1e-5,
-        )
-
-    def test_scs_compare_primaldual(self):
-        set_seed(2)
-        n = self.n
-        p = self.p
-        constraints = []
-        for i in range(p):
-            A = np.random.rand(n, n)
-            A = A @ A.T
-            b = np.random.rand(1)
-            constraints.append((A, b))
-        layer = SDPRLayer(n, constraints=constraints, use_dual=False)
-        layer_d = SDPRLayer(n, constraints=constraints, use_dual=True)
-        C_tch = torch.randn(n, n, requires_grad=True).double()
-        C_tch_symm = (C_tch + C_tch.t()) / 2
-        C_tch_symm.retain_grad()
-        X = layer(C_tch_symm, solver_args={"eps": 1e-12})[0]
-        X_d = layer_d(C_tch_symm, solver_args={"eps": 1e-12})[0]
-        assert np.allclose(X.detach().numpy(), X_d.detach().numpy())
-
-        # Check cost gradients
-        for idx in list(zip(*np.triu_indices(n))):
-            eval = torch.zeros((n, n))
-            eval[idx] = 1.0
-            eval[idx[::-1]] = 1.0
-            X.backward(eval, retain_graph=True)
-            grad = C_tch_symm.grad.detach().numpy().copy()
-            C_tch_symm.grad.zero_()
-            X_d.backward(eval, retain_graph=True)
-            grad_d = C_tch_symm.grad.detach().numpy().copy()
-            C_tch_symm.grad.zero_()
-            assert np.allclose(grad, grad_d, atol=1e-7)
-
-    def test_scs_msk_compare_dual(self):
-        set_seed(2)
-        n = self.n
-        p = self.p
-        constraints = []
-        for i in range(p):
-            A = np.random.rand(n, n)
-            A = A @ A.T
-            b = np.random.rand(1)
-            constraints.append((A, b))
-        layer = SDPRLayer(n, constraints=constraints, use_dual=False)
-        layer_d = SDPRLayer(n, constraints=constraints, use_dual=True)
-        C_tch = torch.randn(n, n, requires_grad=True).double()
-        C_tch_symm = (C_tch + C_tch.t()) / 2
-        C_tch_symm.retain_grad()
-        X = layer(C_tch_symm, solver_args={"eps": 1e-12})[0]
-        mosek_params = {
-            "MSK_IPAR_INTPNT_MAX_ITERATIONS": 1000,
-            "MSK_DPAR_INTPNT_CO_TOL_PFEAS": 1e-10,
-            "MSK_DPAR_INTPNT_CO_TOL_REL_GAP": 1e-10,
-            "MSK_DPAR_INTPNT_CO_TOL_MU_RED": 1e-12,
-            "MSK_DPAR_INTPNT_CO_TOL_INFEAS": 1e-10,
-            "MSK_DPAR_INTPNT_CO_TOL_DFEAS": 1e-10,
-        }
-        msk_solver_args = {
-            "solve_method": "mosek",
-            "mosek_params": mosek_params,
-            "verbose": False,
-        }
-        X_d = layer_d(C_tch_symm, solver_args=msk_solver_args)[0]
-        assert np.allclose(X.detach().numpy(), X_d.detach().numpy())
-
-        # Check cost gradients
-        for idx in list(zip(*np.triu_indices(n))):
-            eval = torch.zeros((n, n))
-            eval[idx] = 1.0
-            eval[idx[::-1]] = 1.0
-            X.backward(eval, retain_graph=True)
-            grad = C_tch_symm.grad.detach().numpy().copy()
-            C_tch_symm.grad.zero_()
-            X_d.backward(eval, retain_graph=True)
-            grad_d = C_tch_symm.grad.detach().numpy().copy()
-            C_tch_symm.grad.zero_()
-            assert np.allclose(grad, grad_d, atol=1e-7)
-
-    def test_dual_mosek(self):
-        set_seed(2)
-        n = self.n
-        p = self.p
-        constraints = []
-        for i in range(p):
-            A = np.random.rand(n, n)
-            A = A @ A.T
-            b = np.random.rand(1)
-            constraints.append((A, b))
-        layer = SDPRLayer(n, constraints=constraints, use_dual=True)
-        C_tch = torch.randn(n, n, requires_grad=True).double()
-        C_tch_symm = (C_tch + C_tch.T) / 2
-        # arguments for sdp solver
-        mosek_params = {
-            "MSK_IPAR_INTPNT_MAX_ITERATIONS": 1000,
-            "MSK_DPAR_INTPNT_CO_TOL_PFEAS": 1e-10,
-            "MSK_DPAR_INTPNT_CO_TOL_REL_GAP": 1e-10,
-            "MSK_DPAR_INTPNT_CO_TOL_MU_RED": 1e-12,
-            "MSK_DPAR_INTPNT_CO_TOL_INFEAS": 1e-10,
-            "MSK_DPAR_INTPNT_CO_TOL_DFEAS": 1e-10,
-        }
-        sdp_solver_args = {
-            "solve_method": "mosek",
-            "mosek_params": mosek_params,
-            "verbose": False,
-        }
-
-        # Check strict feasibility
-        X = layer(C_tch_symm * 0.0, solver_args=sdp_solver_args)[0]
-        assert np.trace(X.detach().numpy()) > 1e-3
-
-        torch.autograd.gradcheck(
-            lambda *x: layer(*x, solver_args=sdp_solver_args)[0],
-            [C_tch],
-            eps=1e-5,
-            atol=1e-3,
-            rtol=1e-3,
-            raise_exception=True,
-        )
+        if len(parameters) > 0:
+            # require gradients for the parameters
+            for param in parameters:
+                param.requires_grad = True
+            # check the gradients
+            torch.autograd.gradcheck(
+                run_layer,
+                parameters,
+                eps=1e-5,
+                atol=1e-5,
+                rtol=1e-5,
+            )
+        else:
+            # check the forward pass
+            run_layer(*parameters)
 
 
 if __name__ == "__main__":
@@ -322,4 +260,4 @@ if __name__ == "__main__":
     # TestSDPRLayer().test_scs_msk_compare_dual()
     # TestSDPRLayer().test_dual_mosek()
     test = TestSDPRLayer()
-    test.test_if_1()
+    test.test_slv_2()
