@@ -90,7 +90,7 @@ class SDPRLayer(CvxpyLayer):
             params += [Q]
         elif self.homogenize:
             assert (
-                objective is tuple
+                type(objective) is tuple
             ), "objective input must be tuple if homogenize flag is active"
             Q = self.homog_matrix(*objective)
         else:
@@ -109,7 +109,7 @@ class SDPRLayer(CvxpyLayer):
             else:  # Fixed Constraint
                 if self.homogenize:
                     assert (
-                        self.constr_list[iConstr] is tuple
+                        type(self.constr_list[iConstr]) is tuple
                     ), "constraint must be list of tuples if homogenize flag is active"
                     self.constr_list[iConstr] = self.homog_matrix(
                         *self.constr_list[iConstr]
@@ -210,6 +210,8 @@ class SDPRLayer(CvxpyLayer):
                     params_homog += [torch.vmap(self.homog_matrix)(mat, vec, const)]
                 else:
                     params_homog += [self.homog_matrix(mat, vec, const)]
+                # Increment index
+                ind += 3
         else:  # problem already homogenized
             params_homog = params
             # Check dimensions and ensure consistency
@@ -223,7 +225,7 @@ class SDPRLayer(CvxpyLayer):
                 if ndims > 2:
                     assert param.shape[0] == N_batch, "Inconsistent batch dimension"
                 else:
-                    param.unsqueeze_(0)
+                    param = param.unsqueeze(0)
 
         # Define new kwargs to not affect original
         kwargs_new = deepcopy(kwargs)
@@ -363,13 +365,12 @@ class SDPRLayer(CvxpyLayer):
     def homog_matrix(F, fvec, f):
         """Convert quadratic function to homogenized form (matrix)"""
         if torch.is_tensor(F) and torch.is_tensor(fvec) and torch.is_tensor(f):
-            Q_left = torch.hstack([f, 0.5 * fvec]).unsqueeze(1)
-            Q_right = torch.vstack([0.5 * fvec, F])
+            Q_left = torch.vstack([f, 0.5 * fvec])
+            Q_right = torch.vstack([0.5 * fvec.T, F])
             Q = torch.hstack([Q_left, Q_right])
         else:
-            Q_left = np.hstack([f, 0.5 * fvec])
-            Q_right = np.vstack([0.5 * fvec, F])
-            Q = np.hstack([Q_left, Q_right])
+            Q = np.block([[f, 0.5 * fvec.T], [0.5 * fvec, F]])
+
         return Q
 
     @staticmethod
