@@ -294,7 +294,18 @@ def get_constraints(r_p0s, C_p0s, r_ls):
     prob.generate_constraints()
     prob.generate_redun_constraints()
     constraints = prob.constraints + prob.constraints_r
-    constraints_list = [(c.A.get_matrix(prob.var_list), c.b) for c in constraints]
+    # Get constraints in terms of homogenized matrices.
+    constraints_list = []
+    for constraint in constraints:
+        # Skip homogenizing constraint
+        if "Homog" in constraint.label:
+            continue
+        A = constraint.A.get_matrix(prob.var_list)
+        # If nonzero constant term, absorb into homog. constraint matrix
+        if not np.abs(constraint.b) < 1e-9:
+            A[0, 0] -= constraint.b
+        constraints_list += [A]
+
     return constraints_list
 
 

@@ -20,14 +20,11 @@ def get_prob_data():
     p_vals = np.array([2, 2, -0.5, -2 / 3, 1 / 4])
 
     constraints = []
-    A = sp.csc_array((3, 3))  # w^2 = 1
-    A[0, 0] = 1
-    constraints += [(A, 1.0)]
     A = sp.csc_array((3, 3))  # x^2 = x*x
     A[2, 0] = 1 / 2
     A[0, 2] = 1 / 2
     A[1, 1] = -1
-    constraints += [(A, 0.0)]
+    constraints += [A]
 
     # Candidate solution
     x_cand = np.array([[1.0000, -1.4871, 2.2115, -3.2888]]).T
@@ -75,8 +72,9 @@ def local_solver(p: torch.Tensor, x_init=0.0):
     return x_hat
 
 
-def certifier(Q, constraints, x_cand):
+def certifier(objective, constraints, x_cand):
     """compute lagrange multipliers and certificate given candidate solution"""
+    Q = objective
     q = (Q @ x_cand).flatten()
     Ax = np.hstack([A @ x_cand for A, b in constraints])
     # Compute Multipliers
@@ -104,7 +102,7 @@ def test_prob_sdp(display=False):
     # Define loss
     def gen_loss(p_val, x_target=-0.5, **kwargs):
         sdp_solver_args = {"eps": 1e-9}
-        (sol,) = optlayer(build_data_mat(p_val), solver_args=sdp_solver_args)
+        sol, x = optlayer(build_data_mat(p_val), solver_args=sdp_solver_args)
         loss = 1 / 2 * (sol[1, 0] - x_target) ** 2
         return loss, sol
 
@@ -171,7 +169,7 @@ def test_grad_num(autograd_test=True, use_dual=True):
     # Define loss
     def gen_loss(p_val, **kwargs):
         x_target = -0.5
-        (sol,) = optlayer(build_data_mat(p_val), **kwargs)
+        sol, x = optlayer(build_data_mat(p_val), **kwargs)
         x_val = (sol[1, 0] + sol[0, 1]) / 2
         loss = 1 / 2 * (x_val - x_target) ** 2
         return loss, sol
@@ -238,14 +236,14 @@ def test_grad_local(autograd_test=True):
     x_target = -0.5
 
     def gen_loss_sdp(p_val, **kwargs):
-        (sol,) = optlayer_sdp(build_data_mat(p_val), **kwargs)
+        sol, x = optlayer_sdp(build_data_mat(p_val), **kwargs)
         x_val = (sol[1, 0] + sol[0, 1]) / 2
         loss = 1 / 2 * (x_val - x_target) ** 2
         return loss, sol
 
     def gen_loss_local(p_val, **kwargs):
         kwargs.update(dict(solver_args=dict(solve_method="local")))
-        (sol,) = optlayer_local(build_data_mat(p_val), **kwargs)
+        sol, x = optlayer_local(build_data_mat(p_val), **kwargs)
         x_val = (sol[1, 0] + sol[0, 1]) / 2
         loss = 1 / 2 * (x_val - x_target) ** 2
         return loss, sol
@@ -278,8 +276,8 @@ def test_grad_local(autograd_test=True):
             lambda *x: gen_loss_local(*x, solver_args=sdp_solver_args)[0],
             [p],
             eps=1e-5,
-            atol=1e-9,
-            rtol=1e-3,
+            atol=1e-5,
+            rtol=1e-5,
         )
         assert res is True
     # Compare with SDP version.

@@ -36,25 +36,22 @@ class Poly6Example:
             )
         # Define Constraints
         constraints = []
-        A = sp.csc_array((4, 4))  # w^2 = 1
-        A[0, 0] = 1
-        constraints += [(A, 1.0)]
         A = sp.csc_array((4, 4))  # x^2 = x*x
         A[2, 0] = 1 / 2
         A[0, 2] = 1 / 2
         A[1, 1] = -1
-        constraints += [(A, 0.0)]
+        constraints += [A]
         A = sp.csc_array((4, 4))  # x^3 = x^2*x
         A[3, 0] = 1
         A[0, 3] = 1
         A[1, 2] = -1
         A[2, 1] = -1
-        constraints += [(A, 0.0)]
+        constraints += [A]
         A = sp.csc_array((4, 4))  # x^3*x = x^2*x^2
         A[3, 1] = 1 / 2
         A[1, 3] = 1 / 2
         A[2, 2] = -1
-        constraints += [(A, 0.0)]
+        constraints += [A]
 
         # Candidate solution
         x_cand = np.array([[1.0000, -1.4871, 2.2115, -3.2888]]).T
@@ -73,7 +70,7 @@ class Poly6Example:
         # Define outer optimization loss
         def gen_loss(poly, **kwargs):
             sdp_solver_args = {"eps": 1e-9}
-            (sol,) = optlayer(build_data_mat(poly), solver_args=sdp_solver_args)
+            sol, x = optlayer(build_data_mat(poly), solver_args=sdp_solver_args)
             x_min = (sol[1, 0] + sol[0, 1]) / 2
             loss = 1 / 2 * (x_min - x_min_targ) ** 2
             loss += 1 / 2 * (polyval(poly, x_min) - p_val_targ) ** 2
@@ -342,5 +339,5 @@ def plot_all(save=False, make_title=False):
 
 if __name__ == "__main__":
     # test_poly_torch()
-    # run_analysis()
-    plot_all(save=True)
+    run_analysis()
+    # plot_all(save=True)

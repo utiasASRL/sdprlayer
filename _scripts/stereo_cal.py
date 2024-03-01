@@ -1001,7 +1001,8 @@ def baseline_noise_analysis(N_batch=20, N_runs=10):
 
 
 if __name__ == "__main__":
-    # Test generation of calibration data
+
+    # Generation of calibration data
     # r_p0s, C_p0s, r_ls, pixel_meass = get_cal_data(
     #     setup="cone", cone_angles=(0.0, np.pi / 4), N_batch=100, plot=True
     # )
@@ -1017,16 +1018,19 @@ if __name__ == "__main__":
     intialization_plots()
 
     # Comparison over multiple instances (batch):
+    # Run these to generate all of the data for comparison. Will
+    # populate outputs folder.
+
     # compare_tune_baseline(N_batch=20, N_runs=50, mode="prob_data")
     # compare_tune_baseline(N_batch=20, N_runs=50, mode="spdr")
     # compare_tune_baseline(N_batch=20, N_runs=50, mode="theseus_gt")
     # compare_tune_baseline(N_batch=20, N_runs=50, mode="theseus_rand")
 
-    # Post Processing
+    # Post Processing scripts:
     # compare_tune_baseline_pp(ind=0)
     # get_statistics()
     # baseline_param_plots()
     # plot_grad_innerloss()
 
-    # Noise analysis
+    # Noise analysis (This was not really used)
     # baseline_noise_analysis(N_batch=20, N_runs=10)
