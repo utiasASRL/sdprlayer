@@ -1,1 +1,6 @@
 *.pkl
+.vscode
+build/
+*.egg_info/
+__pycache__
+.coverage
