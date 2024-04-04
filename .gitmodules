@@ -7,3 +7,9 @@
 [submodule "src/cvxpylayers"]
 	path = src/cvxpylayers
 	url = git@github.com:holmesco/cvxpylayers.git
+[submodule "src/mat_weight_certs"]
+	path = src/mat_weight_certs
+	url = git@github.com:holmesco/mat_weight_certs
+[submodule "src/poly_matrix"]
+	path = src/poly_matrix
+	url = git@github.com:utiasASRL/poly_matrix

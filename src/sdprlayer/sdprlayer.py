@@ -1,12 +1,12 @@
-import numpy as np
 from copy import deepcopy
+
+import cvxpy as cp
+import numpy as np
 import scipy.sparse as sp
 import torch
 
-import cvxpy as cp
 from cvxpylayers.torch import CvxpyLayer
 from diffcp import cones
-
 
 mosek_params_dflt = {
     "MSK_IPAR_INTPNT_MAX_ITERATIONS": 1000,
@@ -64,7 +64,8 @@ class SDPRLayer(CvxpyLayer):
             n_vars (int): dimension of variable vector x
             constraints (list): list of constraints, either 3-tuple or matrices
             objective (tuple or array): objective function, either 3-tuple or matrix
-            homogenize (boolean): defaults to False. If true, constraints and objective are converted to matrices from 3-tuples
+            homogenize (boolean): defaults to False. If true, constraints and objective
+            are converted to matrices from 3-tuples
             local_solver=None,
             local_args={},
             certifier=None,
@@ -328,7 +329,7 @@ class SDPRLayer(CvxpyLayer):
         # Get Cost
         if isinstance(objective, cp.Parameter):
             Q = objective.value
-        elif isinstance(objective, np.ndarray) or sp.issparse(constraint):
+        elif isinstance(objective, np.ndarray) or sp.issparse(constraints[0]):
             Q = objective
         else:
             raise ValueError("Objective must be a parameter or a numpy array")
