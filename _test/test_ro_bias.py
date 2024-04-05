@@ -12,16 +12,13 @@ from sdprlayer.ro_tuner import RealProblem, ToyProblem
 torch.set_default_dtype(torch.float64)
 
 
-def get_ro_data(noise=0) -> RealProblem:
+def get_ro_data(noise=0, reg=Reg.CONSTANT_VELOCITY) -> RealProblem:
     n_landmarks = 5
     n_positions = 4
     d = 2
     np.random.seed(0)
     prob = RealProblem(
-        n_positions=n_positions,
-        d=d,
-        n_landmarks=n_landmarks,
-        noise=noise,
+        n_positions=n_positions, d=d, n_landmarks=n_landmarks, noise=noise, reg=reg
     )
 
     A_0, constraints = get_A_list(prob)
@@ -50,8 +47,9 @@ def get_toy_data(noise=0) -> ToyProblem:
     return prob, constraints
 
 
-def test_inner(prob, constraints, noise=0, verbose=False):
+def test_inner(prob, constraints, decimal, verbose=False):
     """Make sure we get the (almost) perfect position when using ground truth biases."""
+    assert isinstance(prob, RealProblem)
     optlayer = SDPRLayer(
         objective=None,
         n_vars=constraints[0].shape[0],
@@ -62,11 +60,6 @@ def test_inner(prob, constraints, noise=0, verbose=False):
     # Use perfect biases.
     values = prob.biases
     p = torch.tensor(values, requires_grad=True)
-
-    if noise == 0:
-        Q = prob.build_data_mat(p).detach().numpy()
-        x_gt = prob.get_x()
-        assert abs(x_gt.T @ Q @ x_gt) < 1e-10
 
     sdp_solver_args = {"eps": 1e-9, "verbose": verbose}
     X, x_select = optlayer(prob.build_data_mat(p), solver_args=sdp_solver_args)
@@ -84,7 +77,6 @@ def test_inner(prob, constraints, noise=0, verbose=False):
         decimal=6,
         err_msg="selection not equal to projection!",
     )
-    decimal = 6 if noise == 0 else abs(round(np.log10(noise)))
     np.testing.assert_almost_equal(
         positions_est.flatten(),
         prob.positions.flatten(),
@@ -95,15 +87,59 @@ def test_inner(prob, constraints, noise=0, verbose=False):
 
 def test_toy_inner(noise=0, verbose=False):
     prob, constraints = get_toy_data(noise=noise)
-    test_inner(prob, constraints, noise=noise, verbose=verbose)
+    decimal = 6 if noise == 0 else abs(round(np.log10(noise)))
+    test_inner(prob, constraints, decimal=decimal, verbose=verbose)
 
 
 def test_ro_inner(noise=0, verbose=False):
     prob, constraints = get_ro_data(noise=noise)
-    test_inner(prob, constraints, noise=noise, verbose=verbose)
+    prob.generate_biases()
+    decimal = 6 if noise == 0 else abs(round(np.log10(noise)))
+    test_inner(prob, constraints, decimal=decimal, verbose=verbose)
 
 
-def test_outer(prob, constraints, noise=0, verbose=False):
+def test_Q_zeronoise():
+    # test Q for toy data
+    prob, constraints = get_toy_data(noise=0)
+    assert isinstance(prob, ToyProblem)
+
+    p = torch.tensor(prob.biases, requires_grad=True)
+    Q = prob.build_data_mat(p).detach().numpy()
+    x_gt = prob.get_x()
+    err = abs(x_gt.T @ Q @ x_gt)
+    assert err < 1e-10, f"error not zero: {err}"
+
+    # test Q for ro data
+    prob, constraints = get_ro_data(noise=0, reg=Reg.NONE)
+    assert isinstance(prob, RealProblem)
+    x_gt = prob.get_x()
+
+    # try with zero bias
+    biases = np.zeros(prob.K)
+    prob.generate_biases(biases=biases)
+    p = torch.tensor(prob.biases, requires_grad=True)
+
+    # even non-corrected matrix should have zero error!
+    Q_old = get_Q_matrix(prob)
+    err1 = abs(x_gt.T @ Q_old @ x_gt)
+    assert err1 < 1e-10, f"error not zero: {err1}"
+
+    # nonzero bias
+    prob.generate_biases(biases=None)
+    p = torch.tensor(prob.biases, requires_grad=True)
+
+    # does not correct for bias
+    Q_old = get_Q_matrix(prob)
+    err2 = abs(x_gt.T @ Q_old @ x_gt)
+
+    # corrects for bias
+    Q = prob.build_data_mat(p).detach().numpy()
+    err3 = abs(x_gt.T @ Q @ x_gt)
+    assert err3 <= err2
+    assert err3 < 1e-10, f"error not zero: {err3}"
+
+
+def test_outer(prob, constraints, decimal, verbose=False):
     """Make sure that we converge to the (almost) perfect biases when using
     (almost) perfect distances.
     """
@@ -155,7 +191,6 @@ def test_outer(prob, constraints, noise=0, verbose=False):
         msg = f"did not converge in {n_iter} iterations"
     print(msg)
 
-    decimal = 2 if noise == 0 else 1
     np.testing.assert_almost_equal(
         biases,
         prob.biases,
@@ -166,12 +201,15 @@ def test_outer(prob, constraints, noise=0, verbose=False):
 
 def test_toy_outer(noise=0, verbose=False):
     prob, constraints = get_toy_data(noise=noise)
-    test_outer(prob, constraints, noise=noise, verbose=verbose)
+    decimal = 2 if noise == 0 else 1
+    test_outer(prob, constraints, decimal=decimal, verbose=verbose)
 
 
 def test_ro_outer(noise=0, verbose=False):
     prob, constraints = get_ro_data(noise=noise)
-    test_outer(prob, constraints, noise=noise, erbose=verbose)
+    prob.generate_biases()
+    decimal = 2 if noise == 0 else 1
+    test_outer(prob, constraints, noise=decimal, erbose=verbose)
 
 
 def test_ro_Q_matrices(noise=0):
@@ -198,13 +236,14 @@ def test_ro_Q_matrices(noise=0):
 
 
 if __name__ == "__main__":
+    test_Q_zeronoise()
     # test_toy_inner(noise=0)
     # test_toy_outer(noise=0, verbose=True)
 
     # test_toy_inner(noise=1e-3)
     # test_toy_outer(noise=1e-3, verbose=True)
 
-    test_ro_Q_matrices()
+    # test_ro_Q_matrices()
 
     # test_ro_inner(noise=0)
     # test_ro_outer(noise=0)

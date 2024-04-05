@@ -7,14 +7,15 @@ from ro_certs.sdp_setup import get_Q_matrix, get_R_matrix
 
 
 class RealProblem(Problem):
-    def __init__(self, n_landmarks, n_positions, d, noise=0):
+    def __init__(self, n_landmarks, n_positions, d, noise=0, reg=Reg.CONSTANT_VELOCITY):
         super().__init__(
             K=n_landmarks,
             N=n_positions,
             d=d,
-            regularization=Reg.CONSTANT_VELOCITY,
+            regularization=reg,
         )
         self.generate_random(sigma_dist_real=noise)
+        self.positions = self.trajectory
 
     def generate_biases(self, biases=None):
         if biases is None:
@@ -24,10 +25,18 @@ class RealProblem(Problem):
         self.biases = biases
 
     def get_x(self):
-        return np.hstack([1.0, np.zeros(self.d + 1)])
+        z = np.linalg.norm(self.trajectory, axis=1) ** 2
+        return np.hstack(
+            [
+                np.hstack([self.theta[:, : self.get_dim()], z[:, None]]).flatten(),
+                [1.0],
+            ]
+        )
 
     def get_positions(self, x):
-        return x[: self.d].reshape((self.n_positions, self.d))
+        dim = self.get_dim() + 1
+        theta = x.reshape((-1, dim))  # each row contains x_i, v_i, z_i
+        return theta[: self.d]
 
     def add_biases_to_Q(self, Q_torch: torch.Tensor, biases: torch.Tensor):
         """Change Q to be parametrized with unknon biases.
@@ -82,10 +91,12 @@ class RealProblem(Problem):
 
     def build_data_mat(self, biases=None, sigma_acc_est=None):
         # build data matrix, introducing biases or sigma parameters.
+        from copy import deepcopy
+
         R_old = torch.Tensor(get_R_matrix(self).toarray())
         Q_old = torch.Tensor(get_Q_matrix(self).toarray())
         if biases is not None:
-            Q_new = self.add_biases_to_Q(Q_old, biases)
+            Q_new = self.add_biases_to_Q(deepcopy(Q_old), biases)
             return Q_new + R_old
         elif sigma_acc_est is not None:
             R_new = self.add_sigma_to_R(R_old, sigma_acc_est)
@@ -105,7 +116,7 @@ class ToyProblem(object):
         self.landmarks = np.random.uniform(low=-5, high=5, size=(n_landmarks, d))
         self.biases = 0.1 * np.arange(n_landmarks)  # easier for debuggin
         # self.biases = np.random.uniform(size=n_landmarks)  # between 0 and 1
-        self.positions = np.zeros((n_positions, d))
+        self.positions = np.random.uniform(low=-1, high=1, size=(n_positions, d))
         self.gt_distances = np.linalg.norm(
             self.landmarks[None, :, :] - self.positions[:, None, :], axis=2
         )
@@ -116,7 +127,9 @@ class ToyProblem(object):
         )
 
     def get_x(self):
-        return np.hstack([1.0, np.zeros(self.d + 1)])
+        return np.hstack(
+            [1.0, self.positions.flatten(), np.linalg.norm(self.positions) ** 2]
+        )
 
     def get_positions(self, x):
         return x[: self.d].reshape((self.n_positions, self.d))
