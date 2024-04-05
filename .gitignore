@@ -1,6 +1,6 @@
 *.pkl
 .vscode
 build/
-*.egg_info/
+*.egg-info/
 __pycache__
 .coverage
