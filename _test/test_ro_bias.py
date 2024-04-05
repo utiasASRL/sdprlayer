@@ -5,7 +5,6 @@ import torch
 from cert_tools.linalg_tools import rank_project
 
 from ro_certs.problem import Reg
-from ro_certs.sdp_setup import get_A_list, get_Q_matrix, get_R_matrix
 from sdprlayer import SDPRLayer
 from sdprlayer.ro_tuner import RealProblem, ToyProblem
 
@@ -13,15 +12,15 @@ torch.set_default_dtype(torch.float64)
 
 
 def get_ro_data(noise=0, reg=Reg.CONSTANT_VELOCITY) -> RealProblem:
-    n_landmarks = 5
-    n_positions = 4
+    n_landmarks = 4
+    n_positions = 5
     d = 2
     np.random.seed(0)
     prob = RealProblem(
         n_positions=n_positions, d=d, n_landmarks=n_landmarks, noise=noise, reg=reg
     )
 
-    A_0, constraints = get_A_list(prob)
+    constraints = prob.get_constraints()
     return prob, constraints
 
 
@@ -77,6 +76,13 @@ def test_inner(prob, constraints, decimal, verbose=False):
         decimal=6,
         err_msg="selection not equal to projection!",
     )
+    return positions_est
+
+
+def test_toy_inner(noise=0, verbose=False):
+    prob, constraints = get_toy_data(noise=noise)
+    decimal = 6 if noise == 0 else abs(round(np.log10(noise)))
+    positions_est = test_inner(prob, constraints, decimal=decimal, verbose=verbose)
     np.testing.assert_almost_equal(
         positions_est.flatten(),
         prob.positions.flatten(),
@@ -85,17 +91,23 @@ def test_inner(prob, constraints, decimal, verbose=False):
     )
 
 
-def test_toy_inner(noise=0, verbose=False):
-    prob, constraints = get_toy_data(noise=noise)
-    decimal = 6 if noise == 0 else abs(round(np.log10(noise)))
-    test_inner(prob, constraints, decimal=decimal, verbose=verbose)
-
-
 def test_ro_inner(noise=0, verbose=False):
     prob, constraints = get_ro_data(noise=noise)
     prob.generate_biases()
     decimal = 6 if noise == 0 else abs(round(np.log10(noise)))
-    test_inner(prob, constraints, decimal=decimal, verbose=verbose)
+    positions_est = test_inner(prob, constraints, decimal=decimal, verbose=verbose)
+
+    # below doesn't need to be equal because of the GP prior.
+    if prob.regularization == Reg.NONE:
+        np.testing.assert_almost_equal(
+            positions_est.flatten(),
+            prob.positions.flatten(),
+            decimal=decimal,
+            err_msg="did not converge to ground truth",
+        )
+    else:
+        err = np.linalg.norm(positions_est - prob.positions)
+        print(f"error (doesn't have to be zero): {err:.4f}")
 
 
 def test_Q_zeronoise():
@@ -120,7 +132,7 @@ def test_Q_zeronoise():
     p = torch.tensor(prob.biases, requires_grad=True)
 
     # even non-corrected matrix should have zero error!
-    Q_old = get_Q_matrix(prob)
+    Q_old = prob.get_Q_matrix()
     err1 = abs(x_gt.T @ Q_old @ x_gt)
     assert err1 < 1e-10, f"error not zero: {err1}"
 
@@ -129,7 +141,7 @@ def test_Q_zeronoise():
     p = torch.tensor(prob.biases, requires_grad=True)
 
     # does not correct for bias
-    Q_old = get_Q_matrix(prob)
+    Q_old = prob.get_Q_matrix()
     err2 = abs(x_gt.T @ Q_old @ x_gt)
 
     # corrects for bias
@@ -139,37 +151,53 @@ def test_Q_zeronoise():
     assert err3 < 1e-10, f"error not zero: {err3}"
 
 
-def test_outer(prob, constraints, decimal, verbose=False):
+def test_outer(prob, constraints, decimal, verbose=False, init_noise=1e-3, plots=False):
     """Make sure that we converge to the (almost) perfect biases when using
     (almost) perfect distances.
     """
     # Create SDPR Layer
-    optlayer = SDPRLayer(n_vars=4, constraints=constraints)
+    optlayer = SDPRLayer(n_vars=constraints[0].shape[0], constraints=constraints)
 
     # Set up polynomial parameter tensor
-    values = prob.biases + np.random.normal(scale=1e-3, loc=0, size=prob.biases.shape)
+    values = prob.biases + np.random.normal(
+        scale=init_noise, loc=0, size=prob.biases.shape
+    )
     p = torch.tensor(values, requires_grad=True)
 
     # Define loss
     def gen_loss(values, **kwargs):
         sdp_solver_args = {"eps": 1e-9}
         X, x = optlayer(prob.build_data_mat(values), solver_args=sdp_solver_args)
-        loss = torch.sum((prob.get_positions(x) - torch.Tensor(prob.positions)) ** 2)
-        return loss, X
+        eigs, __ = torch._linalg_eigh(X, compute_v=False)
+        evr = eigs[-1] / eigs[-2]
+        assert evr > 1e6
+        positions = prob.get_positions(x)
+        loss = torch.norm(positions - torch.tensor(prob.positions))
+        return loss, positions
 
+    # opt = torch.optim.Adam(params=[p], lr=1e-2, eps=1e-10, weight_decay=0.2)
     opt = torch.optim.Adam(params=[p], lr=1e-3)
 
     # Execute iterations
     losses = []
-    max_iter = 1000
+    max_iter = 2000
     grad_norm_tol = 1e-7
-    loss_val = np.inf
     p_grad_norm = np.inf
     converged = False
+    print("target biases:", prob.biases)
+    print("target loss:", gen_loss(prob.biases)[0])
+    if plots:
+        fig, (ax_loss, ax_err) = plt.subplots(1, 2)
+        fig.set_size_inches(10, 5)
+
+        fig_pos, ax_pos = plt.subplots()
+        ax_pos.scatter(*prob.positions[:, : prob.d].T, color="k")
+        ax_pos.scatter(*prob.anchors[:, : prob.d].T, marker="x", color="k")
+        plt.show(block=False)
     for n_iter in range(max_iter):
         # Update Loss
         opt.zero_grad()
-        loss, sol = gen_loss(p)
+        loss, positions = gen_loss(p)
 
         # run optimizer
         loss.backward(retain_graph=True)
@@ -180,13 +208,22 @@ def test_outer(prob, constraints, decimal, verbose=False):
             converged = True
             break
         opt.step()
-        loss_val = loss.item()
-        losses.append(loss_val)
-        n_iter += 1
-        if verbose and ((n_iter % 10 == 0) or converged):
+        losses.append(loss.item())
+        if verbose and ((n_iter < 10) or (n_iter % 10 == 0) or converged):
             print(
                 f"{n_iter}: biases: {biases}\tgrad norm: {p_grad_norm:.2e}\tloss: {losses[-1]:.2e}"
             )
+
+        if plots:
+            errors = np.abs(biases - prob.biases)
+            [
+                ax_err.scatter(n_iter, b, color=f"C{i}", s=1)
+                for i, b in enumerate(errors)
+            ]
+            ax_loss.scatter(n_iter, loss.item(), color="k", s=1)
+            ax_pos.scatter(*positions[:, : prob.d].detach().numpy().T)
+        if n_iter % 10 == 0:
+            continue
     if not converged:
         msg = f"did not converge in {n_iter} iterations"
     print(msg)
@@ -205,19 +242,26 @@ def test_toy_outer(noise=0, verbose=False):
     test_outer(prob, constraints, decimal=decimal, verbose=verbose)
 
 
-def test_ro_outer(noise=0, verbose=False):
-    prob, constraints = get_ro_data(noise=noise)
+def test_ro_outer(noise=0, verbose=False, plots=False):
+    prob, constraints = get_ro_data(noise=noise, reg=Reg.NONE)
     prob.generate_biases()
     decimal = 2 if noise == 0 else 1
-    test_outer(prob, constraints, noise=decimal, erbose=verbose)
+    test_outer(
+        prob,
+        constraints,
+        decimal=decimal,
+        verbose=verbose,
+        init_noise=1e-2,
+        plots=plots,
+    )
 
 
 def test_ro_Q_matrices(noise=0):
     np.random.seed(1)
     prob, __ = get_ro_data(noise=noise)
     # matrices without biases
-    R = get_R_matrix(prob)
-    Q = R + get_Q_matrix(prob)
+    R = prob.get_R_matrix()
+    Q = R + prob.get_Q_matrix()
 
     # check that zero bias gives the same result.
     prob.generate_biases(biases=np.zeros(prob.K))
@@ -236,7 +280,8 @@ def test_ro_Q_matrices(noise=0):
 
 
 if __name__ == "__main__":
-    test_Q_zeronoise()
+    # test_Q_zeronoise()
+
     # test_toy_inner(noise=0)
     # test_toy_outer(noise=0, verbose=True)
 
@@ -246,7 +291,7 @@ if __name__ == "__main__":
     # test_ro_Q_matrices()
 
     # test_ro_inner(noise=0)
-    # test_ro_outer(noise=0)
+    test_ro_outer(noise=0, verbose=True, plots=True)
 
     # test_ro_inner(noise=1e-3)
     # test_ro_outer(noise=1e-3)

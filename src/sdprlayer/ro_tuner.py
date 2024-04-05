@@ -3,7 +3,7 @@ import numpy as np
 import torch
 
 from ro_certs.problem import Problem, Reg
-from ro_certs.sdp_setup import get_Q_matrix, get_R_matrix
+from ro_certs.sdp_setup import get_A_list, get_Q_matrix, get_R_matrix
 
 
 class RealProblem(Problem):
@@ -28,15 +28,20 @@ class RealProblem(Problem):
         z = np.linalg.norm(self.trajectory, axis=1) ** 2
         return np.hstack(
             [
-                np.hstack([self.theta[:, : self.get_dim()], z[:, None]]).flatten(),
                 [1.0],
+                np.hstack([self.theta[:, : self.get_dim()], z[:, None]]).flatten(),
             ]
         )
 
     def get_positions(self, x):
         dim = self.get_dim() + 1
         theta = x.reshape((-1, dim))  # each row contains x_i, v_i, z_i
-        return theta[: self.d]
+        # make sure z == ||x||^2
+        if isinstance(x, np.ndarray):
+            np.testing.assert_allclose(
+                np.linalg.norm(theta[:, : self.d], axis=1) ** 2, theta[:, -1]
+            )
+        return theta[:, : self.d]
 
     def add_biases_to_Q(self, Q_torch: torch.Tensor, biases: torch.Tensor):
         """Change Q to be parametrized with unknon biases.
@@ -55,12 +60,13 @@ class RealProblem(Problem):
         So we just need to change the structure of the last column/row of Q!
 
         Taking into account the correct order etc, the new row should have the structure:
-                x1                         z1          ...   xN   zN               h
-        [2*alpha1.T @ S1 @ An     alpha1.T @ S1 @ 1   ...   ...  ...  sum_n alphan.T @ Sn @ alphan]
+                  h                          x1                         z1          ...   xN   zN
+        [sum_n(alphan.T @ Sn @ alphan) 2*alpha1.T @ S1 @ An     alpha1.T @ S1 @ 1   ...   ...  ...]
         """
-        distances = torch.Tensor(np.sqrt(self.D_noisy_sq))
-        landmarks = torch.Tensor(self.anchors)  # n_landmarks x d
-        S_all = torch.Tensor(self.Sig_inv)
+        hom_pos = 0  # position of homogeneous variable. Always 0 here! Used to be -1.
+        distances = torch.tensor(np.sqrt(self.D_noisy_sq))
+        landmarks = torch.tensor(self.anchors)  # n_landmarks x d
+        S_all = torch.tensor(self.Sig_inv)
         E = np.sum(self.W)
 
         # we want alpha to be n_landmarks x n_positions
@@ -68,22 +74,26 @@ class RealProblem(Problem):
             torch.norm(landmarks, p=2, dim=1) ** 2
         )[:, None]
 
-        Q_torch[-1, -1] = 0
+        Q_torch[hom_pos, hom_pos] = 0
+
+        # make sure we start filling at 1 if the first column is the hom. variable
+        s = 1 if hom_pos == 0 else 0
+
         dim = self.get_dim() + 1
-        # TODO(FD) could selfably do this without forloop.
+        # TODO(FD) could probably do this without forloop.
         for n in range(self.N):
             nnz = self.W[:, n] != 0
             S = S_all[nnz, :][:, nnz]
             # xi element
-            new_xi = 2 * alpha[nnz, n].T @ S @ landmarks[nnz, :] / E
-            Q_torch[-1, n * dim : n * dim + self.d] = new_xi
-            Q_torch[n * dim : n * dim + self.d, -1] = new_xi
+            new_xi = 2 * alpha[nnz, n] @ S @ landmarks[nnz, :] / E
+            Q_torch[hom_pos, s + n * dim : s + n * dim + self.d] = new_xi
+            Q_torch[s + n * dim : s + n * dim + self.d, hom_pos] = new_xi
             # zi element
-            new_zi = -torch.sum(alpha[nnz, n].T @ S) / E
-            Q_torch[-1, (n + 1) * dim - 1 : (n + 1) * dim] = new_zi
-            Q_torch[(n + 1) * dim - 1 : (n + 1) * dim, -1] = new_zi
+            new_zi = -torch.sum(alpha[nnz, n] @ S) / E
+            Q_torch[hom_pos, s + (n + 1) * dim - 1 : s + (n + 1) * dim] = new_zi
+            Q_torch[s + (n + 1) * dim - 1 : s + (n + 1) * dim, hom_pos] = new_zi
             # h element
-            Q_torch[-1, -1] += alpha[nnz, n].T @ S @ alpha[nnz, n] / E
+            Q_torch[hom_pos, hom_pos] += alpha[nnz, n] @ S @ alpha[nnz, n] / E
         return Q_torch
 
     def add_sigma_to_R(self, R, sigma):
@@ -93,8 +103,8 @@ class RealProblem(Problem):
         # build data matrix, introducing biases or sigma parameters.
         from copy import deepcopy
 
-        R_old = torch.Tensor(get_R_matrix(self).toarray())
-        Q_old = torch.Tensor(get_Q_matrix(self).toarray())
+        R_old = torch.tensor(self.get_R_matrix().toarray())
+        Q_old = torch.tensor(self.get_Q_matrix().toarray())
         if biases is not None:
             Q_new = self.add_biases_to_Q(deepcopy(Q_old), biases)
             return Q_new + R_old
@@ -103,6 +113,16 @@ class RealProblem(Problem):
             return Q_old + R_new
         else:
             raise ValueError("must either give biases or sigma_acc_est")
+
+    def get_constraints(self):
+        A_0, A_list = get_A_list(self, hom_position="first")
+        return A_list
+
+    def get_Q_matrix(self):
+        return get_Q_matrix(self, hom_position="first")
+
+    def get_R_matrix(self):
+        return get_R_matrix(self, hom_position="first")
 
 
 class ToyProblem(object):
@@ -147,12 +167,12 @@ class ToyProblem(object):
         """
         Q_tch = torch.zeros((self.d + 2, self.d + 2))
 
-        landmarks_tensor = torch.Tensor(self.landmarks)  # K x d
+        landmarks_tensor = torch.tensor(self.landmarks)  # K x d
         alphas = (
-            torch.Tensor(self.biased_distances) - biases
+            torch.tensor(self.biased_distances) - biases
         ) ** 2 - landmarks_tensor.norm(p=2, dim=1) ** 2
         Q_tch[0, 0] = torch.sum(alphas**2)
-        a = 2 * torch.sum(alphas * landmarks_tensor.T, axis=1)
+        a = 2 * torch.sum(alphas * landmarks_tensor.mT, axis=1)
         Q_tch[0, 1 : self.d + 1] = a
         Q_tch[1 : self.d + 1, 0] = a
         Q_tch[0, self.d + 1] = -torch.sum(alphas)
