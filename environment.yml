@@ -27,16 +27,5 @@ dependencies:
     - flake8=6.0
     
     - pip:
-        - -e .
-        - -e src/cvxpylayers
-        - -e src/diffcp
-        - -e src/certifiable-tools
-        - -e src/mat_weight_certs
-        - -e src/poly_matrix
-        - -e src/ro_certs
-        - theseus-ai==0.2.1
-        - pypose
-        - spatialmath-python
-        - progress
-        - cvxpy
-        - asrl-pylgmath
+      - -r requirements.txt
+      - -e .
