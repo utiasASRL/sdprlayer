@@ -13,3 +13,6 @@
 [submodule "src/poly_matrix"]
 	path = src/poly_matrix
 	url = git@github.com:utiasASRL/poly_matrix
+[submodule "src/ro_certs"]
+	path = src/ro_certs
+	url = git@github.com:duembgen/dev_safe_and_smooth
