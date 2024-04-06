@@ -24,7 +24,6 @@ class RealProblem(Problem):
         real_prob.anchors = prob.anchors
         real_prob.D_noisy_sq = prob.D_noisy_sq
         real_prob.W = prob.W
-        real_prob.positions = prob.trajectory
         real_prob.trajectory = prob.trajectory
         real_prob.times = prob.times
         real_prob.biases = real_prob.get_biases(real_prob.D_noisy_sq, squared=True)
@@ -45,8 +44,9 @@ class RealProblem(Problem):
         other.N = number
         other.D_noisy_sq = self.D_noisy_sq[:, keep_idx]
         other.W = self.W[:, keep_idx]
-        other.positions = self.positions[keep_idx, :]
+        other.trajectory = self.trajectory[keep_idx, :]
         other.times = self.times[keep_idx]
+        self.trajectory = None
         return other
 
     def __init__(
@@ -68,7 +68,6 @@ class RealProblem(Problem):
         self.n_calib = n_calib if n_calib else n_anchors
         if not real:
             self.generate_random(sigma_dist_real=noise)
-            self.positions = self.trajectory
 
     def generate_biases(self, biases=None):
         if biases is None:
@@ -198,11 +197,11 @@ class ToyProblem(object):
         self.biases[: self.n_calib] = 0.1 * np.arange(1, self.n_calib + 1)
         # self.biases[: self.n_calib] = np.random.uniform(size=n_calib)  # between 0 and 1
 
-        # self.positions = np.random.uniform(low=-1, high=1, size=(n_positions, d))
-        self.positions = np.mean(self.anchors, axis=0)[None, :]
+        # self.trajectory = np.random.uniform(low=-1, high=1, size=(n_positions, d))
+        self.trajectory = np.mean(self.anchors, axis=0)[None, :]
 
         self.gt_distances = np.linalg.norm(
-            self.anchors[None, :, :] - self.positions[:, None, :], axis=2
+            self.anchors[None, :, :] - self.trajectory[:, None, :], axis=2
         )
         # n_positions x n_anchors distance matrix
         self.biased_distances = self.gt_distances + self.biases[None, :]
@@ -212,7 +211,7 @@ class ToyProblem(object):
 
     def get_x(self):
         return np.hstack(
-            [1.0, self.positions.flatten(), np.linalg.norm(self.positions) ** 2]
+            [1.0, self.trajectory.flatten(), np.linalg.norm(self.trajectory) ** 2]
         )
 
     def get_positions(self, x):
@@ -266,4 +265,4 @@ class ToyProblem(object):
     def plot_problem(self):
         fig, ax = plt.subplots()
         ax.scatter(*self.landmarks[:, :2].T)
-        ax.scatter(*self.positions[:, :2].T)
+        ax.scatter(*self.trajectory[:, :2].T)

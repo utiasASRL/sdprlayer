@@ -26,7 +26,10 @@ def update_err_plot(ax, idx, errors, labels=False):
 
 
 def update_pos_plot(ax, pos):
-    ax.scatter(*pos[:2, :], s=1)
+    if pos.shape[1] >= 1:
+        ax.plot(*pos[:2, :], marker="o")
+    else:
+        ax.scatter(*pos[:2, :], s=1)
 
 
 def setup_error_plots(target_loss):
@@ -42,7 +45,10 @@ def setup_error_plots(target_loss):
 
 def setup_position_plot(prob):
     fig_pos, ax_pos = plt.subplots()
-    ax_pos.scatter(*prob.positions[:, : prob.d].T, color="k")
+    if prob.trajectory.shape[0] > 1:
+        ax_pos.plot(*prob.trajectory[:, : prob.d].T, color="k", marker="o")
+    else:
+        ax_pos.scatter(*prob.trajectory[:, : prob.d].T, color="k")
     ax_pos.scatter(*prob.anchors[:, : prob.d].T, marker="x", color="k")
     return fig_pos, ax_pos
 
@@ -75,7 +81,7 @@ def run_calibration(
         if not (evr > 1e6):
             print("Warning: solution not rank 1:", eigs[-5:])
         positions = prob.get_positions(x)
-        loss = torch.norm(positions - torch.tensor(prob.positions))
+        loss = torch.norm(positions - torch.tensor(prob.trajectory))
         return loss, positions
 
     # opt = torch.optim.Adam(params=[p], lr=1e-2, eps=1e-10, weight_decay=0.2)
