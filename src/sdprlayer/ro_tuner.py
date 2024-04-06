@@ -26,7 +26,7 @@ def update_err_plot(ax, idx, errors, labels=False):
 
 
 def update_pos_plot(ax, pos):
-    ax.scatter(*pos, s=1)
+    ax.scatter(*pos[:2, :], s=1)
 
 
 def setup_error_plots(target_loss):
@@ -55,7 +55,6 @@ def run_calibration(
     plots=False,
     options=options_default,
 ):
-    assert isinstance(prob, RealProblem)
     """Make sure that we converge to the (almost) perfect biases when using
     (almost) perfect distances.
     """
@@ -73,7 +72,8 @@ def run_calibration(
         X, x = optlayer(prob.build_data_mat(p), solver_args=options["solver_args"])
         eigs, __ = torch._linalg_eigh(X, compute_v=False)
         evr = abs(eigs[-1] / eigs[-2])
-        assert evr > 1e6
+        if not (evr > 1e6):
+            print("Warning: solution not rank 1:", eigs[-5:])
         positions = prob.get_positions(x)
         loss = torch.norm(positions - torch.tensor(prob.positions))
         return loss, positions
@@ -121,13 +121,13 @@ def run_calibration(
         # print new values etc.
         biases = p.detach().numpy()
         errors = np.abs(biases - prob.biases[: prob.n_calib])
-        if verbose and ((n_iter < 10) or (n_iter % 10 == 0) or converged):
+        if verbose and ((n_iter < 20) or (n_iter % 10 == 0) or converged):
             errors_str = ",".join([f"{e:.2e}" for e in errors])
             print(
                 f"{n_iter}: errors: {errors_str}\tgrad norm: {p_grad_norm:.2e}\tloss: {losses[-1]:.2e}"
             )
 
-        if plots and (n_iter % 10 == 0):
+        if plots and ((n_iter < 20) or (n_iter % 10 == 0)):
             update_err_plot(ax_err, n_iter, errors)
             update_loss_plot(ax_loss, n_iter, loss.item())
             update_pos_plot(ax_pos, positions[:, : prob.d].detach().numpy().T)

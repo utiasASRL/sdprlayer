@@ -1,3 +1,5 @@
+from copy import deepcopy
+
 import matplotlib.pylab as plt
 import numpy as np
 import scipy.sparse as sp
@@ -8,6 +10,45 @@ from ro_certs.sdp_setup import get_A_list, get_Q_matrix, get_R_matrix
 
 
 class RealProblem(Problem):
+
+    @staticmethod
+    def init_from_prob(prob: Problem, n_calib=None):
+        real_prob = RealProblem(
+            n_anchors=prob.K,
+            n_positions=prob.N,
+            d=prob.d,
+            reg=prob.regularization,
+            n_calib=n_calib,
+            real=True,
+        )
+        real_prob.anchors = prob.anchors
+        real_prob.D_noisy_sq = prob.D_noisy_sq
+        real_prob.W = prob.W
+        real_prob.positions = prob.trajectory
+        real_prob.trajectory = prob.trajectory
+        real_prob.times = prob.times
+        real_prob.biases = real_prob.get_biases(real_prob.D_noisy_sq, squared=True)
+        return real_prob
+
+    def get_downsampled_version(self, number=3, method="keep-first"):
+        other = deepcopy(self)
+        if method == "keep-first":
+            keep_idx = np.arange(number)
+        elif method == "keep-last":
+            keep_idx = np.range(other.N - number, other.N)
+        elif method == "keep-uniform":
+            keep_idx = np.linspace(0, other.N - 1, number).astype(int)
+            keep_idx = np.unique(keep_idx)
+        else:
+            raise ValueError(f"Unknown method {method}")
+        assert len(keep_idx) == number
+        other.N = number
+        other.D_noisy_sq = self.D_noisy_sq[:, keep_idx]
+        other.W = self.W[:, keep_idx]
+        other.positions = self.positions[keep_idx, :]
+        other.times = self.times[keep_idx]
+        return other
+
     def __init__(
         self,
         n_anchors,
@@ -16,6 +57,7 @@ class RealProblem(Problem):
         noise=0,
         reg=Reg.CONSTANT_VELOCITY,
         n_calib=None,
+        real=False,
     ):
         super().__init__(
             K=n_anchors,
@@ -24,8 +66,9 @@ class RealProblem(Problem):
             regularization=reg,
         )
         self.n_calib = n_calib if n_calib else n_anchors
-        self.generate_random(sigma_dist_real=noise)
-        self.positions = self.trajectory
+        if not real:
+            self.generate_random(sigma_dist_real=noise)
+            self.positions = self.trajectory
 
     def generate_biases(self, biases=None):
         if biases is None:

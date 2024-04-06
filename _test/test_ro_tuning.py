@@ -2,6 +2,7 @@ import numpy as np
 
 from ro_certs.problem import Reg
 from sdprlayer.ro_problems import RealProblem, ToyProblem
+from sdprlayer.ro_tuner import options_default as options
 from sdprlayer.ro_tuner import run_calibration
 
 # N_CALIB = None  # calibrates all
@@ -38,12 +39,10 @@ def test_ro_outer(noise=0, verbose=False, plots=False):
         reg=Reg.CONSTANT_VELOCITY,
     )
     # prob.plot()
-    from sdprlayer.ro_tuner import options_default as options
-
-    options["adam"]["lr"] = 1e-2
     constraints = prob.get_constraints()
     prob.generate_biases()
-    decimal = 2 if noise == 0 else 1
+
+    options["adam"]["lr"] = 1e-2
     biases = run_calibration(
         prob,
         constraints,
@@ -52,6 +51,7 @@ def test_ro_outer(noise=0, verbose=False, plots=False):
         init_noise=INIT_NOISE,
         options=options,
     )
+    decimal = 2 if noise == 0 else 1
     np.testing.assert_almost_equal(
         biases,
         prob.biases[: prob.n_calib],
