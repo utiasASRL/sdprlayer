@@ -49,7 +49,7 @@ def test_inner(prob, constraints, decimal, verbose=False):
 
 def test_toy_inner(noise=0, verbose=False):
     np.random.seed(SEED)
-    prob = ToyProblem(n_landmarks=5, n_positions=1, d=2, noise=noise)
+    prob = ToyProblem(n_anchors=5, n_positions=1, d=2, noise=noise)
     constraints = prob.get_constraints()
 
     decimal = 6 if noise == 0 else abs(round(np.log10(noise)))
@@ -65,7 +65,7 @@ def test_toy_inner(noise=0, verbose=False):
 def test_ro_inner(noise=0, verbose=False):
     np.random.seed(SEED)
     for reg in [Reg.NONE, Reg.CONSTANT_VELOCITY, Reg.ZERO_VELOCITY]:
-        prob = RealProblem(n_positions=5, d=2, n_landmarks=4, noise=noise, reg=reg)
+        prob = RealProblem(n_positions=5, d=2, n_anchors=4, noise=noise, reg=reg)
         constraints = prob.get_constraints()
         prob.generate_biases()
 
@@ -75,7 +75,9 @@ def test_ro_inner(noise=0, verbose=False):
         # below doesn't need to be equal because of the GP prior.
         err = np.linalg.norm(positions_est - prob.positions)
         if reg == Reg.NONE:
-            print(f"error for {reg} (has to be zero): {err:.4f}")
+            print(
+                f"error for {reg} (has to be close to zero (noise={noise:.0e})): {err:.4f}"
+            )
             np.testing.assert_almost_equal(
                 positions_est.flatten(),
                 prob.positions.flatten(),
@@ -83,13 +85,13 @@ def test_ro_inner(noise=0, verbose=False):
                 err_msg="did not converge to ground truth",
             )
         else:
-            print(f"error for {reg} (doesn't have to be zero): {err:.4f}")
+            print(f"error for {reg} (doesn't have to be close to zero): {err:.4f}")
 
 
 def test_Q_zeronoise():
     # test Q for toy data
     np.random.seed(SEED)
-    prob = ToyProblem(n_landmarks=5, n_positions=1, d=2, noise=0)
+    prob = ToyProblem(n_anchors=5, n_positions=1, d=2, noise=0)
     constraints = prob.get_constraints()
 
     p = torch.tensor(prob.biases, requires_grad=True)
@@ -100,7 +102,7 @@ def test_Q_zeronoise():
 
     # test Q for ro data
     np.random.seed(SEED)
-    prob = RealProblem(n_positions=5, d=2, n_landmarks=4, noise=0, reg=Reg.NONE)
+    prob = RealProblem(n_positions=5, d=2, n_anchors=4, noise=0, reg=Reg.NONE)
     constraints = prob.get_constraints()
     x_gt = prob.get_x()
 
@@ -131,7 +133,7 @@ def test_Q_zeronoise():
 
 def test_ro_Q_matrices(noise=0):
     np.random.seed(SEED)
-    prob = RealProblem(n_positions=5, d=2, n_landmarks=4, noise=noise)
+    prob = RealProblem(n_positions=5, d=2, n_anchors=4, noise=noise)
 
     # matrices without biases
     R = prob.get_R_matrix()

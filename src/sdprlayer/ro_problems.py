@@ -8,13 +8,22 @@ from ro_certs.sdp_setup import get_A_list, get_Q_matrix, get_R_matrix
 
 
 class RealProblem(Problem):
-    def __init__(self, n_landmarks, n_positions, d, noise=0, reg=Reg.CONSTANT_VELOCITY):
+    def __init__(
+        self,
+        n_anchors,
+        n_positions,
+        d,
+        noise=0,
+        reg=Reg.CONSTANT_VELOCITY,
+        n_calib=None,
+    ):
         super().__init__(
-            K=n_landmarks,
+            K=n_anchors,
             N=n_positions,
             d=d,
             regularization=reg,
         )
+        self.n_calib = n_calib if n_calib else n_anchors
         self.generate_random(sigma_dist_real=noise)
         self.positions = self.trajectory
 
@@ -64,15 +73,16 @@ class RealProblem(Problem):
                   h                          x1                         z1          ...   xN   zN
         [sum_n(alphan.T @ Sn @ alphan) 2*alpha1.T @ S1 @ An     alpha1.T @ S1 @ 1   ...   ...  ...]
         """
+
         hom_pos = 0  # position of homogeneous variable. Always 0 here! Used to be -1.
         distances = torch.tensor(np.sqrt(self.D_noisy_sq))
-        landmarks = torch.tensor(self.anchors)  # n_landmarks x d
+        anchors = torch.tensor(self.anchors)  # n_landmarks x d
         S_all = torch.tensor(self.Sig_inv)
         E = np.sum(self.W)
 
         # we want alpha to be n_landmarks x n_positions
         alpha = (distances - biases[:, None]) ** 2 - (
-            torch.norm(landmarks, p=2, dim=1) ** 2
+            torch.norm(anchors, p=2, dim=1) ** 2
         )[:, None]
 
         Q_torch[hom_pos, hom_pos] = 0
@@ -86,7 +96,7 @@ class RealProblem(Problem):
             nnz = self.W[:, n] != 0
             S = S_all[nnz, :][:, nnz]
             # xi element
-            new_xi = 2 * alpha[nnz, n] @ S @ landmarks[nnz, :] / E
+            new_xi = 2 * alpha[nnz, n] @ S @ anchors[nnz, :] / E
             Q_torch[hom_pos, s + n * dim : s + n * dim + self.d] = new_xi
             Q_torch[s + n * dim : s + n * dim + self.d, hom_pos] = new_xi
             # zi element
@@ -100,18 +110,23 @@ class RealProblem(Problem):
     def add_sigma_to_R(self, R, sigma):
         raise NotImplementedError("parametrizing sigma is not implemented yet.")
 
-    def build_data_mat(self, biases=None, sigma_acc_est=None):
+    def build_data_mat(self, biases_est=None, sigma_acc_est=None):
         # build data matrix, introducing biases or sigma parameters.
         from copy import deepcopy
 
         R_old = torch.tensor(self.get_R_matrix().toarray())
         Q_old = torch.tensor(self.get_Q_matrix().toarray())
         if biases is not None:
+
+            assert len(biases_est) == self.n_calib
+            biases = torch.zeros(self.n_anchors)
+            biases[: self.n_calib] = biases_est
             Q_new = self.add_biases_to_Q(deepcopy(Q_old), biases)
             return Q_new + R_old
         elif sigma_acc_est is not None:
             R_new = self.add_sigma_to_R(R_old, sigma_acc_est)
             return Q_old + R_new
+
         else:
             raise ValueError("must either give biases or sigma_acc_est")
 
@@ -129,21 +144,26 @@ class RealProblem(Problem):
 class ToyProblem(object):
     NOISE = 1e-3
 
-    def __init__(self, n_landmarks, n_positions, d, noise=NOISE):
+    def __init__(self, n_anchors, n_positions, d, noise=NOISE, n_calib=None):
         assert n_positions == 1, "more than 1 not supported yet"
-        self.n_landmarks = n_landmarks
+        self.n_anchors = n_anchors
         self.n_positions = n_positions
+        self.n_calib = n_calib if n_calib else n_anchors
         self.d = d
 
-        self.landmarks = np.random.uniform(low=-5, high=5, size=(n_landmarks, d))
-        self.biases = 0.1 * np.arange(n_landmarks)  # easier for debuggin
-        # self.biases = np.random.uniform(size=n_landmarks)  # between 0 and 1
+        self.anchors = np.random.uniform(low=-5, high=5, size=(n_anchors, d))
+
+        self.biases = np.zeros(self.n_anchors)
+        self.biases[: self.n_calib] = 0.1 * np.arange(1, self.n_calib + 1)
+        # self.biases[: self.n_calib] = np.random.uniform(size=n_calib)  # between 0 and 1
+
         # self.positions = np.random.uniform(low=-1, high=1, size=(n_positions, d))
-        self.positions = np.mean(self.landmarks, axis=0)[None, :]
+        self.positions = np.mean(self.anchors, axis=0)[None, :]
+
         self.gt_distances = np.linalg.norm(
-            self.landmarks[None, :, :] - self.positions[:, None, :], axis=2
+            self.anchors[None, :, :] - self.positions[:, None, :], axis=2
         )
-        # n_positions x n_landmarks distance matrix
+        # n_positions x n_anchors distance matrix
         self.biased_distances = self.gt_distances + self.biases[None, :]
         self.biased_distances = self.biased_distances + np.random.normal(
             scale=noise, loc=0, size=self.gt_distances.shape
@@ -157,7 +177,7 @@ class ToyProblem(object):
     def get_positions(self, x):
         return x[: self.d].reshape((self.n_positions, self.d))
 
-    def build_data_mat(self, biases):
+    def build_data_mat(self, biases_est):
         """build simple data matrix with bias
         Structure of Q:
         sum_i (
@@ -168,25 +188,29 @@ class ToyProblem(object):
         where alpha is:
         alpha = (d - b)**2 - a**2 /// d**2 - a**2  # -2*b*d + b**2
         """
-        Q_tch = torch.zeros((self.d + 2, self.d + 2))
+        assert isinstance(biases_est, torch.Tensor)
+        assert len(biases_est) == self.n_calib
+        biases = torch.zeros(self.n_anchors)
+        biases[: self.n_calib] = biases_est
 
-        landmarks_tensor = torch.tensor(self.landmarks)  # K x d
+        Q_tch = torch.zeros((self.d + 2, self.d + 2))
+        anchors_tensor = torch.tensor(self.anchors)  # K x d
         alphas = (
             torch.tensor(self.biased_distances) - biases
-        ) ** 2 - landmarks_tensor.norm(p=2, dim=1) ** 2
+        ) ** 2 - anchors_tensor.norm(p=2, dim=1) ** 2
         Q_tch[0, 0] = torch.sum(alphas**2)
-        a = 2 * torch.sum(alphas * landmarks_tensor.mT, axis=1)
+        a = 2 * torch.sum(alphas * anchors_tensor.mT, axis=1)
         Q_tch[0, 1 : self.d + 1] = a
         Q_tch[1 : self.d + 1, 0] = a
         Q_tch[0, self.d + 1] = -torch.sum(alphas)
         Q_tch[self.d + 1, 0] = -torch.sum(alphas)
         Q_tch[1 : self.d + 1, 1 : self.d + 1] = 4 * torch.sum(
-            landmarks_tensor[:, :, None] @ landmarks_tensor[:, None, :],
+            anchors_tensor[:, :, None] @ anchors_tensor[:, None, :],
             axis=0,
         )  # (K x d x 1) @ (K x 1 x d) = (K x d x d)
-        Q_tch[1 : self.d + 1, self.d + 1] = -2 * torch.sum(landmarks_tensor, axis=0)
-        Q_tch[self.d + 1, 1 : self.d + 1] = -2 * torch.sum(landmarks_tensor, axis=0)
-        Q_tch[self.d + 1, self.d + 1] = self.n_landmarks
+        Q_tch[1 : self.d + 1, self.d + 1] = -2 * torch.sum(anchors_tensor, axis=0)
+        Q_tch[self.d + 1, 1 : self.d + 1] = -2 * torch.sum(anchors_tensor, axis=0)
+        Q_tch[self.d + 1, self.d + 1] = self.n_anchors
         return Q_tch
 
     def get_constraints(self):

@@ -4,3 +4,5 @@ build/
 *.egg-info/
 __pycache__
 .coverage
+_plots
+local/
