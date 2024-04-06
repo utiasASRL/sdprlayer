@@ -1,5 +1,6 @@
 import numpy as np
 
+from ro_certs.problem import Reg
 from sdprlayer.ro_problems import RealProblem, ToyProblem
 from sdprlayer.ro_tuner import run_calibration
 
@@ -27,13 +28,29 @@ def test_toy_outer(noise=0, verbose=False, plots=False):
 
 
 def test_ro_outer(noise=0, verbose=False, plots=False):
-    np.random.seed(SEED)
-    prob = RealProblem(n_positions=5, d=2, n_anchors=4, noise=noise, n_calib=N_CALIB)
+    np.random.seed(SEED + 1)
+    prob = RealProblem(
+        n_positions=3,
+        d=2,
+        n_anchors=4,
+        noise=noise,
+        n_calib=N_CALIB,
+        reg=Reg.CONSTANT_VELOCITY,
+    )
+    # prob.plot()
+    from sdprlayer.ro_tuner import options_default as options
+
+    options["adam"]["lr"] = 1e-2
     constraints = prob.get_constraints()
     prob.generate_biases()
     decimal = 2 if noise == 0 else 1
     biases = run_calibration(
-        prob, constraints, verbose=verbose, plots=plots, init_noise=INIT_NOISE
+        prob,
+        constraints,
+        verbose=verbose,
+        plots=plots,
+        init_noise=INIT_NOISE,
+        options=options,
     )
     np.testing.assert_almost_equal(
         biases,
@@ -44,7 +61,8 @@ def test_ro_outer(noise=0, verbose=False, plots=False):
 
 
 if __name__ == "__main__":
-    test_toy_outer(noise=0, verbose=True, plots=True)
-    test_toy_outer(noise=1e-2, verbose=True, plots=True)
+    # test_toy_outer(noise=0, verbose=True, plots=True)
+    # test_toy_outer(noise=1e-2, verbose=True, plots=True)
 
-    # test_ro_outer(noise=0, verbose=True, plots=True)
+    test_ro_outer(noise=0, verbose=True, plots=True)
+    test_ro_outer(noise=1e-2, verbose=True, plots=True)

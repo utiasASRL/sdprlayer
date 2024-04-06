@@ -29,7 +29,8 @@ class RealProblem(Problem):
 
     def generate_biases(self, biases=None):
         if biases is None:
-            biases = np.random.uniform(size=self.K)
+            biases = np.zeros(self.K)
+            biases[: self.n_calib] = np.random.uniform(size=self.n_calib) * 0.1
         self.add_biases(biases)
         self.D_noisy_sq = self.D_biased**2
         self.biases = biases
@@ -112,16 +113,13 @@ class RealProblem(Problem):
 
     def build_data_mat(self, biases_est=None, sigma_acc_est=None):
         # build data matrix, introducing biases or sigma parameters.
-        from copy import deepcopy
-
         R_old = torch.tensor(self.get_R_matrix().toarray())
         Q_old = torch.tensor(self.get_Q_matrix().toarray())
-        if biases is not None:
-
+        if biases_est is not None:
             assert len(biases_est) == self.n_calib
-            biases = torch.zeros(self.n_anchors)
+            biases = torch.zeros(self.K)
             biases[: self.n_calib] = biases_est
-            Q_new = self.add_biases_to_Q(deepcopy(Q_old), biases)
+            Q_new = self.add_biases_to_Q(Q_old, biases)
             return Q_new + R_old
         elif sigma_acc_est is not None:
             R_new = self.add_sigma_to_R(R_old, sigma_acc_est)

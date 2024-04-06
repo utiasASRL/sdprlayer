@@ -55,7 +55,7 @@ def run_calibration(
     plots=False,
     options=options_default,
 ):
-    assert isinstance(prob, ToyProblem)
+    assert isinstance(prob, RealProblem)
     """Make sure that we converge to the (almost) perfect biases when using
     (almost) perfect distances.
     """
@@ -88,8 +88,8 @@ def run_calibration(
     # with torch.no_grad():
     starting_loss = gen_loss(torch.tensor(bias_init))[0].item()
     target_loss = gen_loss(torch.tensor(prob.biases[: prob.n_calib]))[0].item()
-    # print("target biases:", prob.biases)
-    # print("target loss:", target_loss)
+    print("target biases:", prob.biases)
+    print("target loss:", target_loss)
     if plots:
         fig, ax_loss, ax_err = setup_error_plots(target_loss)
         fig_pos, ax_pos = setup_position_plot(prob)
