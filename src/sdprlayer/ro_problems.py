@@ -8,6 +8,12 @@ import torch
 from ro_certs.problem import Problem, Reg
 from ro_certs.sdp_setup import get_A_list, get_Q_matrix, get_R_matrix
 
+# TODO(FD) strangely, set_to_gt leads to rank-2 solutions.
+# BIAS_MODE = "set_to_gt"
+BIAS_MODE = "set_to_zero"
+
+DOWNSAMPLE_MODE = "keep-uniform"
+
 
 class RealProblem(Problem):
 
@@ -26,15 +32,15 @@ class RealProblem(Problem):
         real_prob.W = prob.W
         real_prob.trajectory = prob.trajectory
         real_prob.times = prob.times
-        real_prob.biases = real_prob.get_biases(real_prob.D_noisy_sq, squared=True)
+        real_prob.biases_gt = real_prob.get_biases(real_prob.D_noisy_sq, squared=True)
         return real_prob
 
-    def get_downsampled_version(self, number=3, method="keep-first"):
+    def get_downsampled_version(self, number=3, method=DOWNSAMPLE_MODE):
         other = deepcopy(self)
         if method == "keep-first":
             keep_idx = np.arange(number)
         elif method == "keep-last":
-            keep_idx = np.range(other.N - number, other.N)
+            keep_idx = np.arange(other.N - number, other.N)
         elif method == "keep-uniform":
             keep_idx = np.linspace(0, other.N - 1, number).astype(int)
             keep_idx = np.unique(keep_idx)
@@ -66,6 +72,7 @@ class RealProblem(Problem):
             regularization=reg,
         )
         self.n_calib = n_calib if n_calib else n_anchors
+        self.biases_gt = np.zeros(n_anchors)
         if not real:
             self.generate_random(sigma_dist_real=noise)
 
@@ -75,7 +82,7 @@ class RealProblem(Problem):
             biases[: self.n_calib] = np.random.uniform(size=self.n_calib) * 0.1
         self.add_biases(biases)
         self.D_noisy_sq = self.D_biased**2
-        self.biases = biases
+        self.biases_gt = biases
 
     def get_x(self):
         z = np.linalg.norm(self.trajectory, axis=1) ** 2
@@ -86,11 +93,11 @@ class RealProblem(Problem):
             ]
         )
 
-    def get_positions(self, x):
+    def get_positions(self, x, test=True):
         dim = self.get_dim() + 1
         theta = x.reshape((-1, dim))  # each row contains x_i, v_i, z_i
         # make sure z == ||x||^2
-        if isinstance(x, np.ndarray):
+        if isinstance(x, np.ndarray) and test:
             np.testing.assert_almost_equal(
                 np.linalg.norm(theta[:, : self.d], axis=1) ** 2, theta[:, -1], decimal=4
             )
@@ -128,6 +135,15 @@ class RealProblem(Problem):
             torch.norm(anchors, p=2, dim=1) ** 2
         )[:, None]
 
+        from ro_certs.problem import generate_distances
+
+        D_gt_sq = generate_distances(self.trajectory, self.anchors) ** 2
+        error_noncalib = np.linalg.norm(self.W * (self.D_noisy_sq - D_gt_sq))
+        error_calib = np.linalg.norm(
+            self.W * ((distances - biases[:, None]).detach().numpy() ** 2 - D_gt_sq)
+        )
+        assert error_noncalib > error_calib
+
         Q_torch[hom_pos, hom_pos] = 0
 
         # make sure we start filling at 1 if the first column is the hom. variable
@@ -159,7 +175,10 @@ class RealProblem(Problem):
         Q_old = torch.tensor(self.get_Q_matrix().toarray())
         if biases_est is not None:
             assert len(biases_est) == self.n_calib
-            biases = torch.zeros(self.K)
+            if BIAS_MODE == "set_to_zero":
+                biases = torch.zeros(self.K)
+            elif BIAS_MODE == "set_to_gt":
+                biases = torch.tensor(self.biases_gt)
             biases[: self.n_calib] = biases_est
             Q_new = self.add_biases_to_Q(Q_old, biases)
             return Q_new + R_old
@@ -193,8 +212,8 @@ class ToyProblem(object):
 
         self.anchors = np.random.uniform(low=-5, high=5, size=(n_anchors, d))
 
-        self.biases = np.zeros(self.n_anchors)
-        self.biases[: self.n_calib] = 0.1 * np.arange(1, self.n_calib + 1)
+        self.biases_gt = np.zeros(self.n_anchors)
+        self.biases_gt[: self.n_calib] = 0.1 * np.arange(1, self.n_calib + 1)
         # self.biases[: self.n_calib] = np.random.uniform(size=n_calib)  # between 0 and 1
 
         # self.trajectory = np.random.uniform(low=-1, high=1, size=(n_positions, d))

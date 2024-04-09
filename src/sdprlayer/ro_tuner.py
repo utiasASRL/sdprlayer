@@ -4,7 +4,7 @@ import matplotlib.pylab as plt
 import numpy as np
 import torch
 
-from sdprlayer.ro_problems import RealProblem, ToyProblem
+from sdprlayer.ro_problems import BIAS_MODE
 from sdprlayer.sdprlayer import SDPRLayer
 
 options_default = dict(
@@ -68,7 +68,7 @@ def run_calibration(
     optlayer = SDPRLayer(n_vars=constraints[0].shape[0], constraints=constraints)
 
     # Set up polynomial parameter tensor
-    bias_init = prob.biases[: prob.n_calib] + np.random.normal(
+    bias_init = prob.biases_gt[: prob.n_calib] + np.random.normal(
         scale=init_noise, loc=0, size=prob.n_calib
     )
     p = torch.tensor(bias_init, requires_grad=True)
@@ -78,9 +78,16 @@ def run_calibration(
         X, x = optlayer(prob.build_data_mat(p), solver_args=options["solver_args"])
         eigs, __ = torch._linalg_eigh(X, compute_v=False)
         evr = abs(eigs[-1] / eigs[-2])
+
+        test = True  # weather or nto to test structure of x. If it's not rank 1 this doesn't usually pass.
         if not (evr > 1e6):
             print("Warning: solution not rank 1:", eigs[-5:])
-        positions = prob.get_positions(x)
+            # TODO(FD): below is not differentiable, so we cannot use it.
+            # x, info = rank_project(X.detach().numpy(), 1)
+            # x = torch.tensor(x[1:])
+            test = False
+
+        positions = prob.get_positions(x, test=test)
         loss = torch.norm(positions - torch.tensor(prob.trajectory))
         return loss, positions
 
@@ -91,17 +98,33 @@ def run_calibration(
     losses = []
     converged = False
 
+    if BIAS_MODE == "set_to_zero":
+        biases = np.zeros(prob.K)
+        biases[: prob.n_calib] = prob.biases_gt[: prob.n_calib]
+    elif BIAS_MODE == "set_to_gt":
+        biases = prob.biases_gt
+    else:
+        raise ValueError(BIAS_MODE)
+    cost1 = prob.get_range_cost(trajectory=prob.trajectory, biases=biases)
+    Q = prob.build_data_mat(biases_est=torch.tensor(prob.biases_gt[: prob.n_calib]))
+    prob.theta = prob.trajectory
+    x = prob.get_x()
+    cost2 = x.T @ Q.detach().numpy() @ x
+    if abs(cost1 - cost2) > 1e-10:
+        print("Warning: costs are not the same! This will lead to faulty behavior")
+
     # with torch.no_grad():
     starting_loss = gen_loss(torch.tensor(bias_init))[0].item()
-    target_loss = gen_loss(torch.tensor(prob.biases[: prob.n_calib]))[0].item()
-    print("target biases:", prob.biases)
+    target_loss = gen_loss(torch.tensor(prob.biases_gt[: prob.n_calib]))[0].item()
+    assert target_loss < starting_loss, "target is worse than init."
+    print("target biases:", prob.biases_gt)
     print("target loss:", target_loss)
     if plots:
         fig, ax_loss, ax_err = setup_error_plots(target_loss)
         fig_pos, ax_pos = setup_position_plot(prob)
         update_loss_plot(ax_loss, 0, starting_loss)
         update_err_plot(
-            ax_err, 0, np.abs(bias_init - prob.biases[: prob.n_calib]), labels=True
+            ax_err, 0, np.abs(bias_init - prob.biases_gt[: prob.n_calib]), labels=True
         )
         plt.show(block=False)
 
@@ -125,8 +148,8 @@ def run_calibration(
             opt.step()
 
         # print new values etc.
-        biases = p.detach().numpy()
-        errors = np.abs(biases - prob.biases[: prob.n_calib])
+        biases_est = p.detach().numpy()
+        errors = np.abs(biases_est - prob.biases_gt[: prob.n_calib])
         if verbose and ((n_iter < 20) or (n_iter % 10 == 0) or converged):
             errors_str = ",".join([f"{e:.2e}" for e in errors])
             print(
@@ -150,4 +173,4 @@ def run_calibration(
             fname, bbox_inches="tight", pad_inches=0.1, transparent=False, dpi=100
         )
         print(f"saved as {fname}")
-    return biases
+    return biases_est

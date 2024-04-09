@@ -54,7 +54,7 @@ def test_ro_outer(noise=0, verbose=False, plots=False):
     decimal = 2 if noise == 0 else 1
     np.testing.assert_almost_equal(
         biases,
-        prob.biases[: prob.n_calib],
+        prob.biases_gt[: prob.n_calib],
         decimal=decimal,
         err_msg="bias did not converge to ground truth",
     )

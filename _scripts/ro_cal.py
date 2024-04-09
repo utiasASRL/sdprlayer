@@ -1,3 +1,5 @@
+import matplotlib.pylab as plt
+
 from ro_certs.problem import Problem, Reg
 from sdprlayer.ro_problems import RealProblem
 from sdprlayer.ro_tuner import options_default as options
@@ -12,13 +14,18 @@ def generate_results():
     # prob.generate_biases()
 
     prob_small = prob.get_downsampled_version(number=4, method="keep-first")
-    prob_small.biases = prob_small.get_biases(prob_small.D_noisy_sq, squared=True)
+    prob_small.biases_gt = prob_small.get_biases(prob_small.D_noisy_sq, squared=True)
     constraints = prob_small.get_constraints()
     options["adam"]["lr"] = 1e-2
 
-    import matplotlib.pylab as plt
+    # some sanity checks
+    loss_raw = prob_small.get_range_cost(prob_small.trajectory, biases=None)
+    loss_gt = prob_small.get_range_cost(
+        prob_small.trajectory, biases=prob_small.biases_gt
+    )
+    assert loss_gt < loss_raw
 
-    plt.matshow(prob_small.D_noisy_sq)
+    # plt.matshow(prob_small.D_noisy_sq)
 
     options["grad_norm_tol"] = 1e-6
     biases = run_calibration(
