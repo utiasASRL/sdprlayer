@@ -1,12 +1,11 @@
-import numpy as np
 from copy import deepcopy
-import scipy.sparse as sp
-import torch
 
 import cvxpy as cp
+import numpy as np
+import scipy.sparse as sp
+import torch
 from cvxpylayers.torch import CvxpyLayer
 from diffcp import cones
-
 
 mosek_params_dflt = {
     "MSK_IPAR_INTPNT_MAX_ITERATIONS": 1000,
@@ -251,7 +250,7 @@ class SDPRLayer(CvxpyLayer):
                     # Populate CVXPY Parameters with batch values
                     parameters = self.problem.parameters()
                     for i in range(len(parameters)):
-                        val = param_vals_h[i][iBatch].detach().numpy()
+                        val = param_vals_h[i][iBatch].cpu().detach().numpy()
                         # Enforce symmetry
                         parameters[i].value = (val + val.T) / 2.0
                     # Solve the problem

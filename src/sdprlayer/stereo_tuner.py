@@ -1,22 +1,18 @@
 #!/bin/bash/python
+import warnings
 from time import time
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from pylgmath.se3.transformation import Transformation as Trans
-import pypose as pp
 import spatialmath.base as sm
 import theseus as th
 import torch
+from mwcerts.stereo_problems import Localization, skew
+from pylgmath.se3.transformation import Transformation as Trans
 from torch import nn
-import warnings
 
 from sdprlayer import SDPRLayer
-from mwcerts.stereo_problems import (
-    Localization,
-    skew,
-)
 
 
 class Camera:
