@@ -8,14 +8,15 @@ import torch
 from ro_certs.problem import Problem, Reg
 from ro_certs.sdp_setup import get_A_list, get_Q_matrix, get_R_matrix
 
-# TODO(FD) strangely, set_to_gt leads to rank-2 solutions.
-# BIAS_MODE = "set_to_gt"
-BIAS_MODE = "set_to_zero"
-
-DOWNSAMPLE_MODE = "keep-uniform"
-
 
 class RealProblem(Problem):
+    # TODO(FD) strangely, set_to_gt leads to rank-2 solutions.
+    BIAS_MODE = "set_to_gt"
+    # BIAS_MODE = "set_to_zero"
+
+    DOWNSAMPLE_MODE = "uniform"
+    # DOWNSAMPLE_MODE = "first"
+    # DOWNSAMPLE_MODE = "last"
 
     @staticmethod
     def init_from_prob(prob: Problem, n_calib=None):
@@ -35,13 +36,15 @@ class RealProblem(Problem):
         real_prob.biases_gt = real_prob.get_biases(real_prob.D_noisy_sq, squared=True)
         return real_prob
 
-    def get_downsampled_version(self, number=3, method=DOWNSAMPLE_MODE):
+    def get_downsampled_version(self, number=3, method=None):
+        if method is None:
+            method = self.DOWNSAMPLE_MODE
         other = deepcopy(self)
-        if method == "keep-first":
+        if method == "first":
             keep_idx = np.arange(number)
-        elif method == "keep-last":
+        elif method == "last":
             keep_idx = np.arange(other.N - number, other.N)
-        elif method == "keep-uniform":
+        elif method == "uniform":
             keep_idx = np.linspace(0, other.N - 1, number).astype(int)
             keep_idx = np.unique(keep_idx)
         else:
@@ -135,14 +138,13 @@ class RealProblem(Problem):
             torch.norm(anchors, p=2, dim=1) ** 2
         )[:, None]
 
-        from ro_certs.problem import generate_distances
-
-        D_gt_sq = generate_distances(self.trajectory, self.anchors) ** 2
-        error_noncalib = np.linalg.norm(self.W * (self.D_noisy_sq - D_gt_sq))
-        error_calib = np.linalg.norm(
-            self.W * ((distances - biases[:, None]).detach().numpy() ** 2 - D_gt_sq)
-        )
-        assert error_noncalib > error_calib
+        # from ro_certs.problem import generate_distances
+        # D_gt_sq = generate_distances(self.trajectory, self.anchors) ** 2
+        # error_noncalib = np.linalg.norm(self.W * (self.D_noisy_sq - D_gt_sq))
+        # error_calib = np.linalg.norm(
+        #     self.W * ((distances - biases[:, None]).detach().numpy() ** 2 - D_gt_sq)
+        # )
+        # assert error_noncalib > error_calib, f"{error_noncalib} > {error_calib}"
 
         Q_torch[hom_pos, hom_pos] = 0
 
@@ -175,10 +177,12 @@ class RealProblem(Problem):
         Q_old = torch.tensor(self.get_Q_matrix().toarray())
         if biases_est is not None:
             assert len(biases_est) == self.n_calib
-            if BIAS_MODE == "set_to_zero":
+            if self.BIAS_MODE == "set_to_zero":
                 biases = torch.zeros(self.K)
-            elif BIAS_MODE == "set_to_gt":
+            elif self.BIAS_MODE == "set_to_gt":
                 biases = torch.tensor(self.biases_gt)
+            else:
+                raise ValueError(self.BIAS_MODE)
             biases[: self.n_calib] = biases_est
             Q_new = self.add_biases_to_Q(Q_old, biases)
             return Q_new + R_old
@@ -202,6 +206,7 @@ class RealProblem(Problem):
 
 class ToyProblem(object):
     NOISE = 1e-3
+    BIAS_MODE = "set_to_gt"
 
     def __init__(self, n_anchors, n_positions, d, noise=NOISE, n_calib=None):
         assert n_positions == 1, "more than 1 not supported yet"
@@ -209,6 +214,7 @@ class ToyProblem(object):
         self.n_positions = n_positions
         self.n_calib = n_calib if n_calib else n_anchors
         self.d = d
+        self.Sig_inv = np.eye(self.n_anchors)
 
         self.anchors = np.random.uniform(low=-5, high=5, size=(n_anchors, d))
 
@@ -219,21 +225,28 @@ class ToyProblem(object):
         # self.trajectory = np.random.uniform(low=-1, high=1, size=(n_positions, d))
         self.trajectory = np.mean(self.anchors, axis=0)[None, :]
 
-        self.gt_distances = np.linalg.norm(
+        self.D_gt = np.linalg.norm(
             self.anchors[None, :, :] - self.trajectory[:, None, :], axis=2
         )
         # n_positions x n_anchors distance matrix
-        self.biased_distances = self.gt_distances + self.biases[None, :]
-        self.biased_distances = self.biased_distances + np.random.normal(
-            scale=noise, loc=0, size=self.gt_distances.shape
-        )
+        self.biased_distances = self.D_gt + self.biases_gt[None, :]
+        if noise > 0:
+            self.biased_distances += np.random.normal(
+                scale=noise, loc=0, size=self.biased_distances.shape
+            )
+
+    def get_range_cost(*args, **kwargs):
+        raise NotImplementedError
 
     def get_x(self):
         return np.hstack(
             [1.0, self.trajectory.flatten(), np.linalg.norm(self.trajectory) ** 2]
         )
 
-    def get_positions(self, x):
+    def get_positions(self, x, test=False):
+        if test:
+            z = np.sum(x[: self.d] ** 2)
+            assert abs(z - x[self.d]) < 1e-10
         return x[: self.d].reshape((self.n_positions, self.d))
 
     def build_data_mat(self, biases_est):

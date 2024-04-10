@@ -7,7 +7,6 @@ from cert_tools.linalg_tools import rank_project
 from ro_certs.problem import Reg
 from sdprlayer import SDPRLayer
 from sdprlayer.ro_problems import RealProblem, ToyProblem
-from sdprlayer.ro_tuner import run_calibration
 
 torch.set_default_dtype(torch.float64)
 
@@ -103,7 +102,6 @@ def test_Q_zeronoise():
     # test Q for ro data
     np.random.seed(SEED)
     prob = RealProblem(n_positions=5, d=2, n_anchors=4, noise=0, reg=Reg.NONE)
-    constraints = prob.get_constraints()
     x_gt = prob.get_x()
 
     # try with zero bias

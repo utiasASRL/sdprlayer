@@ -13,7 +13,7 @@ def generate_results():
     prob = RealProblem.init_from_prob(prob_dataset, n_calib=1)
     # prob.generate_biases()
 
-    prob_small = prob.get_downsampled_version(number=4, method="keep-first")
+    prob_small = prob.get_downsampled_version(number=4, method="first")
     prob_small.biases_gt = prob_small.get_biases(prob_small.D_noisy_sq, squared=True)
     constraints = prob_small.get_constraints()
     options["adam"]["lr"] = 1e-2

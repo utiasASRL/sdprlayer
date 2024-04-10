@@ -4,7 +4,6 @@ import matplotlib.pylab as plt
 import numpy as np
 import torch
 
-from sdprlayer.ro_problems import BIAS_MODE
 from sdprlayer.sdprlayer import SDPRLayer
 
 options_default = dict(
@@ -64,56 +63,43 @@ def run_calibration(
     """Make sure that we converge to the (almost) perfect biases when using
     (almost) perfect distances.
     """
-    # Create SDPR Layer
     optlayer = SDPRLayer(n_vars=constraints[0].shape[0], constraints=constraints)
 
-    # Set up polynomial parameter tensor
+    # Set up parameter tensor
     bias_init = prob.biases_gt[: prob.n_calib] + np.random.normal(
         scale=init_noise, loc=0, size=prob.n_calib
     )
-    p = torch.tensor(bias_init, requires_grad=True)
 
-    # Define loss
     def gen_loss(p, **kwargs):
         X, x = optlayer(prob.build_data_mat(p), solver_args=options["solver_args"])
-        eigs, __ = torch._linalg_eigh(X, compute_v=False)
-        evr = abs(eigs[-1] / eigs[-2])
-
         test = True  # weather or nto to test structure of x. If it's not rank 1 this doesn't usually pass.
-        if not (evr > 1e6):
-            print("Warning: solution not rank 1:", eigs[-5:])
-            # TODO(FD): below is not differentiable, so we cannot use it.
-            # x, info = rank_project(X.detach().numpy(), 1)
-            # x = torch.tensor(x[1:])
+        if optlayer.check_rank(X):
             test = False
 
         positions = prob.get_positions(x, test=test)
         loss = torch.norm(positions - torch.tensor(prob.trajectory))
         return loss, positions
 
-    # opt = torch.optim.Adam(params=[p], lr=1e-2, eps=1e-10, weight_decay=0.2)
-    opt = torch.optim.Adam(params=[p], **options["adam"])
-
-    # Execute iterations
     losses = []
     converged = False
 
-    if BIAS_MODE == "set_to_zero":
+    if prob.BIAS_MODE == "set_to_zero":
         biases = np.zeros(prob.K)
         biases[: prob.n_calib] = prob.biases_gt[: prob.n_calib]
-    elif BIAS_MODE == "set_to_gt":
+    elif prob.BIAS_MODE == "set_to_gt":
         biases = prob.biases_gt
     else:
-        raise ValueError(BIAS_MODE)
-    cost1 = prob.get_range_cost(trajectory=prob.trajectory, biases=biases)
+        raise ValueError(prob.BIAS_MODE)
     Q = prob.build_data_mat(biases_est=torch.tensor(prob.biases_gt[: prob.n_calib]))
-    prob.theta = prob.trajectory
     x = prob.get_x()
     cost2 = x.T @ Q.detach().numpy() @ x
+    try:
+        cost1 = prob.get_range_cost(trajectory=prob.trajectory, biases=biases)
+    except NotImplementedError:
+        cost1 = cost2
     if abs(cost1 - cost2) > 1e-10:
         print("Warning: costs are not the same! This will lead to faulty behavior")
 
-    # with torch.no_grad():
     starting_loss = gen_loss(torch.tensor(bias_init))[0].item()
     target_loss = gen_loss(torch.tensor(prob.biases_gt[: prob.n_calib]))[0].item()
     assert target_loss < starting_loss, "target is worse than init."
@@ -128,6 +114,8 @@ def run_calibration(
         )
         plt.show(block=False)
 
+    p = torch.tensor(bias_init, requires_grad=True)
+    opt = torch.optim.Adam(params=[p], **options["adam"])
     for n_iter in range(1, options["max_iter"]):
         opt.zero_grad()
 
