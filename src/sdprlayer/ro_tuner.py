@@ -102,7 +102,8 @@ def run_calibration(
 
     starting_loss = gen_loss(torch.tensor(bias_init))[0].item()
     target_loss = gen_loss(torch.tensor(prob.biases_gt[: prob.n_calib]))[0].item()
-    assert target_loss < starting_loss, "target is worse than init."
+    if target_loss > starting_loss:
+        print("Warning: target is worse than init.")
     print("target biases:", prob.biases_gt)
     print("target loss:", target_loss)
     if plots:

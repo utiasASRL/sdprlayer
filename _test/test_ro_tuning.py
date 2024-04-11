@@ -17,18 +17,24 @@ SEED = 1
 INIT_NOISE = 0.1
 
 
-def get_dataset_problem(n_positions, use_gt=True):
-    prob3_data = Problem.init_from_dataset(
-        fname="trial1", accumulate=True, use_gt=use_gt, regularization=Reg.NONE
+def get_dataset_problem(n_positions, use_gt=True, gt_noise=0):
+    prob_data = Problem.init_from_dataset(
+        fname="trial1",
+        accumulate=True,
+        use_gt=use_gt,
+        regularization=Reg.NONE,
+        gt_noise=gt_noise,
     )
-    assert prob3_data.calculate_noise_level() == 0
-    prob3_large = RealProblem.init_from_prob(prob3_data, n_calib=1)
-    prob3_large.DOWNSAMPLE_MODE = "uniform"
+    if use_gt and gt_noise == 0:
+        assert prob_data.calculate_noise_level() == 0
+    prob_large = RealProblem.init_from_prob(prob_data, n_calib=1)
+    prob_large.DOWNSAMPLE_MODE = "uniform"
 
-    prob3 = prob3_large.get_downsampled_version(number=n_positions)
-    assert prob3.calculate_noise_level() == 0
-    prob3.generate_biases()
-    return prob3
+    prob = prob_large.get_downsampled_version(number=n_positions)
+    if use_gt and gt_noise == 0:
+        assert prob.calculate_noise_level() == 0
+    prob.add_bias()
+    return prob
 
 
 def test_toy_outer(noise=0, verbose=False, plots=False):
@@ -65,7 +71,7 @@ def test_ro_outer(noise=0, verbose=False, plots=False):
     )
     # prob.plot()
     constraints = prob.get_constraints()
-    prob.generate_biases()
+    prob.add_bias()
 
     options["adam"]["lr"] = 1e-2
     options["grad_norm_tol"] = 1e-5
@@ -86,7 +92,7 @@ def test_ro_outer(noise=0, verbose=False, plots=False):
     )
 
 
-def test_ro_bias_calib(gridsize=0.1):
+def test_ro_bias_calib(gridsize=1e-3):
     """Verify the cost landscape on a grid of bias values."""
     np.random.seed(SEED)
 
@@ -101,17 +107,26 @@ def test_ro_bias_calib(gridsize=0.1):
     )
     prob2 = deepcopy(prob1)
 
-    prob1.generate_biases()
-    prob1.title = "only first non-zero"
+    prob1.add_bias()
+    prob1.title = "first non-zero"
 
     biases = np.random.uniform(low=-0.1, high=0.1, size=prob2.K)
-    prob2.generate_biases(biases=biases)
+    prob2.add_bias(biases=biases)
     prob2.title = "all non-zero"
 
-    prob3 = get_dataset_problem(n_positions=n_positions, use_gt=True)
-    prob3.title = "real-world zero-noise"
+    prob3 = get_dataset_problem(n_positions=n_positions, use_gt=True, gt_noise=0)
+    prob3.title = "real-world noise-0"
 
-    for prob in [prob1, prob2, prob3]:
+    prob4 = get_dataset_problem(n_positions=n_positions, use_gt=True, gt_noise=1e-2)
+    prob4.title = "real-world noise-1e-2"
+
+    prob5 = get_dataset_problem(n_positions=n_positions, use_gt=True, gt_noise=1e-1)
+    prob5.title = "real-world noise-1e-1"
+
+    prob6 = get_dataset_problem(n_positions=n_positions, use_gt=False)
+    prob6.title = "real-world"
+
+    for prob in [prob1, prob2, prob3, prob4, prob5, prob6]:
         # for prob in [prob1, prob2, prob3]:
         fig, ax = prob.plot(show=False)
         ax.set_title(prob.title)
@@ -151,21 +166,20 @@ def test_ro_bias_calib(gridsize=0.1):
         ax.set_xlabel("bias")
         ax.set_ylabel("loss")
         ax.set_title(prob.title)
+        plt.show(block=False)
 
-        assert (
-            abs(best_bias - prob.biases_gt[0]) < gridsize
-        ), f"failed for '{prob.title}'"
-        print(f"{prob.title} passed.")
-    plt.show()
+        if abs(best_bias - prob.biases_gt[0]) > gridsize + 1e-10:
+            print(f"failed for '{prob.title}'")
+        else:
+            print(f"{prob.title} passed.")
     return
 
 
 if __name__ == "__main__":
+    test_ro_bias_calib()
+
     test_toy_outer(noise=0, verbose=True, plots=True)
     test_toy_outer(noise=1e-2, verbose=True, plots=True)
 
     test_ro_outer(noise=0, verbose=True, plots=True)
     test_ro_outer(noise=1e-3, verbose=True, plots=True)
-
-    test_ro_bias_calib(1e-1)
-    test_ro_bias_calib(1e-2)

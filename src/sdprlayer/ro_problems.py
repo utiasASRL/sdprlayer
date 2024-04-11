@@ -55,7 +55,10 @@ class RealProblem(Problem):
         other.W = self.W[:, keep_idx]
         other.trajectory = self.trajectory[keep_idx, :]
         other.times = self.times[keep_idx]
-        self.trajectory = None
+        if self.theta is None:
+            other.theta = other.trajectory
+        else:
+            other.theta = self.theta[keep_idx, :]
         return other
 
     def __init__(
@@ -79,13 +82,15 @@ class RealProblem(Problem):
         if not real:
             self.generate_random(sigma_dist_real=noise)
 
-    def generate_biases(self, biases=None):
+    def add_bias(self, biases=None):
         if biases is None:
             biases = np.zeros(self.K)
-            biases[: self.n_calib] = np.random.uniform(size=self.n_calib) * 0.1
-        self.add_biases(biases)
+            biases[: self.n_calib] = np.random.uniform(
+                low=0.1, high=0.2, size=self.n_calib
+            )
+        self.generate_D_biased(biases)
         self.D_noisy_sq = self.D_biased**2
-        self.biases_gt = biases
+        self.biases_gt = self.get_biases()
 
     def get_x(self):
         z = np.linalg.norm(self.trajectory, axis=1) ** 2

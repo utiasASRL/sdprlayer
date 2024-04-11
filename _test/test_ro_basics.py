@@ -66,7 +66,7 @@ def test_ro_inner(noise=0, verbose=False):
     for reg in [Reg.NONE, Reg.CONSTANT_VELOCITY, Reg.ZERO_VELOCITY]:
         prob = RealProblem(n_positions=5, d=2, n_anchors=4, noise=noise, reg=reg)
         constraints = prob.get_constraints()
-        prob.generate_biases()
+        prob.add_bias()
 
         decimal = 6 if noise == 0 else 2
         positions_est = test_inner(prob, constraints, decimal=decimal, verbose=verbose)
@@ -106,7 +106,7 @@ def test_Q_zeronoise():
 
     # try with zero bias
     biases = np.zeros(prob.K)
-    prob.generate_biases(biases=biases)
+    prob.add_bias(biases=biases)
     p = torch.tensor(prob.biases, requires_grad=True)
 
     # even non-corrected matrix should have zero error!
@@ -115,7 +115,7 @@ def test_Q_zeronoise():
     assert err1 < 1e-10, f"error not zero: {err1}"
 
     # nonzero bias
-    prob.generate_biases()
+    prob.add_bias()
     p = torch.tensor(prob.biases, requires_grad=True)
 
     # does not correct for bias
@@ -138,14 +138,14 @@ def test_ro_Q_matrices(noise=0):
     Q = R + prob.get_Q_matrix()
 
     # check that zero bias gives the same result.
-    prob.generate_biases(biases=np.zeros(prob.K))
+    prob.add_bias(biases=np.zeros(prob.K))
 
     biases = torch.Tensor(prob.biases)
     Q_new = prob.build_data_mat(biases).detach().numpy()
     np.testing.assert_allclose(Q_new, Q.toarray(), atol=1e-6)
 
     # create problem with biases
-    prob.generate_biases()
+    prob.add_bias()
 
     # create matrix where we remove the biases
     biases = torch.Tensor(prob.biases)
