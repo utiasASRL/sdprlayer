@@ -4,37 +4,19 @@ import matplotlib.pylab as plt
 import numpy as np
 import torch
 
-from ro_certs.problem import Problem, Reg
+from ro_certs.gauss_newton import gauss_newton
+from ro_certs.problem import Reg
 from sdprlayer import SDPRLayer
-from sdprlayer.ro_problems import RealProblem, ToyProblem
+from sdprlayer.ro_problems import RealProblem, ToyProblem, get_dataset_problem
+from sdprlayer.ro_tuner import calibrate_for_bias_grid
 from sdprlayer.ro_tuner import options_default as options
-from sdprlayer.ro_tuner import run_calibration
+from sdprlayer.ro_tuner import run_calibration, unbias_problem
 
 # N_CALIB = None  # calibrates all
 N_CALIB = 1  # calibrates only first (all others are set to zero)
 
 SEED = 1
 INIT_NOISE = 0.1
-
-
-def get_dataset_problem(n_positions, use_gt=True, gt_noise=0):
-    prob_data = Problem.init_from_dataset(
-        fname="trial1",
-        accumulate=True,
-        use_gt=use_gt,
-        regularization=Reg.NONE,
-        gt_noise=gt_noise,
-    )
-    if use_gt and gt_noise == 0:
-        assert prob_data.calculate_noise_level() == 0
-    prob_large = RealProblem.init_from_prob(prob_data, n_calib=1)
-    prob_large.DOWNSAMPLE_MODE = "uniform"
-
-    prob = prob_large.get_downsampled_version(number=n_positions)
-    if use_gt and gt_noise == 0:
-        assert prob.calculate_noise_level() == 0
-    prob.add_bias()
-    return prob
 
 
 def test_toy_outer(noise=0, verbose=False, plots=False):
@@ -128,44 +110,9 @@ def test_ro_bias_calib(gridsize=1e-3):
 
     for prob in [prob1, prob2, prob3, prob4, prob5, prob6]:
         # for prob in [prob1, prob2, prob3]:
-        fig, ax = prob.plot(show=False)
-        ax.set_title(prob.title)
-        # bias_grid = np.arange(-1, 1, step=gridsize)
-        # assert bias_grid[0] <= prob.biases_gt[0] <= bias_grid[-1]
-        bias_gt = prob.biases_gt[0]
-        bias_grid = np.arange(
-            bias_gt - 5 * gridsize, bias_gt + 5 * gridsize, step=gridsize
-        )
-        loss_values = []
-
-        constraints = prob.get_constraints()
-        optlayer = SDPRLayer(n_vars=constraints[0].shape[0], constraints=constraints)
-
-        # Define loss
-        def gen_loss(p, **kwargs):
-            X, x = optlayer(prob.build_data_mat(p), solver_args=options["solver_args"])
-            test = True
-            if optlayer.check_rank(X, errors="ignore"):
-                # If X is not rank 1 then its structure also isn't right.
-                test = False
-
-            positions = prob.get_positions(x, test=test)
-            loss = torch.norm(positions - torch.tensor(prob.trajectory))
-            return loss, positions
-
-        for b in bias_grid:
-            # Set up polynomial parameter tensor
-            loss, __ = gen_loss(torch.tensor([b]))
-            loss_values.append(loss)
-
-        best_bias = bias_grid[np.argmin(loss_values)]
-
-        fig, ax = plt.subplots()
-        ax.scatter(bias_grid, loss_values)
-        ax.axvline(best_bias)
-        ax.set_xlabel("bias")
-        ax.set_ylabel("loss")
-        ax.set_title(prob.title)
+        # fig, ax = prob.plot(show=False)
+        # ax.set_title(prob.title)
+        best_bias = calibrate_for_bias_grid(prob, gridsize, plot=True)
         plt.show(block=False)
 
         if abs(best_bias - prob.biases_gt[0]) > gridsize + 1e-10:
@@ -175,7 +122,79 @@ def test_ro_bias_calib(gridsize=1e-3):
     return
 
 
+def test_local_vs_sdp():
+    """Make sure that Q and the cost returned by the (biased) Gauss Newton solver are the same."""
+
+    np.random.seed(SEED)
+    prob1 = get_dataset_problem(
+        n_positions=5,
+        use_gt=False,
+        reg=Reg.CONSTANT_VELOCITY,
+        # downsample_mode="uniform",
+        downsample_mode="middle",
+    )
+    # prob1.set_sigma_acc_est(1e1)
+
+    prob2 = get_dataset_problem(
+        n_positions=5,
+        use_gt=False,
+        reg=Reg.CONSTANT_VELOCITY,
+        # downsample_mode="uniform",
+        downsample_mode="uniform",
+    )
+    # prob2.set_sigma_acc_est(1e-1)
+    p = [1.0]
+
+    # Some findings from tuning acceleration_lookback below: (number of iterations)
+    # type I: 10: 227850, 100: 148'600 1000: 170'650
+    # type II: -10: 141'700, -100: 143'550, -1000: 136'950, -1e4: same (probably capped)
+    options["solver_args"] = dict(
+        solve_method="SCS",
+        eps=1e-7,  # default: 1e-8
+        max_iters=int(1e7),  # default: 1e5
+        verbose=True,
+        acceleration_lookback=-int(1e4),
+    )
+    # TODO(FD) this doesn't currently speed up the solver.
+    # X_est = np.outer(x_est, x_est)
+    # x_warm = np.zeros(len(constraints) + 1)  # in Rn
+    # s_warm = X_est[np.triu_indices(X_est.shape[0])]  # in Rm
+    # y_warm = np.zeros_like(s_warm)  # Rm
+    # options["solver_args"]["warm_start"] = [x_warm, y_warm, s_warm]
+
+    for prob in [prob2, prob1]:
+        assert isinstance(prob, RealProblem)  # for debugging only
+        # Remove the bias from distance measurements.
+        prob_unbiased = unbias_problem(prob, p)
+        theta_est, info = gauss_newton(prob_unbiased.theta, prob_unbiased)
+
+        # Here, we remove the bias based on p in Q.
+        x_est = prob.get_x(theta=theta_est)
+        Q = prob.build_data_mat(torch.tensor(p), verbose=True)
+        cost_est = x_est.T @ Q.detach().numpy() @ x_est
+
+        assert abs(info["cost"] - cost_est) < 1e-8
+
+        constraints = prob.get_constraints()
+        optlayer = SDPRLayer(n_vars=constraints[0].shape[0], constraints=constraints)
+
+        # from cert_tools.sdp_solvers import adjust_Q
+        # Q_new, scale, offset = adjust_Q(Q)
+        # X, x = optlayer(Q_new, solver_args=options["solver_args"])
+        # cost_sdp = torch.trace(Q_new @ X) * scale + offset
+        X, x = optlayer(Q, solver_args=options["solver_args"])
+        cost_sdp = torch.trace(Q @ X)
+
+        err = abs(cost_sdp - cost_est).item()
+        assert err < 1e-6, f"SCS failed: {err}"
+
+        theta_sdp = x.reshape((prob.N, prob.get_dim() + 1))[:, : prob.get_dim()]
+        np.testing.assert_almost_equal(theta_sdp, theta_est, decimal=3)
+
+
 if __name__ == "__main__":
+    test_local_vs_sdp()
+
     test_ro_bias_calib()
 
     test_toy_outer(noise=0, verbose=True, plots=True)

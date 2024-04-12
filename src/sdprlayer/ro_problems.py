@@ -9,6 +9,31 @@ from ro_certs.problem import Problem, Reg
 from ro_certs.sdp_setup import get_A_list, get_Q_matrix, get_R_matrix
 
 
+def get_dataset_problem(
+    n_positions, use_gt=True, gt_noise=0, reg=Reg.NONE, downsample_mode="uniform"
+):
+    prob_data = Problem.init_from_dataset(
+        fname="trial1",
+        accumulate=True,
+        use_gt=use_gt,
+        regularization=reg,
+        gt_noise=gt_noise,
+    )
+    if use_gt and gt_noise == 0:
+        assert prob_data.calculate_noise_level() == 0
+    prob_large = RealProblem.init_from_prob(prob_data, n_calib=1)
+    prob = prob_large.get_downsampled_version(
+        number=n_positions, method=downsample_mode
+    )
+    if use_gt and gt_noise == 0:
+        assert prob.calculate_noise_level() == 0
+    prob.add_bias()
+
+    # makes sure the regularization is roughly balanced with the data term
+    prob.set_sigma_acc_est(1 / np.median(np.diff(prob.times)))
+    return prob
+
+
 class RealProblem(Problem):
     # TODO(FD) strangely, set_to_gt leads to rank-2 solutions.
     BIAS_MODE = "set_to_gt"
@@ -33,7 +58,9 @@ class RealProblem(Problem):
         real_prob.W = prob.W
         real_prob.trajectory = prob.trajectory
         real_prob.times = prob.times
-        real_prob.biases_gt = real_prob.get_biases(real_prob.D_noisy_sq, squared=True)
+        real_prob.theta = prob.theta
+        real_prob.velocities = prob.velocities
+        real_prob.biases_gt = real_prob.get_biases()
         return real_prob
 
     def get_downsampled_version(self, number=3, method=None):
@@ -42,6 +69,8 @@ class RealProblem(Problem):
         other = deepcopy(self)
         if method == "first":
             keep_idx = np.arange(number)
+        elif method == "middle":
+            keep_idx = np.arange(other.N // 2 - number, other.N // 2)
         elif method == "last":
             keep_idx = np.arange(other.N - number, other.N)
         elif method == "uniform":
@@ -59,6 +88,7 @@ class RealProblem(Problem):
             other.theta = other.trajectory
         else:
             other.theta = self.theta[keep_idx, :]
+            other.velocities = self.velocities[keep_idx, :]
         return other
 
     def __init__(
@@ -92,12 +122,15 @@ class RealProblem(Problem):
         self.D_noisy_sq = self.D_biased**2
         self.biases_gt = self.get_biases()
 
-    def get_x(self):
-        z = np.linalg.norm(self.trajectory, axis=1) ** 2
+    def get_x(self, theta=None):
+        if theta is None:
+            theta = self.theta
+        trajectory = theta[:, : self.d]
+        z = np.linalg.norm(trajectory, axis=1) ** 2
         return np.hstack(
             [
                 [1.0],
-                np.hstack([self.theta[:, : self.get_dim()], z[:, None]]).flatten(),
+                np.hstack([theta[:, : self.get_dim()], z[:, None]]).flatten(),
             ]
         )
 
@@ -176,10 +209,14 @@ class RealProblem(Problem):
     def add_sigma_to_R(self, R, sigma):
         raise NotImplementedError("parametrizing sigma is not implemented yet.")
 
-    def build_data_mat(self, biases_est=None, sigma_acc_est=None):
+    def build_data_mat(self, biases_est=None, sigma_acc_est=None, verbose=False):
         # build data matrix, introducing biases or sigma parameters.
         R_old = torch.tensor(self.get_R_matrix().toarray())
         Q_old = torch.tensor(self.get_Q_matrix().toarray())
+        if verbose:
+            print("Q range ", Q_old.min().item(), Q_old.max().item())
+            print("R range ", R_old.min().item(), R_old.max().item())
+
         if biases_est is not None:
             assert len(biases_est) == self.n_calib
             if self.BIAS_MODE == "set_to_zero":
@@ -194,9 +231,8 @@ class RealProblem(Problem):
         elif sigma_acc_est is not None:
             R_new = self.add_sigma_to_R(R_old, sigma_acc_est)
             return Q_old + R_new
-
         else:
-            raise ValueError("must either give biases or sigma_acc_est")
+            return Q_old + R_old
 
     def get_Q_matrix(self):
         return get_Q_matrix(self, hom_position="first")
