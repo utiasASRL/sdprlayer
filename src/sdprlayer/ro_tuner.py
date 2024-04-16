@@ -1,4 +1,3 @@
-import time
 from copy import deepcopy
 
 import matplotlib.pylab as plt
@@ -9,14 +8,17 @@ from ro_certs.gauss_newton import gauss_newton
 from sdprlayer.ro_problems import RealProblem
 from sdprlayer.sdprlayer import SDPRLayer
 
+INIT_MODE = "gt"
+INIT_NOISE = 1e-2
+
 options_default = dict(
-    max_iter=2000,
-    grad_norm_tol=1e-2,
+    max_iter=50,
+    grad_norm_tol=1e-4,
     adam=dict(lr=1e-4),
     solver_args=dict(
-        eps=1e-4,
+        eps=1e-6,
         solve_method="SCS",
-        max_iters=int(1e6),
+        max_iters=int(1e5),
         acceleration_lookback=-int(1e4),
     ),
 )
@@ -79,9 +81,9 @@ def setup_error_plots(target_loss):
 def setup_position_plot(prob):
     fig_pos, ax_pos = plt.subplots()
     if prob.trajectory.shape[0] > 1:
-        ax_pos.plot(*prob.trajectory[:, : prob.d].T, color="k", marker="o")
+        ax_pos.plot(*prob.trajectory[:, :2].T, color="k", marker="o")
     else:
-        ax_pos.scatter(*prob.trajectory[:, : prob.d].T, color="k")
+        ax_pos.scatter(*prob.trajectory[:, :2].T, color="k")
     ax_pos.scatter(*prob.anchors[:, : prob.d].T, marker="x", color="k")
     return fig_pos, ax_pos
 
@@ -94,11 +96,13 @@ def gen_loss(
         # TODO(FD) setting sigma_acc_est to None on purpose because it's
         # not implemented yet. It's therefore not differentaible! Still
         # good enough for testing / calibrating for now.
-        Q = prob.build_data_mat(biases_est=bias, sigma_acc_est=None)
-        solver_args = deepcopy(options["solver_args"])
-        X, x = optlayer(Q, solver_args=solver_args)
+        Q = prob.build_data_mat(
+            biases_est=bias,
+            sigma_acc_est=None,
+            verbose=options["solver_args"]["verbose"],
+        )
+        X, x = optlayer(Q, solver_args=options["solver_args"])
         cost = torch.trace(Q @ X)
-        print("SDPR optimal cost:", cost.item())
 
         test = True  # weather or not to test structure of x
         if not optlayer.check_rank(X):
@@ -121,8 +125,6 @@ def gen_loss(
         theta_est, info = gauss_newton(prob_new.theta, prob=prob_new, verbose=False)
         if info["success"]:
             cost = info["cost"]
-            print("GN", info["status"])
-            print("optimal cost:", cost)
             positions = theta_est[:, : prob.d]
             loss = np.linalg.norm(positions - prob_new.trajectory)
         else:
@@ -256,28 +258,36 @@ def run_calibration(
     prob,
     constraints,
     verbose=False,
-    init_noise=1e-3,
+    init_noise=INIT_NOISE,
     plots=False,
     options=options_default,
+    appendix="",
 ):
     """Make sure that we converge to the (almost) perfect biases when using
     (almost) perfect distances.
     """
 
-    def gen_loss_here(bias):
+    def gen_loss_here(bias, verbose=False):
         options = deepcopy(options_default)
-        options["solver_args"]["verbose"] = False
+        options["solver_args"]["verbose"] = verbose
         loss, cost, positions = gen_loss(
-            bias, prob, optlayer, solver="SDPR", options=options
+            bias,
+            prob,
+            optlayer,
+            solver="SDPR",
+            options=options,
         )
         return loss, positions
 
     optlayer = SDPRLayer(n_vars=constraints[0].shape[0], constraints=constraints)
 
     # Set up parameter tensor
-    bias_init = prob.biases_gt[: prob.n_calib] + np.random.normal(
-        scale=init_noise, loc=0, size=prob.n_calib
-    )
+    if INIT_MODE == "gt":
+        bias_init = prob.biases_gt[: prob.n_calib] + np.random.normal(
+            scale=init_noise, loc=0, size=prob.n_calib
+        )
+    elif INIT_MODE == "zero":
+        bias_init = np.zeros(prob.n_calib)
     losses = []
     converged = False
 
@@ -298,8 +308,10 @@ def run_calibration(
     if abs(cost1 - cost2) > 1e-10:
         print("Warning: costs are not the same! This will lead to faulty behavior")
 
-    starting_loss, __ = gen_loss_here(torch.tensor(bias_init))
-    target_loss, __ = gen_loss_here(torch.tensor(prob.biases_gt[: prob.n_calib]))
+    starting_loss, __ = gen_loss_here(torch.tensor(bias_init), verbose=True)
+    target_loss, __ = gen_loss_here(
+        torch.tensor(prob.biases_gt[: prob.n_calib]), verbose=True
+    )
     if target_loss > starting_loss:
         print("Warning: target is worse than init.")
     print("target biases:", prob.biases_gt)
@@ -319,43 +331,39 @@ def run_calibration(
         opt.zero_grad()
 
         # forward pass
-        loss, positions = gen_loss_here(p)
+        loss, positions = gen_loss_here(p, verbose=False)
         losses.append(loss)
 
         # compute gradient
         loss.backward(retain_graph=True)
 
-        # check if gradient is close to zero
-        p_grad_norm = p.grad.norm(p=torch.inf)
-        if p_grad_norm < options["grad_norm_tol"]:
-            msg = f"converged in grad after {n_iter} iterations."
-            converged = True
-        else:
-            # perform one optimizer step
-            opt.step()
+        # perform one optimizer step
+        opt.step()
 
         # print new values etc.
         biases_est = p.detach().numpy()
         errors = np.abs(biases_est - prob.biases_gt[: prob.n_calib])
-        if verbose and ((n_iter < 20) or (n_iter % 10 == 0) or converged):
-            errors_str = ",".join([f"{e:.2e}" for e in errors])
-            print(
-                f"{n_iter}: errors: {errors_str}\tgrad norm: {p_grad_norm:.2e}\tloss: {losses[-1]:.2e}"
-            )
 
-        if plots and ((n_iter < 20) or (n_iter % 10 == 0)):
+        if plots:
             update_err_plot(ax_err, n_iter, errors)
             update_loss_plot(ax_loss, n_iter, loss.item())
             update_pos_plot(ax_pos, positions[:, : prob.d].detach().numpy().T)
 
-        if converged:
+        # check if gradient is close to zero
+        p_grad_norm = p.grad.norm(p=torch.inf)
+        if verbose:
+            errors_str = ",".join([f"{e:.2e}" for e in errors])
+            print(f"{n_iter}: errors: {errors_str}\t bias0:{biases_est[0]:.2e}", end="")
+            print(f"\tgrad norm: {p_grad_norm:.2e}\tloss: {losses[-1]:.2e}")
+        if p_grad_norm < options["grad_norm_tol"]:
+            msg = f"converged in grad after {n_iter} iterations."
             break
     if not converged:
         msg = f"did not converge in {n_iter} iterations"
 
     if plots:
-        timestamp = int(time.time())
-        fname = f"_plots/fig_err_{timestamp}.png"
+        # timestamp = int(time.time())
+        fname = f"_plots/convergence_{appendix}.png"
         fig.savefig(
             fname, bbox_inches="tight", pad_inches=0.1, transparent=False, dpi=100
         )

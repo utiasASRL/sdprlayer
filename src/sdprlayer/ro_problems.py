@@ -10,7 +10,12 @@ from ro_certs.sdp_setup import get_A_list, get_Q_matrix, get_R_matrix
 
 
 def get_dataset_problem(
-    n_positions, use_gt=True, gt_noise=0, reg=Reg.NONE, downsample_mode="uniform"
+    n_positions=None,
+    use_gt=True,
+    gt_noise=0,
+    reg=Reg.NONE,
+    downsample_mode="uniform",
+    add_bias=True,
 ):
     prob_data = Problem.init_from_dataset(
         fname="trial1",
@@ -22,12 +27,20 @@ def get_dataset_problem(
     if use_gt and gt_noise == 0:
         assert prob_data.calculate_noise_level() == 0
     prob_large = RealProblem.init_from_prob(prob_data, n_calib=1)
-    prob = prob_large.get_downsampled_version(
-        number=n_positions, method=downsample_mode
-    )
+    if n_positions is None:
+        prob = prob_large
+    else:
+        prob = prob_large.get_downsampled_version(
+            number=n_positions, method=downsample_mode
+        )
     if use_gt and gt_noise == 0:
         assert prob.calculate_noise_level() == 0
-    prob.add_bias()
+
+    # add a bias to the measurements.
+    if add_bias:
+        prob.add_bias()
+    else:
+        prob.biases_gt = prob.get_biases()
 
     # makes sure the regularization is roughly balanced with the data term
     prob.set_sigma_acc_est(1 / np.median(np.diff(prob.times)))
@@ -63,23 +76,26 @@ class RealProblem(Problem):
         real_prob.biases_gt = real_prob.get_biases()
         return real_prob
 
-    def get_downsampled_version(self, number=3, method=None):
+    def get_downsampled_version(self, number=3, method=None, keep_idx=None):
         if method is None:
             method = self.DOWNSAMPLE_MODE
-        other = deepcopy(self)
         if method == "first":
             keep_idx = np.arange(number)
         elif method == "middle":
-            keep_idx = np.arange(other.N // 2 - number, other.N // 2)
+            keep_idx = np.arange(self.N // 2 - number, self.N // 2)
         elif method == "last":
-            keep_idx = np.arange(other.N - number, other.N)
+            keep_idx = np.arange(self.N - number, self.N)
         elif method == "uniform":
-            keep_idx = np.linspace(0, other.N - 1, number).astype(int)
+            keep_idx = np.linspace(0, self.N - 1, number).astype(int)
             keep_idx = np.unique(keep_idx)
         else:
             raise ValueError(f"Unknown method {method}")
         assert len(keep_idx) == number
-        other.N = number
+        return self.extract_problem(keep_idx)
+
+    def extract_problem(self, keep_idx):
+        other = deepcopy(self)
+        other.N = len(keep_idx)
         other.D_noisy_sq = self.D_noisy_sq[:, keep_idx]
         other.W = self.W[:, keep_idx]
         other.trajectory = self.trajectory[keep_idx, :]
@@ -88,6 +104,7 @@ class RealProblem(Problem):
             other.theta = other.trajectory
         else:
             other.theta = self.theta[keep_idx, :]
+        if self.velocities is not None:
             other.velocities = self.velocities[keep_idx, :]
         return other
 
@@ -214,8 +231,8 @@ class RealProblem(Problem):
         R_old = torch.tensor(self.get_R_matrix().toarray())
         Q_old = torch.tensor(self.get_Q_matrix().toarray())
         if verbose:
-            print("Q range ", Q_old.min().item(), Q_old.max().item())
-            print("R range ", R_old.min().item(), R_old.max().item())
+            print(f"Q_old range {Q_old.min().item():.2e}, {Q_old.max().item():.2e}")
+            print(f"R_old range {R_old.min().item():.2e}, {R_old.max().item():.2e}")
 
         if biases_est is not None:
             assert len(biases_est) == self.n_calib
@@ -227,12 +244,16 @@ class RealProblem(Problem):
                 raise ValueError(self.BIAS_MODE)
             biases[: self.n_calib] = biases_est
             Q_new = self.add_biases_to_Q(Q_old, biases)
-            return Q_new + R_old
+            Q_new += R_old
         elif sigma_acc_est is not None:
             R_new = self.add_sigma_to_R(R_old, sigma_acc_est)
-            return Q_old + R_new
+            Q_new = Q_old + R_new
         else:
-            return Q_old + R_old
+            Q_new = Q_old + R_old
+        if verbose:
+            print(f"Q_new range {Q_new.min().item():.2e}, {Q_new.max().item():.2e}")
+            print("Q conditioning number:", np.linalg.cond(Q_new.detach().numpy()))
+        return Q_new
 
     def get_Q_matrix(self):
         return get_Q_matrix(self, hom_position="first")
@@ -243,6 +264,12 @@ class RealProblem(Problem):
     def get_constraints(self):
         A_0, A_list = get_A_list(self, hom_position="first")
         return A_list
+
+    def iterate(self, batch_size=10):
+        for i_min in np.arange(self.N, step=batch_size):
+            i_max = min(self.N, i_min + batch_size)
+            prob_sub = self.extract_problem(range(i_min, i_max))
+            yield prob_sub
 
 
 class ToyProblem(object):
