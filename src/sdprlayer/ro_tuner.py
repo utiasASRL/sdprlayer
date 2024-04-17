@@ -8,13 +8,12 @@ from ro_certs.gauss_newton import gauss_newton
 from sdprlayer.ro_problems import RealProblem
 from sdprlayer.sdprlayer import SDPRLayer
 
-INIT_MODE = "gt"
-INIT_NOISE = 1e-2
-
 options_default = dict(
-    max_iter=50,
+    max_iter=200,
     grad_norm_tol=1e-4,
     adam=dict(lr=1e-4),
+    init_mode="gt",
+    init_noise=1e-2,
     solver_args=dict(
         eps=1e-6,
         solve_method="SCS",
@@ -33,7 +32,7 @@ def plot_losses(sigma_grid, loss_values, cost_values, best_sigma, param="sigma")
     ax.set_yscale("log")
     ax.set_xscale("log")
     ax.set_xlabel(param)
-    ax.set_ylabel("position error", color="C0")
+    ax.set_ylabel("outer loss", color="C0")
     ax2.set_ylabel("distance error", color="C1")
     lims = ax.get_ylim()
     ax.set_ylim(max(lims[0], 1e-3), min(lims[1], 1e3))
@@ -50,11 +49,15 @@ def unbias_problem(prob, p):
     return prob_new
 
 
-def update_loss_plot(ax, idx, loss):
+def update_cost_plot(ax, idx, loss):
     ax.scatter(idx, loss, color="k", s=1)
 
 
-def update_err_plot(ax, idx, errors, labels=False):
+def update_error_plot(ax, idx, err):
+    ax.scatter(idx, err, color="k", s=1)
+
+
+def update_bias_plot(ax, idx, errors, labels=False):
     for i, b in enumerate(errors):
         label = f"b{i}" if labels else None
         ax.scatter(idx, b, color=f"C{i}", s=1, label=label)
@@ -67,15 +70,20 @@ def update_pos_plot(ax, pos):
         ax.scatter(*pos[:2, :], s=1)
 
 
-def setup_error_plots(target_loss):
-    fig, (ax_loss, ax_err) = plt.subplots(1, 2)
+def setup_error_plots(target_cost=None, target_error=None):
+    fig, (ax_cost, ax_error, ax_bias) = plt.subplots(1, 3)
     fig.set_size_inches(10, 5)
-    ax_loss.set_yscale("log")
-    ax_err.set_yscale("log")
-    ax_loss.set_title("position error")
-    ax_err.set_title("bias error")
-    ax_loss.axhline(target_loss, color="k", label=f"target: {target_loss:.2e}")
-    return fig, ax_loss, ax_err
+    ax_cost.set_yscale("log")
+    ax_bias.set_yscale("log")
+    ax_error.set_yscale("log")
+    ax_cost.set_title("outer loss")
+    ax_error.set_title("position error")
+    ax_bias.set_title("bias error")
+    if target_cost is not None:
+        ax_cost.axhline(target_cost, color="k", label=f"target: {target_cost:.2e}")
+    if target_error is not None:
+        ax_error.axhline(target_error, color="k", label=f"target: {target_error:.2e}")
+    return fig, ax_cost, ax_error, ax_bias
 
 
 def setup_position_plot(prob):
@@ -133,7 +141,7 @@ def gen_loss(
             positions = None
     else:
         raise ValueError(solver)
-    return loss, cost, positions
+    return cost, loss, positions
 
 
 def calibrate_for_bias_grid(
@@ -142,13 +150,13 @@ def calibrate_for_bias_grid(
     def gen_loss_here(p):
         options = deepcopy(options_default)
         options["solver_args"]["verbose"] = True
-        loss, cost, positions = gen_loss(
+        cost, error, positions = gen_loss(
             p, prob, optlayer, solver=solver, options=options
         )
         try:
-            return loss.item(), cost.item(), positions
+            return cost.item(), error.item(), positions
         except:
-            return loss, cost, positions
+            return cost, error, positions
 
     constraints = prob.get_constraints()
     optlayer = SDPRLayer(n_vars=constraints[0].shape[0], constraints=constraints)
@@ -160,14 +168,14 @@ def calibrate_for_bias_grid(
         bias_grid = np.arange(
             bias_gt - 10 * gridsize, bias_gt + 10 * gridsize, step=gridsize
         )
-    loss_values = []
+    error_values = []
     cost_values = []
 
     if plot:
         fig, ax = prob.plot(show=False)
 
     for i, b in enumerate(bias_grid):
-        loss, cost, positions_est = gen_loss_here(torch.tensor([b]))
+        cost, error, positions_est = gen_loss_here(torch.tensor([b]))
 
         if plot:
             prob.plot_estimates(
@@ -179,13 +187,13 @@ def calibrate_for_bias_grid(
                 show=False,
             )
 
-        loss_values.append(loss)
+        error_values.append(error)
         cost_values.append(cost)
-    best_bias = bias_grid[np.argmin(loss_values)]
+    best_bias = bias_grid[np.argmin(error_values)]
 
     if plot:
         fig, ax = plot_losses(
-            bias_grid, loss_values, cost_values, best_bias, param="bias"
+            bias_grid, error_values, cost_values, best_bias, param="bias"
         )
         ax.axvline(bias_gt, color="C2", label="bias gt")
         ax.set_xscale("linear")
@@ -198,13 +206,13 @@ def calibrate_for_sigma_acc_est_grid(
     def gen_loss_here(p):
         options = deepcopy(options_default)
         options["solver_args"]["verbose"] = True
-        loss, cost, positions = gen_loss(
+        cost, error, positions = gen_loss(
             p, prob, optlayer, solver=solver, options=options
         )
         try:
-            return loss.item(), cost.item(), positions
+            return cost.item(), error.item(), positions
         except:
-            return loss, cost, positions
+            return cost, error, positions
 
     if gridsize == 0:
         sigma_grid = [prob.SIGMA_ACC_EST]
@@ -238,7 +246,7 @@ def calibrate_for_sigma_acc_est_grid(
     best_sigma = sigma_grid[np.nanargmin(loss_values)]
     if plot and gridsize > 0:
         prob.set_sigma_acc_est(s)
-        loss, cost, positions_est = gen_loss(bias=None)
+        cost, error, positions_est = gen_loss(bias=None)
         prob.plot_estimates(
             [positions_est],
             labels=["best estimate"],
@@ -258,7 +266,6 @@ def run_calibration(
     prob,
     constraints,
     verbose=False,
-    init_noise=INIT_NOISE,
     plots=False,
     options=options_default,
     appendix="",
@@ -268,34 +275,33 @@ def run_calibration(
     """
 
     def gen_loss_here(bias, verbose=False):
-        options = deepcopy(options_default)
         options["solver_args"]["verbose"] = verbose
-        loss, cost, positions = gen_loss(
+        cost, error, positions = gen_loss(
             bias,
             prob,
             optlayer,
             solver="SDPR",
             options=options,
         )
-        return loss, positions
+        return cost, error, positions
 
     optlayer = SDPRLayer(n_vars=constraints[0].shape[0], constraints=constraints)
 
     # Set up parameter tensor
-    if INIT_MODE == "gt":
+    if options["init_mode"] == "gt":
         bias_init = prob.biases_gt[: prob.n_calib] + np.random.normal(
-            scale=init_noise, loc=0, size=prob.n_calib
+            scale=options["init_noise"], loc=0, size=prob.n_calib
         )
-    elif INIT_MODE == "zero":
+    elif options["init_mode"] == "zero":
         bias_init = np.zeros(prob.n_calib)
-    losses = []
+    costs = []
     converged = False
 
     if prob.BIAS_MODE == "set_to_zero":
         biases = np.zeros(prob.K)
         biases[: prob.n_calib] = prob.biases_gt[: prob.n_calib]
     elif prob.BIAS_MODE == "set_to_gt":
-        biases = prob.biases_gt
+        biases = deepcopy(prob.biases_gt)
     else:
         raise ValueError(prob.BIAS_MODE)
     Q = prob.build_data_mat(biases_est=torch.tensor(prob.biases_gt[: prob.n_calib]))
@@ -306,22 +312,30 @@ def run_calibration(
     except NotImplementedError:
         cost1 = cost2
     if abs(cost1 - cost2) > 1e-10:
-        print("Warning: costs are not the same! This will lead to faulty behavior")
+        print("Warning: costs are not the same! This may lead to faulty behavior")
+        print(
+            f"cost1: {cost1:.4e}, cost2: {cost2:.4e}, error: {abs(cost1 - cost2):.4e}"
+        )
 
-    starting_loss, __ = gen_loss_here(torch.tensor(bias_init), verbose=True)
-    target_loss, __ = gen_loss_here(
+    starting_cost, starting_error, _ = gen_loss_here(
+        torch.tensor(bias_init), verbose=True
+    )
+    target_cost, target_error, _ = gen_loss_here(
         torch.tensor(prob.biases_gt[: prob.n_calib]), verbose=True
     )
-    if target_loss > starting_loss:
+    # starting_loss = 1e-3
+    # target_loss = 1e-3
+    if target_cost > starting_cost:
         print("Warning: target is worse than init.")
     print("target biases:", prob.biases_gt)
-    print("target loss:", target_loss)
+    print("target loss:", target_cost)
     if plots:
-        fig, ax_loss, ax_err = setup_error_plots(target_loss)
+        fig, ax_cost, ax_error, ax_bias = setup_error_plots(target_cost, target_error)
         fig_pos, ax_pos = setup_position_plot(prob)
-        update_loss_plot(ax_loss, 0, starting_loss)
-        update_err_plot(
-            ax_err, 0, np.abs(bias_init - prob.biases_gt[: prob.n_calib]), labels=True
+        update_cost_plot(ax_cost, 0, starting_cost)
+        update_error_plot(ax_error, 0, starting_error)
+        update_bias_plot(
+            ax_bias, 0, np.abs(bias_init - prob.biases_gt[: prob.n_calib]), labels=True
         )
         plt.show(block=False)
 
@@ -331,11 +345,11 @@ def run_calibration(
         opt.zero_grad()
 
         # forward pass
-        loss, positions = gen_loss_here(p, verbose=False)
-        losses.append(loss)
+        cost, error, positions = gen_loss_here(p, verbose=False)
+        costs.append(cost)
 
         # compute gradient
-        loss.backward(retain_graph=True)
+        cost.backward(retain_graph=True)
 
         # perform one optimizer step
         opt.step()
@@ -345,8 +359,9 @@ def run_calibration(
         errors = np.abs(biases_est - prob.biases_gt[: prob.n_calib])
 
         if plots:
-            update_err_plot(ax_err, n_iter, errors)
-            update_loss_plot(ax_loss, n_iter, loss.item())
+            update_bias_plot(ax_bias, n_iter, errors)
+            update_cost_plot(ax_cost, n_iter, cost.item())
+            update_error_plot(ax_error, n_iter, error.item())
             update_pos_plot(ax_pos, positions[:, : prob.d].detach().numpy().T)
 
         # check if gradient is close to zero
@@ -354,14 +369,15 @@ def run_calibration(
         if verbose:
             errors_str = ",".join([f"{e:.2e}" for e in errors])
             print(f"{n_iter}: errors: {errors_str}\t bias0:{biases_est[0]:.2e}", end="")
-            print(f"\tgrad norm: {p_grad_norm:.2e}\tloss: {losses[-1]:.2e}")
+            print(f"\tgrad norm: {p_grad_norm:.2e}\tloss: {costs[-1]:.2e}")
         if p_grad_norm < options["grad_norm_tol"]:
             msg = f"converged in grad after {n_iter} iterations."
+            converged = True
             break
     if not converged:
         msg = f"did not converge in {n_iter} iterations"
 
-    if plots:
+    if plots and (appendix != ""):
         # timestamp = int(time.time())
         fname = f"_plots/convergence_{appendix}.png"
         fig.savefig(

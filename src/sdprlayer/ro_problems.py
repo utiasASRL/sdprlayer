@@ -80,7 +80,9 @@ class RealProblem(Problem):
         if method is None:
             method = self.DOWNSAMPLE_MODE
         if method == "first":
-            keep_idx = np.arange(number)
+            # calibrate when the drone reaches > 1m for the first time.
+            start_idx = np.where(self.trajectory[:, self.d - 1] > 1.0)[0][0]
+            keep_idx = np.arange(start_idx, start_idx + number)
         elif method == "middle":
             keep_idx = np.arange(self.N // 2 - number, self.N // 2)
         elif method == "last":
