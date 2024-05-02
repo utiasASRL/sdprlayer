@@ -126,8 +126,8 @@ def get_gt_setup(
     if traj_type == "clusters":
         # Ground Truth Poses
         for i in range(N_batch):
-            r_p0s += [0.1 * np.random.randn(3, 1)]
-            C_p0s += [sm.roty(0.1 * np.random.randn(1)[0])]
+            r_p0s += [0.2 * np.random.randn(3, 1)]
+            C_p0s += [sm.roty(0.5 * np.random.randn(1)[0])]
         # Offset from the origin
         r_l = r_l + offs
     elif traj_type == "circle":
@@ -137,7 +137,7 @@ def get_gt_setup(
         if N_batch > 1:
             delta_phi = n_turns * 2 * np.pi / (N_batch - 1)
         else:
-            delta_phi = n_turns
+            delta_phi = n_turns * 2 * np.pi
         phi = delta_phi
         for i in range(N_batch):
             # Location
