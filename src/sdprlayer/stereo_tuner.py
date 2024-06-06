@@ -9,8 +9,6 @@ import spatialmath.base as sm
 import theseus as th
 import torch
 from poly_matrix import PolyMatrix
-from pylgmath.se3.transformation import Transformation as Trans
-from torch import nn
 
 from sdprlayer import SDPRLayer
 

@@ -1,0 +1,9 @@
+.
+../diffcp
+../cvxpylayers
+../certifiable-tools
+../poly_matrix
+theseus-ai==0.2.1
+spatialmath-python
+cvxpy
+asrl-pylgmath

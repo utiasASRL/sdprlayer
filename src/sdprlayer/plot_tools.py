@@ -1,10 +1,6 @@
 #!/usr/bin/env python
 import os
 
-import numpy as np
-import matplotlib.pylab as plt
-
-seaborn_kwargs = {"edgecolor": "none", "linewidth": 0}
 root_dir = os.getcwd()
 fig_dir = os.path.join(root_dir, "figs")
 

@@ -1,4 +1,4 @@
-name: sdpr_bk
+name: sdpr2
 channels:
     - defaults
     - conda-forge
@@ -20,22 +20,9 @@ dependencies:
     - cvxopt
     - pandas
     - pyvis
-    - seaborn
     # Testing & linting
     - pytest=7.1
     - pytest-cov=4.0
     - flake8=6.0
     
-    - pip:
-        - -e .
-        - -e src/cvxpylayers
-        - -e src/diffcp
-        - -e src/certifiable-tools
-        - -e src/mat_weight_certs
-        - -e src/poly_matrix
-        - theseus-ai==0.2.1
-        - pypose
-        - spatialmath-python
-        - progress
-        - cvxpy
-        - asrl-pylgmath
+

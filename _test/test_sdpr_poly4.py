@@ -1,16 +1,13 @@
 import os
 
+import cvxpy as cp
 import matplotlib.pylab as plt
 import numpy as np
 import scipy.sparse as sp
+import torch
 from scipy.optimize import lsq_linear
 
-import cvxpy as cp
-import torch
-from cvxpylayers.torch import CvxpyLayer
 from sdprlayer import SDPRLayer
-from cert_tools.eopt_solvers import solve_eopt, opts_cut_dflt
-
 
 root_dir = os.path.abspath(os.path.dirname(__file__) + "/../")
 

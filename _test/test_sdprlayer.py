@@ -1,12 +1,9 @@
-from contextlib import AbstractContextManager
 import unittest
 
 import numpy as np
 import numpy.random as npr
 import pytest
-import scipy.linalg as la
 import torch
-
 
 from sdprlayer import SDPRLayer
 
