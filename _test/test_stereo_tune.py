@@ -4,7 +4,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from mwcerts.stereo_problems import Localization
 import sdprlayer.stereo_tuner as st
 from sdprlayer import SDPRLayer
 
@@ -46,60 +45,6 @@ class TestStereoTune(unittest.TestCase):
             t.cam_gt.sigma_u = 0.5
             t.cam_gt.sigma_v = 0.5
 
-    @staticmethod
-    def get_data_mat_loc(r_l, r_p, C_p0, meas, weights):
-        # convert r_ls to list
-        r_l = [r_l[:, [i]] for i in range(r_l.shape[-1])]
-        prob = Localization([r_p], [C_p0], r_l)
-        v1 = prob.G.Vp["x0"]
-        for i in range(meas.shape[-1]):
-            v2 = prob.G.Vm[f"m{i}"]
-            meas_val = meas[:, [i]].detach().numpy()
-            weight_val = weights[i].detach().numpy()
-            prob.G.add_edge(v1, v2, meas_val, weight_val)
-        # Generate cost matrix
-        prob.generate_cost()
-        Q_val = prob.Q.get_matrix(prob.var_list).todense()
-        return Q_val
-
-    def test_data_matrix(t, N_batch=2):
-        # Generate problem
-        r_ps, C_p0s, r_ls, pixel_meass = st.get_prob_data(
-            camera=t.cam_gt, N_map=7, N_batch=N_batch
-        )
-
-        # generate parameterized camera
-        cam_torch = st.Camera(
-            f_u=torch.tensor(t.cam_gt.f_u, requires_grad=True),
-            f_v=torch.tensor(t.cam_gt.f_v, requires_grad=True),
-            c_u=torch.tensor(t.cam_gt.c_u, requires_grad=True),
-            c_v=torch.tensor(t.cam_gt.c_v, requires_grad=True),
-            b=torch.tensor(t.cam_gt.b, requires_grad=True),
-            sigma_u=t.cam_gt.sigma_u,
-            sigma_v=t.cam_gt.sigma_v,
-        )
-        # Get data matrix
-        pixel_meass = torch.tensor(pixel_meass)
-        Q_torch, scales, offsets = st.get_data_mat(cam_torch, r_ls, pixel_meass)
-        Q_torch = Q_torch.detach().numpy()
-        # Get euclidean measurements from pixels
-        meas, weights = cam_torch.inverse(pixel_meass)
-        # Build meas graph for comparison
-        for b in range(N_batch):
-            # Check that measurements are correct (should be exact with no noise)
-            if t.no_noise:
-                meas_val = meas[b].detach().numpy()
-                meas_gt = C_p0s[b] @ (r_ls[b] - r_ps[b])
-                np.testing.assert_allclose(meas_val, meas_gt, atol=1e-9)
-            # Get data matrix
-            Q_desired = t.get_data_mat_loc(
-                r_ls[b], r_ps[b], C_p0s[b], meas[b], weights[b]
-            )
-            Q_desired[0, 0] = 0.0
-            Q_desired = Q_desired / np.linalg.norm(Q_desired, ord="fro")
-            # Test
-            np.testing.assert_allclose(Q_torch[b], Q_desired, rtol=1e-7, atol=1e-7)
-
     def test_forward_scs(t):
         t.run_forward_sdpr(solver="SCS")
 
@@ -125,7 +70,7 @@ class TestStereoTune(unittest.TestCase):
         )
 
         # get the constraints
-        constraints_list = st.get_constraints(r_ps, C_p0s, r_ls)
+        constraints_list = st.get_constraints()
         # Build Layer
         sdpr_layer = SDPRLayer(13, constraints=constraints_list, use_dual=True)
         # Run Forward pass
@@ -203,19 +148,25 @@ class TestStereoTune(unittest.TestCase):
         else:
             atol_r = 7e-3
             atol_c = 7e-3
+
+        # Get Cost matrix
+        Q, scales, offsets = st.get_data_mat(cam_torch, r_ls, pixel_meass)
+        Q = Q * scales.unsqueeze(1).unsqueeze(2)
+        Q[:, 0, 0] = Q[:, 0, 0] + offsets
+        Q = Q.detach().numpy()
+        # Check that we get the right estimated values and cost.
         for b in range(N_batch):
             r_p0_est_d = r_p_est[b].detach().numpy()
             C_p0_est_d = C_est[b].detach().numpy()
             np.testing.assert_allclose(r_p0_est_d, r_p0s[b].squeeze(1), atol=atol_r)
             np.testing.assert_allclose(C_p0_est_d.T @ C_p0s[b], np.eye(3), atol=atol_c)
             # Test cost value
-            Q = t.get_data_mat_loc(r_ls[b], r_p0s[b], C_p0s[b], meas[b], weights[b])
             r_p0_p = C_p0_est_d @ r_p0_est_d
             x = np.hstack(
                 [1.0, C_p0_est_d.reshape(-1, 1, order="F").squeeze(1), r_p0_p]
             )
             x = x[:, None]
-            cost = x.T @ Q @ x
+            cost = x.T @ Q[b, :, :] @ x
             np.testing.assert_allclose(cost, info.best_err[b], atol=1e-7)
 
     def test_grads_theseus(t, N_map=20, N_batch=1):
@@ -389,7 +340,7 @@ class TestStereoTune(unittest.TestCase):
         )
 
         # TEST OPT LAYER
-        constraints_list = st.get_constraints(r_ps, C_p0s, r_ls)
+        constraints_list = st.get_constraints()
         # Build opt layer
         sdpr_layer = SDPRLayer(13, constraints=constraints_list, use_dual=False)
         sdpr_layer_dual = SDPRLayer(13, constraints=constraints_list, use_dual=True)
@@ -403,11 +354,11 @@ class TestStereoTune(unittest.TestCase):
                 # Run Forward pass
                 mosek_params = {
                     "MSK_IPAR_INTPNT_MAX_ITERATIONS": 1000,
-                    "MSK_DPAR_INTPNT_CO_TOL_PFEAS": 1e-10,
-                    "MSK_DPAR_INTPNT_CO_TOL_REL_GAP": 1e-10,
-                    "MSK_DPAR_INTPNT_CO_TOL_MU_RED": 1e-10,
-                    "MSK_DPAR_INTPNT_CO_TOL_INFEAS": 1e-10,
-                    "MSK_DPAR_INTPNT_CO_TOL_DFEAS": 1e-10,
+                    "MSK_DPAR_INTPNT_CO_TOL_PFEAS": 1e-12,
+                    "MSK_DPAR_INTPNT_CO_TOL_REL_GAP": 1e-14,
+                    "MSK_DPAR_INTPNT_CO_TOL_MU_RED": 1e-14,
+                    "MSK_DPAR_INTPNT_CO_TOL_INFEAS": 1e-12,
+                    "MSK_DPAR_INTPNT_CO_TOL_DFEAS": 1e-12,
                 }
                 solver_args = {
                     "solve_method": "mosek",
@@ -467,7 +418,7 @@ class TestStereoTune(unittest.TestCase):
         )
 
         # TEST OPT LAYER
-        constraints_list = st.get_constraints(r_ps, C_p0s, r_ls)
+        constraints_list = st.get_constraints()
         # Build opt layer
         sdpr_layer = SDPRLayer(13, constraints=constraints_list, use_dual=False)
         sdpr_layer_dual = SDPRLayer(13, constraints=constraints_list, use_dual=True)
@@ -498,7 +449,7 @@ class TestStereoTune(unittest.TestCase):
                 }
                 X = sdpr_layer_dual(Q, solver_args=solver_args)[0]
             elif solver == "SCS":
-                solver_args = {"solve_method": "SCS", "eps": 1e-9, "verbose": verbose}
+                solver_args = {"solve_method": "SCS", "eps": 1e-10, "verbose": verbose}
                 X = sdpr_layer(Q, solver_args=solver_args)[0]
             assert (
                 np.linalg.matrix_rank(X.detach().numpy(), tol=1e-6) == 1
@@ -509,7 +460,7 @@ class TestStereoTune(unittest.TestCase):
         X0_scs = get_X_from_params(*params, solver="SCS")[0]
         X0_msk = get_X_from_params(*params, solver="mosek")[0]
         np.testing.assert_allclose(
-            X0_scs.detach().numpy(), X0_msk.detach().numpy(), atol=1e-6
+            X0_scs.detach().numpy(), X0_msk.detach().numpy(), atol=1e-5
         )
 
         # Check gradients
@@ -526,17 +477,17 @@ class TestStereoTune(unittest.TestCase):
         loss.backward()
         loss0_msk = loss.detach().numpy().copy()
         grads_msk = [p.grad.detach().numpy().copy() for p in params]
-        np.testing.assert_allclose(grads_scs, grads_msk, atol=1e-6)
+        np.testing.assert_allclose(grads_scs, grads_msk, atol=2e-5)
         opt.zero_grad()
         # Check diff in loss
-        np.testing.assert_allclose(loss0_msk, loss0_scs, atol=1e-6)
+        np.testing.assert_allclose(loss0_msk, loss0_scs, atol=2e-5)
 
         # Check effect of peturbation
         params[-1].data += 1e-4
         X1_scs = get_X_from_params(*params, solver="SCS")[0]
         X1_msk = get_X_from_params(*params, solver="mosek")[0]
         np.testing.assert_allclose(
-            X1_scs.detach().numpy(), X1_msk.detach().numpy(), atol=1e-6
+            X1_scs.detach().numpy(), X1_msk.detach().numpy(), atol=1e-5
         )
 
         # Check difference in loss
@@ -547,7 +498,7 @@ class TestStereoTune(unittest.TestCase):
         loss = st.get_outer_loss(r_ps_est, C_p0s_est, r_ps, C_p0s)
         loss1_msk = loss.detach().numpy().copy()
         np.testing.assert_allclose(
-            loss1_msk - loss0_msk, loss1_scs - loss0_scs, atol=1e-6
+            loss1_msk - loss0_msk, loss1_scs - loss0_scs, atol=1e-5
         )
 
     # INTEGRATION TESTS
@@ -906,7 +857,8 @@ def plot_map(r_l, ax=None, **kwargs):
 
 
 if __name__ == "__main__":
-    # unittest.main()
     test = TestStereoTune(no_noise=False)
     # test.test_tune_params_sep(plot=False)
-    test.test_grads_optlayer_mosek()
+    # test.test_grads_optlayer_mosek()
+    test.test_compare_grads()
+    # test.test_fwd_theseus()

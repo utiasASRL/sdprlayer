@@ -1,0 +1,11 @@
+setup.cfg
+setup.py
+src/sdprlayer/__init__.py
+src/sdprlayer/plot_tools.py
+src/sdprlayer/polyminlayer.py
+src/sdprlayer/sdprlayer.py
+src/sdprlayer/stereo_tuner.py
+src/sdprlayer.egg-info/PKG-INFO
+src/sdprlayer.egg-info/SOURCES.txt
+src/sdprlayer.egg-info/dependency_links.txt
+src/sdprlayer.egg-info/top_level.txt

@@ -57,7 +57,7 @@ def plot_polynomial(p_vals):
     plt.plot(x, y)
 
 
-# Define Q tensor from polynomial parameters (there must be a better way to do this)
+# Define Q tensor from polynomial parameters
 def build_data_mat(p):
     Q_tch = torch.zeros((4, 4), dtype=torch.double)
     Q_tch[0, 0] = p[0]

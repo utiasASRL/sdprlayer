@@ -1,0 +1,8 @@
+Metadata-Version: 2.1
+Name: sdprlayer
+Version: 0.0.1
+Summary: Repository for autodiff backpropagation through convex relaxations
+License: { file="LICENSE" }
+Description-Content-Type: text/markdown
+
+file : README.md

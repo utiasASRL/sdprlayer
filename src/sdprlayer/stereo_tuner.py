@@ -8,7 +8,7 @@ import pandas as pd
 import spatialmath.base as sm
 import theseus as th
 import torch
-from mwcerts.stereo_problems import Localization, skew
+from poly_matrix import PolyMatrix
 from pylgmath.se3.transformation import Transformation as Trans
 from torch import nn
 
@@ -283,26 +283,93 @@ term_crit_def = {
 # SDPR OPTIMIZATION
 
 
-def get_constraints(r_p0s, C_p0s, r_ls):
+def get_constraints():
     """Generate constraints for problem"""
-    r_ls_b = [r_ls[0, :, [i]] for i in range(r_ls.shape[2])]
-    prob = Localization([r_p0s[0]], [C_p0s[0]], r_ls_b)
-    prob.generate_constraints()
-    prob.generate_redun_constraints()
-    constraints = prob.constraints + prob.constraints_r
-    # Get constraints in terms of homogenized matrices.
-    constraints_list = []
-    for constraint in constraints:
-        # Skip homogenizing constraint
-        if "Homog" in constraint.label:
-            continue
-        A = constraint.A.get_matrix(prob.var_list)
-        # If nonzero constant term, absorb into homog. constraint matrix
-        if not np.abs(constraint.b) < 1e-9:
-            A[0, 0] -= constraint.b
-        constraints_list += [A]
+    constraints = []
+    constraints += gen_orthoganal_constraints()
+    constraints += gen_row_col_constraints()
+    constraints += gen_handedness_constraints()
 
-    return constraints_list
+    return constraints
+
+
+def gen_orthoganal_constraints():
+    """Generate 6 orthongonality constraints for rotation matrices"""
+    # labels
+    h = "h"
+    C = "C"
+    t = "t"
+    variables = {h: 1, C: 9, t: 3}
+    constraints = []
+    for i in range(3):
+        for j in range(i, 3):
+            A = PolyMatrix()
+            E = np.zeros((3, 3))
+            E[i, j] = 1.0 / 2.0
+            A[C, C] = np.kron(E + E.T, np.eye(3))
+            if i == j:
+                A[h, h] = -1.0
+            else:
+                A[h, h] = 0.0
+            constraints += [A.get_matrix(variables)]
+    return constraints
+
+
+def gen_row_col_constraints():
+    """Generate constraint that every row vector length equal every column vector length"""
+    # labels
+    h = "h"
+    C = "C"
+    t = "t"
+    variables = {h: 1, C: 9, t: 3}
+    # define constraints
+    constraints = []
+    for i in range(3):
+        for j in range(3):
+            A = PolyMatrix()
+            c_col = np.zeros(9)
+            ind = 3 * j + np.array([0, 1, 2])
+            c_col[ind] = np.ones(3)
+            c_row = np.zeros(9)
+            ind = np.array([0, 3, 6]) + i
+            c_row[ind] = np.ones(3)
+            A[C, C] = np.diag(c_col - c_row)
+            constraints += [A.get_matrix(variables)]
+    return constraints
+
+
+def gen_handedness_constraints():
+    """Generate Handedness Constraints - Equivalent to the determinant =1
+    constraint for rotation matrices. See Tron,R et al:
+    On the Inclusion of Determinant Constraints in Lagrangian Duality for 3D SLAM"""
+    # labels
+    h = "h"
+    C = "C"
+    t = "t"
+    variables = {h: 1, C: 9, t: 3}
+    # define constraints
+    constraints = []
+    i, j, k = 0, 1, 2
+    for col_ind in range(3):
+        l, m, n = 0, 1, 2
+        for row_ind in range(3):
+            # Define handedness matrix and vector
+            mat = np.zeros((9, 9))
+            mat[3 * j + m, 3 * k + n] = 1 / 2
+            mat[3 * j + n, 3 * k + m] = -1 / 2
+            mat = mat + mat.T
+            vec = np.zeros((9, 1))
+            vec[i * 3 + l] = -1 / 2
+            # Create constraint
+            A = PolyMatrix()
+            A[C, C] = mat
+            A[C, h] = vec
+            constraints += [A.get_matrix(variables)]
+            # cycle row indices
+            l, m, n = m, n, l
+        # Cycle column indicies
+        i, j, k = j, k, i
+    return constraints
 
 
 def tune_stereo_params_sdpr(
@@ -317,8 +384,7 @@ def tune_stereo_params_sdpr(
     verbose=False,
     solver="SCS",
 ):
-    # Define a localization class to get the constraints
-    constraints_list = get_constraints(r_p0s_gt, C_p0s_gt, r_ls)
+    constraints_list = get_constraints()
     # Build Layer
     sdpr_layer = SDPRLayer(13, constraints=constraints_list, use_dual=False)
 
@@ -641,3 +707,16 @@ def tune_stereo_params_no_opt(
         n_iter += 1
 
     return pd.DataFrame(iter_info)
+
+
+def skew(vec):
+    if vec.shape == (3,):
+        vec = np.expand_dims(vec, axis=1)
+    assert vec.shape == (3, 1), "Input vector must have shape (3,1)"
+    return np.array(
+        [
+            [0.0, -vec[2, 0], vec[1, 0]],
+            [vec[2, 0], 0.0, -vec[0, 0]],
+            [-vec[1, 0], vec[0, 0], 0.0],
+        ]
+    )
