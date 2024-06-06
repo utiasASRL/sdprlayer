@@ -2,13 +2,12 @@ import os
 import unittest
 
 import cvxpy as cp
-from cvxpylayers.torch import CvxpyLayer
 import matplotlib.pylab as plt
 import numpy as np
 import scipy.sparse as sp
 import torch
+from cert_tools.eopt_solvers import opts_cut_dflt, solve_eopt
 
-from cert_tools.eopt_solvers import solve_eopt, opts_cut_dflt
 from sdprlayer import SDPRLayer
 
 root_dir = os.path.abspath(os.path.dirname(__file__) + "/../")
