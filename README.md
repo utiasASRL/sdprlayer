@@ -11,29 +11,7 @@ Please see our [paper](https://arxiv.org/abs/2405.19309) for more details.
 
 # Usage
 
-The user is responsible for converting a given polynomial problem to a *Quadratically Constrained Quadratic Problem* (QCQP). The SDPRLayer can accept the QCQP in non-homogenized form:
-
-$$
-\begin{equation}
-	\begin{array}{rl}
-		\min\limits_{\bm{x}} &\bm{x}^T\bm{F}_{\bm{\theta}}\bm{x} + \bm{f}_{\bm{\theta}}^T\bm{x} + f_{\bm{\theta}}\\ 
-		s.t.&\bm{x}^T\bm{G}_{\bm{\theta} i}\bm{x} + \bm{g}_{\bm{\theta} i}^T\bm{x} + g_{\bm{\theta} i} = 0,\forall i \in [N_c],
-	\end{array}
-\end{equation}
-$$
-
-Alternatively, the user can specify the problem in homogenized form:
-$$
-\begin{equation}
-	\begin{array}{rl}
-		\min\limits_{\bm{x}} & \bm{x}^T\bm{Q}_{\bm{\theta}}\bm{x} \\
-		s.t. & \bm{x}^T\bm{A}_{\bm{\theta} i}\bm{x} = 0,\forall i \in [N_c],\\
-		&\bm{x}^T\bm{A}_0\bm{x} = 1,
-	\end{array}
-\end{equation}
-$$
-
-If the problem will be provided in non-homogenized form, the user must set the "homogenize" flag to true during initialization of the layer.
+The user is responsible for converting a given polynomial problem to a *Quadratically Constrained Quadratic Problem* (QCQP). The SDPRLayer can accept the QCQP in homogenized or non-homogenized form. If the problem will be provided in non-homogenized form, the user must set the "homogenize" flag to true during initialization of the layer.
 
 The input vectors/matrices that characterize the cost and constraints are provided to the SDPRLayer on initialization of the layer. The cost must be provided either as a 3-tuple (non-homogenized) or a matrix (homogenized). The constraints are provided as a list of either 3-tuples (non-homogenized) or matrices (homogenized).
 
