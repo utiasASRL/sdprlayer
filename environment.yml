@@ -1,16 +1,16 @@
-name: sdpr2
+name: sdprlayer
 channels:
     - defaults
     - conda-forge
     - anaconda
     - mosek
 
-
 dependencies:
     - python=3.9
     - pip=22.3
+    - pip:
+        - -r requirements.txt
     # Packages
-    - numpy=1.23
     - matplotlib=3.6
     - jupyterlab=3.5
     - ipynbname=2021.3
@@ -25,4 +25,4 @@ dependencies:
     - pytest-cov=4.0
     - flake8=6.0
     
-
+    

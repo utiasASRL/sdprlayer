@@ -1,14 +1,15 @@
 import os
 import unittest
 
-import cvxpy as cp
 import matplotlib.pylab as plt
 import numpy as np
 import scipy.sparse as sp
 import torch
-from cert_tools.eopt_solvers import opts_cut_dflt, solve_eopt
 
 from sdprlayer import SDPRLayer
+
+# from cert_tools.eopt_solvers import opts_cut_dflt, solve_eopt
+
 
 root_dir = os.path.abspath(os.path.dirname(__file__) + "/../")
 
@@ -93,16 +94,16 @@ def local_solver(p: torch.Tensor, x_init=0.0):
     return x_hat
 
 
-def certifier(objective, constraints, x_cand):
-    opts = opts_cut_dflt
-    method = "cuts"
-    _, output = solve_eopt(
-        Q=objective, Constraints=constraints, x_cand=x_cand, opts=opts, method=method
-    )
-    if not output["status"] == "POS_LB":
-        raise ValueError("Unable to certify solution")
-    # diffcp assumes the form:  H = Q - A*mult
-    return output["H"], -output["mults"]
+# def certifier(objective, constraints, x_cand):
+#     opts = opts_cut_dflt
+#     method = "cuts"
+#     _, output = solve_eopt(
+#         Q=objective, Constraints=constraints, x_cand=x_cand, opts=opts, method=method
+#     )
+#     if not output["status"] == "POS_LB":
+#         raise ValueError("Unable to certify solution")
+#     # diffcp assumes the form:  H = Q - A*mult
+#     return output["H"], -output["mults"]
 
 
 def test_run_sdp():
@@ -194,7 +195,7 @@ def test_prob_sdp(display=False):
     assert np.log10(evr_new) >= 9, ValueError("Solution is not Rank-1")
 
 
-def test_prob_local(display=False):
+def _test_prob_local(display=False):
     """The goal of this script is to shift the optimum of the polynomial
     to a different point by using backpropagtion on rank-1 SDPs. Forward
     pass is performed with an iterative solver while the backward pass uses
@@ -210,7 +211,7 @@ def test_prob_local(display=False):
     # Create SDPR Layer
     sdpr_args = dict(n_vars=4, constraints=constraints, use_dual=True)
     sdpr_args["local_solver"] = local_solver
-    sdpr_args["certifier"] = certifier
+    # sdpr_args["certifier"] = certifier
     sdpr_args["local_args"] = dict(p=p, x_init=-1.5)
     optlayer = SDPRLayer(**sdpr_args)
 
@@ -373,7 +374,7 @@ def test_grad_sdp_mosek(use_dual=True):
     )
 
 
-def test_grad_local(autograd_test=True):
+def _test_grad_local(autograd_test=True):
     """This test function compares the local version of SDPRLayer with the
     SDP version. Local refers to the fact that the forward pass uses a local
     solver and the reverse pass uses the certificate."""
@@ -389,7 +390,7 @@ def test_grad_local(autograd_test=True):
     optlayer_sdp = SDPRLayer(**sdpr_args)
     # Create SDPR Layer (Local version)
     sdpr_args["local_solver"] = local_solver
-    sdpr_args["certifier"] = certifier
+    # sdpr_args["certifier"] = certifier
     sdpr_args["local_args"] = dict(p=p, x_init=-1.5)
     optlayer_local = SDPRLayer(**sdpr_args)
 

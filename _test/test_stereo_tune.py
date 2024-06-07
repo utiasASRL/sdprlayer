@@ -4,8 +4,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-import sdprlayer.stereo_tuner as st
 from sdprlayer import SDPRLayer
+from sdprlayer import stereo_tuner as st
 
 
 def set_seed(x):
@@ -101,7 +101,7 @@ class TestStereoTune(unittest.TestCase):
                 np.testing.assert_allclose(C.T @ r_inP, r_ps[b], atol=5e-3)
                 np.testing.assert_allclose(C.T @ C_p0s[b], np.eye(3), atol=5e-3)
 
-    def test_fwd_theseus(t, N_map=20, N_batch=5):
+    def test_forward_theseus(t, N_map=20, N_batch=5):
         """Test forward pass of theseus layer"""
         set_seed(0)
         # Generate problem
@@ -860,5 +860,5 @@ if __name__ == "__main__":
     test = TestStereoTune(no_noise=False)
     # test.test_tune_params_sep(plot=False)
     # test.test_grads_optlayer_mosek()
-    test.test_compare_grads()
-    # test.test_fwd_theseus()
+    # test.test_compare_grads()
+    test.test_forward_mosek()

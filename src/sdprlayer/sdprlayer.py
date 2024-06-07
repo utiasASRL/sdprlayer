@@ -381,14 +381,14 @@ class SDPRLayer(CvxpyLayer):
             Q = np.block([[f, 0.5 * fvec.T], [0.5 * fvec, F]])
 
         return Q
-
+    
     @staticmethod
     def check_rank(X):
         # Check rank
         sorted_eigs = np.sort(np.linalg.eigvalsh(X.detach().numpy()))
         sorted_eigs = np.abs(sorted_eigs)
         assert sorted_eigs[-1] / sorted_eigs[-2] > 1e6, "X is not rank-1"
-
+    
     @staticmethod
     def extract_rowcol(X):
         """Assumes that the homogenized variable corresponds to the first row/col"""
