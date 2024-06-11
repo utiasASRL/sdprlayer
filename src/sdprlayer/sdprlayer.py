@@ -2,6 +2,7 @@ from copy import deepcopy
 
 import cvxpy as cp
 import numpy as np
+import scipy.linalg as la
 import scipy.sparse as sp
 import torch
 from cvxpylayers.torch import CvxpyLayer
@@ -381,16 +382,110 @@ class SDPRLayer(CvxpyLayer):
             Q = np.block([[f, 0.5 * fvec.T], [0.5 * fvec, F]])
 
         return Q
-    
+
     @staticmethod
-    def check_rank(X):
+    def check_tightness(X, ER_min=1e6):
         # Check rank
         sorted_eigs = np.sort(np.linalg.eigvalsh(X.detach().numpy()))
         sorted_eigs = np.abs(sorted_eigs)
-        assert sorted_eigs[-1] / sorted_eigs[-2] > 1e6, "X is not rank-1"
-    
+        ER = sorted_eigs[-1] / sorted_eigs[-2]
+        tight = ER > ER_min
+        return tight, ER
+
+    @staticmethod
+    def find_constraints(feas_samples, tolerance=1e-5):
+        """Find all possible constraints given a list of sampled values from
+        the feasible set. This function is a simplified version of AutoTight
+        introduced by Duembgen et al. in "Toward Globally Optimal State Estimation
+        Using Automatically Tightened Semidefinite Relaxations".
+        Note that it may be more efficient to use the AutoTemplate method for
+        larger SDPs.
+
+        Args:
+            feas_samples (list): a list of 1d numpy arrays of feasible samples
+            tolerance (float): tolerance on singular values considered part of nullspace
+        Returns:
+            constraints (list): A (maximal) list of constraints for the problem.
+            Note that these constraints are always returned in homogenized form
+        """
+        # Convert samples to lifted form
+        Y = []
+        for x in feas_samples:
+            # homogenize samples if not done already
+            if not x[0] == 1.0:
+                x = np.append(1.0, x)
+            # lift the sample into PSD space
+            x_lift = cones.vec_symm(x[:, None] @ x[None, :])
+            Y += [x_lift]
+        Y = np.vstack(Y)
+        dim = len(x)
+        # Find nullspace basis
+        basis, info = get_nullspace(Y, tolerance=tolerance)
+        # Convert basis to constraint list
+        constraints = [cones.unvec_symm(b, dim) for b in basis]
+
+        return constraints
+
     @staticmethod
     def extract_rowcol(X):
         """Assumes that the homogenized variable corresponds to the first row/col"""
         x = (X[1:, [0]] + X[[0], 1:].T) / 2.0
         return x
+
+
+def get_nullspace(A_dense, method="qrp", tolerance=1e-5):
+    """Function for finding the sparse nullspace basis of a given matrix"""
+    info = {}
+
+    if method != "qrp":
+        print("Warning: method other than qrp is not recommended.")
+
+    if method == "svd":
+        U, S, Vh = np.linalg.svd(
+            A_dense
+        )  # nullspace of A_dense is in last columns of V / last rows of Vh
+        rank = np.sum(np.abs(S) > tolerance)
+        basis = Vh[rank:, :]
+    elif method == "qr":
+        # if A_dense.T = QR, the last n-r columns
+        # of R make up the nullspace of A_dense.
+        Q, R = np.linalg.qr(A_dense.T)
+        S = np.abs(np.diag(R))
+        sorted_idx = np.argsort(S)[::-1]
+        S = S[sorted_idx]
+        rank = np.where(S < tolerance)[0][0]
+        # decreasing order
+        basis = Q[:, sorted_idx[rank:]].T
+    elif method == "qrp":
+        # Based on Section 5.5.5 "Basic Solutions via QR with Column Pivoting" from Golub and Van Loan.
+        # assert A_dense.shape[0] >= A_dense.shape[1], "only tall matrices supported"
+        Q, R, P = la.qr(A_dense, pivoting=True, mode="economic")
+        np.testing.assert_almost_equal(Q @ R - A_dense[:, P], 0)
+
+        S = np.abs(np.diag(R))
+        rank = np.sum(S > tolerance)
+        R1 = R[:rank, :]
+        R11, R12 = R1[:, :rank], R1[:, rank:]
+        # [R11  R12]  @  [R11^-1 @ R12] = [R12 - R12]
+        # [0    0 ]       [    -I    ]    [0]
+        N = np.vstack([la.solve_triangular(R11, R12), -np.eye(R12.shape[1])])
+
+        # Inverse permutation
+        Pinv = np.zeros(len(P), int)
+        for k, p in enumerate(P):
+            Pinv[p] = k
+        LHS = R1[:, Pinv]
+
+        info["Q1"] = Q[:, :rank]
+        info["LHS"] = LHS
+
+        basis = np.zeros(N.T.shape)
+        basis[:, P] = N.T
+    else:
+        raise ValueError(method)
+
+    # test that it is indeed a null space
+    error = A_dense @ basis.T
+    info["values"] = S
+    info["error"] = error
+    return basis, info

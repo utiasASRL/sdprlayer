@@ -447,11 +447,47 @@ def _test_grad_local(autograd_test=True):
     np.testing.assert_allclose(grad_local, grad_sdp, atol=2e-6, rtol=0)
 
 
+def test_redundant_constraint():
+    """This function tests the redundant constraint search functionality"""
+    np.random.seed(2)
+    # Get data from data function
+    data = get_prob_data()
+    constraints = data["constraints"]
+    # Remove redundant constraint
+    constraints = constraints[:-1]
+    # Create SDPR Layer
+    optlayer = SDPRLayer(n_vars=4, constraints=constraints, use_dual=False)
+
+    # Set up polynomial parameter tensor
+    p = torch.tensor(data["p_vals"], requires_grad=True)
+    sdp_solver_args = {"eps": 1e-9, "verbose": True}
+    X, x = optlayer(build_data_mat(p), solver_args=sdp_solver_args)
+    # Check Tightness
+    tight, ER = SDPRLayer.check_tightness(X)
+    assert not tight, ValueError("Problem should not be tight")
+
+    # Generate a set of samples of the feasible set
+    n_samples = 10
+    samples = []
+    for i in range(n_samples):
+        x = (np.random.rand() * 2 - 1) * 2
+        samples += [np.array([1, x, x**2, x**3])]
+    # Get new set of constraints
+    constraints_new = SDPRLayer.find_constraints(samples)
+    # Redefine layer with new constraints
+    optlayer = SDPRLayer(n_vars=4, constraints=constraints_new, use_dual=False)
+    X, x = optlayer(build_data_mat(p), solver_args=sdp_solver_args)
+    # Check Tightness
+    tight, ER_new = SDPRLayer.check_tightness(X)
+    assert tight, ValueError("Problem should be tight")
+
+
 if __name__ == "__main__":
     # test_prob_sdp()
     # test_prob_local(display=True)
     # test_grad_sdp()
-    test_grad_sdp_mosek()
+    # test_grad_sdp_mosek()
     # test_grad_local()
     # test_run_sdp()
     # test_prob_local()
+    test_redundant_constraint()

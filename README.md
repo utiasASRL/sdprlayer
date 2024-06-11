@@ -19,7 +19,9 @@ Importantly, setting the cost input or members of the constraint list to `None` 
 
 The SDPRLayer returns both the vector solution to the original problem and the matrix solution to the SDP relaxation. Both outputs are PyTorch tensors.
 
-Please see `_test` directory for example usages. 
+Please see `_scripts` directory for example usages. An example of how to use the *tightening* tools is given [here](_scripts/tighten_example.ipynb).
+
+To see an example usage of the SDPRLayer in a full robotics pipeline, see [our robot localization example](https://github.com/utiasASRL/deep_learned_visual_features/tree/mat-weight-sdp-version) (note that this is not on the main branch).
 
 # Installation
 
