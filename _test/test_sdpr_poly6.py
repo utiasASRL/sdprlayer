@@ -490,4 +490,5 @@ if __name__ == "__main__":
     # test_grad_local()
     # test_run_sdp()
     # test_prob_local()
-    test_redundant_constraint()
+    # test_redundant_constraint()
+    test_rank_maximization(display=True)

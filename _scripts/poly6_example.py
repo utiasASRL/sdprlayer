@@ -1,15 +1,14 @@
 import os
 
-import matplotlib.pylab as plt
 import matplotlib.cm as cm
+import matplotlib.pylab as plt
 import numpy as np
-from pandas import DataFrame, read_pickle
 import scipy.sparse as sp
 import torch
+from pandas import DataFrame, read_pickle
 
-from sdprlayer import SDPRLayer
-from sdprlayer import PolyMinLayer, polyval
-from utils import savefig
+from sdprlayer import PolyMinLayer, SDPRLayer, polyval
+from sdprlayer.plot_tools import savefig
 
 torch.set_default_dtype(torch.float64)
 
@@ -20,7 +19,7 @@ class Poly6Example:
         self.p_vals = prob_data["p_vals"]
         self.constraints = prob_data["constraints"]
 
-    def get_prob_data(self, p_vals):
+    def get_prob_data(self, p_vals=None):
         # Define polynomial
         if p_vals is None:
             p_vals = np.array(
@@ -183,6 +182,115 @@ def plot_polynomial(p_vals):
     plt.plot(x, y)
 
 
+def test_rank_maximization():
+    """This test checks if its possible increase the rank of the SDP relaxation
+    using the returned gradients from the implicit differentiation."""
+    np.random.seed(2)
+    # Initialize problem
+    prob = Poly6Example()
+    data = prob.get_prob_data()
+    constraints = data["constraints"]
+
+    # Create SDPR Layer
+    optlayer = SDPRLayer(n_vars=4, constraints=constraints[:-1])
+
+    # Set up polynomial parameter tensor
+    p = torch.tensor(data["p_vals"], requires_grad=True)
+
+    # arguments for sdp solver
+    mosek_params = {
+        "MSK_IPAR_INTPNT_MAX_ITERATIONS": 500,
+        "MSK_DPAR_INTPNT_CO_TOL_PFEAS": 1e-12,
+        "MSK_DPAR_INTPNT_CO_TOL_REL_GAP": 1e-12,
+        "MSK_DPAR_INTPNT_CO_TOL_MU_RED": 1e-12,
+        "MSK_DPAR_INTPNT_CO_TOL_INFEAS": 1e-12,
+        "MSK_DPAR_INTPNT_CO_TOL_DFEAS": 1e-12,
+    }
+    sdp_solver_args = {
+        "solve_method": "mosek",
+        "mosek_params": mosek_params,
+        "verbose": False,
+    }
+
+    # Define loss to tighten the problem
+    def gen_loss(p, tighten=True):
+        Q = build_data_mat(p)
+        Q.retain_grad()
+        X, x = optlayer(Q, solver_args=sdp_solver_args)
+        # loss = -torch.trace(X)
+        if tighten:
+            # loss = torch.norm(S[1:])
+            loss = torch.trace(X)
+        else:
+            loss = -torch.trace(X)
+        return loss, X
+
+    # Define Optimizer
+    opt = torch.optim.Adam(params=[p], lr=1e-1)
+    # Execute iterations
+    losses = []
+    max_iter = 500
+    n_iter = 0
+    tight = False
+    data = []
+    while n_iter < max_iter:
+        # Update Loss
+        opt.zero_grad()
+        loss, X = gen_loss(p, tighten=(not tight))
+        # run optimizer
+        loss.backward()
+        opt.step()
+        loss_val = np.abs(loss.item())
+        losses.append(loss_val)
+        n_iter += 1
+        # Compute Rank
+        tight, ER = SDPRLayer.check_tightness(X)
+        # Get eigenvalues
+        e_vals = torch.linalg.svdvals(X)
+
+        # Display iteration information
+        print(f"iter:{n_iter}\tloss:\t{losses[-1]},\tER:{ER}\tTight: {tight}")
+        data += [
+            {
+                "ER": ER,
+                "tight": tight,
+                "e1": e_vals[0].detach().numpy(),
+                "e2": e_vals[1].detach().numpy(),
+                "loss": loss_val,
+            }
+        ]
+
+    df = DataFrame(data)
+    fig, axs = plt.subplots(3, 1)
+    # Map 'tight' boolean values to colors
+    # Define a colormap: True to one color, False to another
+    colors = df["tight"].map({True: "green", False: "red"})
+
+    # Plot 'loss' using colors based on 'tight'
+    axs[0].scatter(df.index, df["loss"], c=colors)
+    axs[0].set_yscale("log")
+    axs[0].set_title("Loss vs. Iteration")
+    axs[0].set_xlabel("Iteration")
+    axs[0].set_ylabel("Loss")
+
+    # Example plot for eigenvalues (or any other values you wish to plot)
+    axs[1].semilogy(df["e1"], label="e1")
+    axs[1].semilogy(df["e2"], label="e2")
+    axs[1].set_title("Eigenvalues vs. Iteration")
+    axs[1].set_xlabel("Iteration")
+    axs[1].set_ylabel("Eigenvalue")
+    axs[1].legend()
+
+    # Example plot for ER values
+    axs[2].semilogy(df["ER"], color="blue")
+    axs[2].set_title("ER vs. Iteration")
+    axs[2].set_xlabel("Iteration")
+    axs[2].set_ylabel("ER")
+
+    plt.tight_layout()
+    plt.show()
+
+
 # Run functions
 def run_analysis(n_iters=5000, x_targ=1.7, p_targ=7.3, lr=1e-2):
     # Define problem
@@ -339,5 +447,6 @@ def plot_all(save=False, make_title=False):
 
 if __name__ == "__main__":
     # test_poly_torch()
-    run_analysis()
+    # run_analysis()
     # plot_all(save=True)
+    test_rank_maximization()
