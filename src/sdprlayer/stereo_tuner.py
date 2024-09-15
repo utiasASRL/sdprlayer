@@ -13,7 +13,7 @@ from poly_matrix import PolyMatrix
 from sdprlayer import SDPRLayer
 
 
-class Camera:
+class StereoCamera:
     def __init__(
         c, f_u=200.0, f_v=200.0, c_u=0.0, c_v=0.0, b=0.05, sigma_u=0.5, sigma_v=0.5
     ):
@@ -154,7 +154,7 @@ def get_gt_setup(
     return r_p0s, C_p0s, r_l
 
 
-def get_prob_data(camera=Camera(), N_map=30, N_batch=1):
+def get_prob_data(camera=StereoCamera(), N_map=30, N_batch=1):
     # get ground truth information
     r_p0s, C_p0s, r_l = get_gt_setup(N_map=N_map, N_batch=N_batch)
 
@@ -187,7 +187,7 @@ def kron(A, B):
     )
 
 
-def get_data_mat(cam_torch: Camera, r_ls, pixel_meass):
+def get_stereo_data_mat(cam_torch: StereoCamera, r_ls, pixel_meass):
     """Get a batch of data matrices for stereo calibration problem."""
     if not isinstance(pixel_meass, torch.Tensor):
         pixel_meass = torch.tensor(pixel_meass)
@@ -371,7 +371,7 @@ def gen_handedness_constraints():
 
 
 def tune_stereo_params_sdpr(
-    cam_torch: Camera,
+    cam_torch: StereoCamera,
     params,
     opt,
     r_p0s_gt,
@@ -391,7 +391,7 @@ def tune_stereo_params_sdpr(
         # zero grad
         opt.zero_grad()
         # generate loss
-        Qs, scales, offsets = get_data_mat(cam_torch, r_ls, pixel_meass)
+        Qs, scales, offsets = get_stereo_data_mat(cam_torch, r_ls, pixel_meass)
         if solver == "SCS":
             solver_args = {"solve_method": "SCS", "eps": 1e-9}
         elif solver == "mosek":
@@ -454,7 +454,7 @@ def build_theseus_layer(N_map, N_batch=1, opt_kwargs_in={}):
     """Build theseus layer for stereo problem
 
     Args:
-        cam_torch (Camera): _description_
+        cam_torch (StereoCamera): _description_
         r_l (_type_): _description_
         pixel_meas (_type_): _description_
     """
@@ -520,7 +520,7 @@ def build_theseus_layer(N_map, N_batch=1, opt_kwargs_in={}):
 
 
 def tune_stereo_params_theseus(
-    cam_torch: Camera,
+    cam_torch: StereoCamera,
     params,
     opt,
     r_p0s_gt,
@@ -642,7 +642,7 @@ def tune_stereo_params_theseus(
 
 
 def tune_stereo_params_no_opt(
-    cam_torch: Camera,
+    cam_torch: StereoCamera,
     params,
     opt,
     r_p0s,

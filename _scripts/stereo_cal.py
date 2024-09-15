@@ -6,13 +6,13 @@ import numpy as np
 import torch
 from pandas import DataFrame
 from spatialmath import SO3
-from utils import make_axes_transparent, make_dirs_safe, savefig
 
 import sdprlayer.stereo_tuner as st
 from sdprlayer.stereo_tuner import skew
+from utils import make_axes_transparent, make_dirs_safe, savefig
 
 # Define camera ground truth
-cam_gt = st.Camera(
+cam_gt = st.StereoCamera(
     f_u=484.5,
     f_v=484.5,
     c_u=0.0,
@@ -230,7 +230,7 @@ def plot_map(r_l, ax=None, **kwargs):
 
 def run_sdpr_cal(r_p0s, C_p0s, r_ls, pixel_meass):
     # generate parameterized camera
-    cam_torch = st.Camera(
+    cam_torch = st.StereoCamera(
         f_u=torch.tensor(cam_gt.f_u, requires_grad=True),
         f_v=torch.tensor(cam_gt.f_v, requires_grad=True),
         c_u=torch.tensor(cam_gt.c_u, requires_grad=True),
@@ -281,7 +281,7 @@ def find_local_minima(N_inits=100, store_data=False, check=False, **kwargs):
     # Convert to tensor
 
     # generate parameterized camera
-    cam_torch = st.Camera(
+    cam_torch = st.StereoCamera(
         f_u=torch.tensor(cam_gt.f_u, requires_grad=True),
         f_v=torch.tensor(cam_gt.f_v, requires_grad=True),
         c_u=torch.tensor(cam_gt.c_u, requires_grad=True),
@@ -478,7 +478,7 @@ def tune_baseline(
     default_term_crit.update(term_crit)
     term_crit = default_term_crit
     # generate parameterized camera
-    cam_torch = st.Camera(
+    cam_torch = st.StereoCamera(
         f_u=torch.tensor(cam_gt.f_u, requires_grad=True),
         f_v=torch.tensor(cam_gt.f_v, requires_grad=True),
         c_u=torch.tensor(cam_gt.c_u, requires_grad=True),
