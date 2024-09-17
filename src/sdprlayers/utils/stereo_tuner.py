@@ -10,7 +10,7 @@ import theseus as th
 import torch
 from poly_matrix import PolyMatrix
 
-from sdprlayer import SDPRLayer
+from sdprlayers.layers.sdprlayer import SDPRLayer
 
 
 class StereoCamera:

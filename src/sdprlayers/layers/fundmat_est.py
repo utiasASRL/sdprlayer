@@ -4,8 +4,8 @@ import torch.nn as nn
 from poly_matrix import PolyMatrix
 from torch.profiler import record_function
 
-from sdprlayer import SDPRLayer
-from sdprlayer.utils.lie_algebra import se3_inv, se3_log
+from sdprlayers.layers.sdprlayer import SDPRLayer
+from sdprlayers.utils.lie_algebra import se3_inv, se3_log
 
 
 class FundMatSDPBlock(nn.Module):
@@ -43,6 +43,18 @@ class FundMatSDPBlock(nn.Module):
             "MSK_DPAR_INTPNT_CO_TOL_INFEAS": tol,
             "MSK_DPAR_INTPNT_CO_TOL_DFEAS": tol,
         }
+
+    def get_device(module):
+        """
+        Get the device of a PyTorch nn.Module.
+
+        Args:
+            module (torch.nn.Module): The module to check.
+
+        Returns:
+            torch.device: The device on which the module is located.
+        """
+        return next(module.parameters()).device
 
     def forward(
         self,
@@ -116,7 +128,6 @@ class FundMatSDPBlock(nn.Module):
         keypoints_src,
         keypoints_trg,
         weights,
-        inv_cov_weights=None,
         scale_offset=True,
     ):
         """Compute the QCQP (Quadratically Constrained Quadratic Program) objective matrix
@@ -137,36 +148,26 @@ class FundMatSDPBlock(nn.Module):
         B = keypoints_src.shape[0]  # Batch dimension
         N = keypoints_src.shape[2]  # Number of points
         # Indices
-        h = 0
-        c = slice(1, 10)
-        t = slice(10, 13)
-        # relabel and dehomogenize
-        m = keypoints_src[:, :3, :]
-        y = keypoints_trg[:, :3, :]
-        Q_n = torch.zeros(B, N, 13, 13).cuda()
-        # world frame keypoint vector outer product
-        M = torch.einsum("bin,bjn->bnij", m, m)  # BxNx3x3
-        if inv_cov_weights is not None:
-            W = inv_cov_weights  # BxNx3x3
-        else:
-            # Weight with identity if no weights are provided
-            W = torch.eye(3, 3).cuda().expand(B, N, -1, -1)
-        # diagonal elements
-        Q_n[:, :, c, c] = kron(M, W)  # BxNx9x9
-        Q_n[:, :, t, t] = W  # BxNx3x3
-        Q_n[:, :, h, h] = torch.einsum("bin,bnij,bjn->bn", y, W, y)  # BxN
-        # Off Diagonals
-        m_ = m.transpose(-1, -2).unsqueeze(3)  # BxNx3x1
-        Wy = torch.einsum("bnij,bjn->bni", W, y).unsqueeze(3)  # BxNx3x1
-        Q_n[:, :, c, t] = -kron(m_, W)  # BxNx9x3
-        Q_n[:, :, t, c] = Q_n[:, :, c, t].transpose(-1, -2)  # BxNx3x9
-        Q_n[:, :, c, h] = -kron(m_, Wy).squeeze(-1)  # BxNx9
-        Q_n[:, :, h, c] = Q_n[:, :, c, h]  # BxNx9
-        Q_n[:, :, t, h] = Wy.squeeze(-1)  # BxNx3
-        Q_n[:, :, h, t] = Q_n[:, :, t, h]  # Bx3xN
-        # Scale by weights
-        weights = weights.squeeze(1)
-        Q = torch.einsum("bnij,bn->bij", Q_n, weights)
+        f = slice(0, 9)
+        e = slice(9, 12)
+        h = 12
+        # Form data matrix from points and weights
+        # NOTE: if s_k, t_k, w_k are the kth source, target and weights, this einsum computes:
+        #      sum_k  ( w_k * s_k @ t_k^T )      on each batch dim
+        weights_sqz = torch.squeeze(weights, 1)
+        X = torch.einsum(
+            "bik,bjk,bk->bij",
+            keypoints_src[:, :3, :],
+            keypoints_trg[:, :3, :],
+            weights_sqz,
+        )
+        # Vectorized (transposed) data matrix
+        vecXt = torch.reshape(X, (-1, 9, 1)).squeeze(2)
+        # Form cost matrix
+        Q = torch.zeros(B, 13, 13, device=keypoints_src.device)
+        Q[:, f, h] = vecXt / 2
+        Q[:, h, f] = vecXt / 2
+
         # NOTE: operations below are to improve optimization conditioning for solver
         # remove constant offset
         if scale_offset:
@@ -178,75 +179,6 @@ class FundMatSDPBlock(nn.Module):
         else:
             scales, offsets = None, None
         return Q, scales, offsets
-
-    @staticmethod
-    def get_obj_matrix(keypoints_src, keypoints_trg, weights, inv_cov_weights=None):
-        """
-        Compute the QCQP (Quadratically Constrained Quadratic Program) objective matrix
-        based on the given 3D keypoints from source and target frames, and their corresponding weights.
-        NOTE: This function is here only for debugging. It is not used in the forward pass.
-              This function is currently not vectorized and iterates over each batch and each keypoint.
-
-        Args:
-            keypoints_src (torch.Tensor): A tensor of shape (N_batch, 4, N) representing the
-                                             3D coordinates of keypoints in the source frame.
-                                             N_batch is the batch size and N is the number of keypoints.
-            keypoints_trg (torch.Tensor): A tensor of shape (N_batch, 4, N) representing the
-                                             3D coordinates of keypoints in the target frame.
-                                             N_batch is the batch size and N is the number of keypoints.
-            weights (torch.Tensor): A tensor of shape (N_batch, 1, N) representing the weights
-                                    corresponding to each keypoint.
-
-        Returns:
-            list: A list of tensors representing the QCQP objective matrices for each batch.
-        """
-        # Get batch dimension
-        N_batch = keypoints_src.shape[0]
-        # Indices
-        h = [0]
-        c = slice(1, 10)
-        t = slice(10, 13)
-        Q_batch = []
-        scales = torch.zeros(N_batch).cuda()
-        offsets = torch.zeros(N_batch).cuda()
-        for b in range(N_batch):
-            Q_es = []
-            for i in range(keypoints_trg.shape[-1]):
-                if inv_cov_weights is None:
-                    W_ij = torch.eye(3).cuda()
-                else:
-                    W_ij = inv_cov_weights[b, i, :, :]
-                m_j0_0 = keypoints_src[b, :3, [i]]
-                y_ji_i = keypoints_trg[b, :3, [i]]
-                # Define matrix
-                Q_e = torch.zeros(13, 13).cuda()
-                # Diagonals
-                Q_e[c, c] = kron(m_j0_0 @ m_j0_0.T, W_ij)
-                Q_e[t, t] = W_ij
-                Q_e[h, h] = y_ji_i.T @ W_ij @ y_ji_i
-                # Off Diagonals
-                Q_e[c, t] = -kron(m_j0_0, W_ij)
-                Q_e[t, c] = Q_e[c, t].T
-                Q_e[c, h] = -kron(m_j0_0, W_ij @ y_ji_i)
-                Q_e[h, c] = Q_e[c, h].T
-                Q_e[t, h] = W_ij @ y_ji_i
-                Q_e[h, t] = Q_e[t, h].T
-
-                # Add to running list of measurements
-                Q_es += [Q_e]
-            # Combine objective
-            Q_es = torch.stack(Q_es)
-            Q = torch.einsum("nij,n->ij", Q_es, weights[b, 0, :])
-            # remove constant offset
-            offsets[b] = Q[0, 0].clone()
-            Q[0, 0] = 0.0
-            # Rescale
-            scales[b] = torch.norm(Q, p="fro")
-            Q = Q / torch.norm(Q, p="fro")
-            # Add to running list of batched data matrices
-            Q_batch += [Q]
-
-        return torch.stack(Q_batch), scales, offsets
 
     @staticmethod
     def get_nullspace_constraint():
@@ -295,39 +227,6 @@ class FundMatSDPBlock(nn.Module):
         constraints = [A.get_matrix(variables)]
 
         return constraints
-
-    @staticmethod
-    def plot_points(s_in, t_in, w_in):
-        """purely for debug"""
-        import matplotlib.pyplot as plt
-
-        s = s_in.cpu().detach().numpy()
-        t = t_in.cpu().detach().numpy()
-        w = w_in.cpu().detach().numpy()
-        plt.figure()
-        ax = plt.axes(projection="3d")
-        ax.scatter3D(
-            s[0, 0, :],
-            s[0, 1, :],
-            s[0, 2, :],
-            marker="*",
-            color="g",
-        )
-        ax.scatter3D(
-            t[0, 0, :],
-            t[0, 1, :],
-            t[0, 2, :],
-            marker="*",
-            color="b",
-        )
-        ax.scatter3D(
-            0.0,
-            0.0,
-            0.0,
-            marker="*",
-            color="r",
-        )
-        return ax
 
 
 def kron(A, B):

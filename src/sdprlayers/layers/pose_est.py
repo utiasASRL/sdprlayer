@@ -5,8 +5,8 @@ import torch.nn.functional as F
 from poly_matrix import PolyMatrix
 from torch.profiler import record_function
 
-from sdprlayer import SDPRLayer
-from src.utils.lie_algebra import se3_inv, se3_log
+from sdprlayers.layers.sdprlayer import SDPRLayer
+from sdprlayers.utils.lie_algebra import se3_inv, se3_log
 
 
 class PoseSDPBlock(nn.Module):

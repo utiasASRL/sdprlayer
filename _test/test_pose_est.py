@@ -4,13 +4,13 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from src.utils.keypoint_tools import get_inv_cov_weights
-from src.utils.lie_algebra import se3_exp, se3_inv, se3_log
-from src.utils.stereo_camera_model import StereoCameraModel
-from visualization.plots import plot_ellipsoid
 
-import sdprlayer.stereo_tuner as st
-from sdprlayer.pose_est import PoseSDPBlock
+from sdprlayers import PoseSDPBlock
+from sdprlayers import stereo_tuner as st
+from sdprlayers.utils.keypoint_tools import get_inv_cov_weights
+from sdprlayers.utils.lie_algebra import se3_exp, se3_inv, se3_log
+from sdprlayers.utils.plot_tools import plot_ellipsoid
+from sdprlayers.utils.stereo_camera_model import StereoCameraModel
 
 matplotlib.use("TkAgg")
 

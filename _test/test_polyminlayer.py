@@ -4,7 +4,7 @@ import matplotlib.pylab as plt
 import numpy as np
 import torch
 
-from sdprlayer import PolyMinLayer
+from sdprlayers import PolyMinLayer
 
 torch.set_default_dtype(torch.float64)
 

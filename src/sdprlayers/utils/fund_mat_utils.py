@@ -12,7 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from poly_matrix import PolyMatrix
 
-from sdprlayer import SDPRLayer
+from sdprlayers.layers.sdprlayer import SDPRLayer
 
 
 def get_gt_setup(

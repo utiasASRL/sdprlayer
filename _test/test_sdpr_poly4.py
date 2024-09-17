@@ -7,7 +7,7 @@ import scipy.sparse as sp
 import torch
 from scipy.optimize import lsq_linear
 
-from sdprlayer import SDPRLayer
+from sdprlayers import SDPRLayer
 
 root_dir = os.path.abspath(os.path.dirname(__file__) + "/../")
 
