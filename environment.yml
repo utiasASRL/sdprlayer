@@ -1,4 +1,4 @@
-name: sdprlayer
+name: sdprlayers
 channels:
     - defaults
     - conda-forge
@@ -6,22 +6,22 @@ channels:
     - mosek
 
 dependencies:
-    - python=3.9
-    - pip=22.3
+    - python>=3.10
+    - pip>=22.3
     - pip:
         - -r requirements.txt
     # Packages
-    - matplotlib=3.6
-    - jupyterlab=3.5
+    - matplotlib>=3.6
+    - jupyterlab>=3.5
     - ipynbname=2021.3
-    - scipy=1.10
+    - scipy>=1.9.1
     - pytorch=2.1.2
     - mosek
     - cvxopt
     - pandas
     - pyvis
     # Testing & linting
-    - pytest=7.1
+    - pytest>=7.1
     - pytest-cov=4.0
     - flake8=6.0
     

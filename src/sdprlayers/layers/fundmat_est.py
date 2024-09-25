@@ -27,14 +27,14 @@ class FundMatSDPBlock(nn.Module):
         # Generate constraints
         constraints = (
             self.get_nullspace_constraint()
-            + self.get_epipole_constraints()
+            + self.get_epi_norm_constraints()
             + self.get_fund_norm_constraint()
         )
 
         # Initialize SDPRLayer
         self.sdprlayer = SDPRLayer(n_vars=13, constraints=constraints)
 
-        tol = 1e-12
+        tol = 1e-10
         self.mosek_params = {
             "MSK_IPAR_INTPNT_MAX_ITERATIONS": 1000,
             "MSK_DPAR_INTPNT_CO_TOL_PFEAS": tol,
@@ -61,8 +61,9 @@ class FundMatSDPBlock(nn.Module):
         keypoints_src,
         keypoints_trg,
         weights,
-        inv_cov_weights=None,
         verbose=False,
+        rescale=True,
+        reg=0.0,
     ):
         """
         Compute the optimal fundamental matrix relating source and target frame. This
@@ -86,7 +87,7 @@ class FundMatSDPBlock(nn.Module):
         # Construct objective function
         with record_function("SDPR: Build Cost Matrix"):
             Qs, scale, offset = self.get_obj_matrix_vec(
-                keypoints_src, keypoints_trg, weights, inv_cov_weights
+                keypoints_src, keypoints_trg, weights, scale_offset=rescale, reg=reg
             )
         # Set up solver parameters
         # solver_args = {
@@ -107,21 +108,10 @@ class FundMatSDPBlock(nn.Module):
         with record_function("SDPR: Run Optimization"):
             X, x = self.sdprlayer(Qs, solver_args=solver_args)
         # Extract solution
-        t_trg_src_intrg = x[:, 9:]
-        R_trg_src = torch.reshape(x[:, 0:9], (-1, 3, 3)).transpose(-1, -2)
-        t_src_trg_intrg = -t_trg_src_intrg
-        # Create transformation matrix
-        zeros = torch.zeros(batch_size, 1, 3).type_as(keypoints_src)  # Bx1x3
-        one = torch.ones(batch_size, 1, 1).type_as(keypoints_src)  # Bx1x1
-        trans_cols = torch.cat([t_src_trg_intrg, one], dim=1)  # Bx4x1
-        rot_cols = torch.cat([R_trg_src, zeros], dim=1)  # Bx4x3
-        T_trg_src = torch.cat([rot_cols, trans_cols], dim=2)  # Bx4x4
+        fund_mat = torch.reshape(x[:, :9, :], (-1, 3, 3)).mT
+        epipole = x[:, 9:12, :]
 
-        # Convert from sensor to vehicle frame
-        T_s_v = self.T_s_v.expand(batch_size, 4, 4).cuda()
-        T_trg_src = se3_inv(T_s_v).bmm(T_trg_src).bmm(T_s_v)
-
-        return T_trg_src
+        return fund_mat, epipole
 
     @staticmethod
     def get_obj_matrix_vec(
@@ -129,6 +119,7 @@ class FundMatSDPBlock(nn.Module):
         keypoints_trg,
         weights,
         scale_offset=True,
+        reg=0.0,
     ):
         """Compute the QCQP (Quadratically Constrained Quadratic Program) objective matrix
         based on the given 2D keypoints from source and target frames, and their corresponding weights.
@@ -168,6 +159,9 @@ class FundMatSDPBlock(nn.Module):
         Q[:, f, h] = vecXt / 2
         Q[:, h, f] = vecXt / 2
 
+        # Add regularization
+        R = torch.tensor(reg) * torch.eye(Q.size(1))[None, :, :].expand(Q.size())
+        Q += R
         # NOTE: operations below are to improve optimization conditioning for solver
         # remove constant offset
         if scale_offset:
@@ -199,7 +193,7 @@ class FundMatSDPBlock(nn.Module):
         return constraints
 
     @staticmethod
-    def get_epipole_constraints():
+    def get_epi_norm_constraints():
         """Generate constraint that epipole is homogeneous"""
         h = "h"
         F = "F"
