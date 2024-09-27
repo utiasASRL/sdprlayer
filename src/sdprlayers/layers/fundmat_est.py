@@ -34,7 +34,7 @@ class FundMatSDPBlock(nn.Module):
         # Initialize SDPRLayer
         self.sdprlayer = SDPRLayer(n_vars=13, constraints=constraints)
 
-        tol = 1e-10
+        tol = 1e-8
         self.mosek_params = {
             "MSK_IPAR_INTPNT_MAX_ITERATIONS": 1000,
             "MSK_DPAR_INTPNT_CO_TOL_PFEAS": tol,
@@ -111,7 +111,7 @@ class FundMatSDPBlock(nn.Module):
         fund_mat = torch.reshape(x[:, :9, :], (-1, 3, 3)).mT
         epipole = x[:, 9:12, :]
 
-        return fund_mat, epipole
+        return fund_mat, epipole, X
 
     @staticmethod
     def get_obj_matrix_vec(
@@ -146,22 +146,20 @@ class FundMatSDPBlock(nn.Module):
         # NOTE: if s_k, t_k, w_k are the kth source, target and weights, this einsum computes:
         #      sum_k  ( w_k * s_k @ t_k^T )      on each batch dim
         weights_sqz = torch.squeeze(weights, 1)
-        X = torch.einsum(
-            "bik,bjk,bk->bij",
-            keypoints_src[:, :3, :],
-            keypoints_trg[:, :3, :],
-            weights_sqz,
-        )
-        # Vectorized (transposed) data matrix
-        vecXt = torch.reshape(X, (-1, 9, 1)).squeeze(2)
+        # Form [vecX]_k = vec( x_tk kron x_sk )
+        X = torch.einsum("bik, bjk->bijk", keypoints_trg, keypoints_src)
+        vecX = X.reshape((B, 9, N))
+        # Q = sum ( w_k vecX_k vecX_k.T )
+        Q_ff = torch.einsum("bik,bjk,bk->bij", vecX, vecX, weights_sqz)
+
         # Form cost matrix
         Q = torch.zeros(B, 13, 13, device=keypoints_src.device)
-        Q[:, f, h] = vecXt / 2
-        Q[:, h, f] = vecXt / 2
+        Q[:, f, f] = Q_ff
 
         # Add regularization
-        R = torch.tensor(reg) * torch.eye(Q.size(1))[None, :, :].expand(Q.size())
-        Q += R
+        if reg > 0.0:
+            R = torch.tensor(reg) * torch.eye(Q.size(1))[None, :, :].expand(Q.size())
+            Q += R
         # NOTE: operations below are to improve optimization conditioning for solver
         # remove constant offset
         if scale_offset:

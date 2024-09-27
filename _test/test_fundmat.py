@@ -29,14 +29,17 @@ class TestFundMat(unittest.TestCase):
         # Set seed
         set_seed(0)
         batch_size = 1
+        n_points = 50
         # Set up test problem
         # NOTE t_ts is the vector from the source to the target frame expressed in the source frame
         # NOTE R_ts is the rotation that maps vectors in the source frame to vectors in the target frame
         # NOTE trailing "s" indicates that a variable is batched
         t_tss, R_tss, key_ss = utils.get_gt_setup(
-            N_map=50, N_batch=batch_size, traj_type="circle"
+            N_map=n_points, N_batch=batch_size, traj_type="clusters"
         )
-
+        # HACK Simplified transform, lateral shift
+        R_tss = np.eye(3)[None, :, :]
+        t_tss = np.array([[10.0, 0.0, 0.0]]).T[None, :, :]
         # Transforms from source to target
         t_tss = torch.tensor(t_tss)
         R_tss = torch.tensor(R_tss)
@@ -53,7 +56,9 @@ class TestFundMat(unittest.TestCase):
         )
 
         # Define Camera
-        camera = CameraModel(484.5, 484.5, 0.0, 0.0, 0.0)
+        # camera = CameraModel(400, 600, 10.0, 0.0, 0.0)
+        camera = CameraModel(1.0, 1.0, 0.0, 0.0, 0.0)
+
         # Apply camera to get image points
         t.src_img_pts = camera.camera_model(src_coords)
         t.trg_img_pts = camera.camera_model(trg_coords)
@@ -62,8 +67,9 @@ class TestFundMat(unittest.TestCase):
         t.keypoints_3D_trg = trg_coords
 
         # Generate Scalar Weights
-        t.weights = torch.ones(
-            t.keypoints_3D_src.size(0), 1, t.keypoints_3D_src.size(2)
+        t.weights = (
+            torch.ones(t.keypoints_3D_src.size(0), 1, t.keypoints_3D_src.size(2))
+            / n_points
         )
         t.camera = camera
 
@@ -82,7 +88,10 @@ class TestFundMat(unittest.TestCase):
         # Construct (Normalized) Fundamental matrices
         Fs_unnorm = K_invs.mT.bmm(Es).bmm(K_invs)
         norm = torch.linalg.norm(Fs_unnorm, keepdim=True)
-        t.Fs = Fs_unnorm / norm
+        if norm > 0:
+            t.Fs = Fs_unnorm / norm
+        else:
+            t.Fs = Fs_unnorm
         # Construct epipoles
         u, s, vh = torch.linalg.svd(t.Fs)
         t.es = vh[:, [2], :].mT
@@ -126,7 +135,7 @@ class TestFundMat(unittest.TestCase):
             src = t.src_img_pts[b].cpu().numpy()
             F = t.Fs[b].cpu().numpy()
             for i in range(N):
-                cost_true[b] += trg[:, [i]].T @ F @ src[:, [i]]
+                cost_true[b] += (trg[:, [i]].T @ F @ src[:, [i]]) ** 2
         # Check that the cost is close to zero (since no noise)
         np.testing.assert_allclose(
             cost_true, np.zeros(B), atol=1e-12, err_msg="No noise cost is not zero"
@@ -159,11 +168,11 @@ class TestFundMat(unittest.TestCase):
             trg = trgs[b].cpu().numpy()
             F = t.Fs[b].cpu().numpy()
             for i in range(N):
-                cost_true[b] += trg[:, [i]].T @ F @ src[:, [i]]
+                cost_true[b] += (trg[:, [i]].T @ F @ src[:, [i]]) ** 2
 
         # Construct objective matrix
         Q, _, _ = FundMatSDPBlock.get_obj_matrix_vec(
-            t.src_img_pts, t.trg_img_pts, t.weights, scale_offset=False
+            trgs, srcs, t.weights, scale_offset=False
         )
         # Check that matrix does the same thing
         cost_mat = t.sol.mT.bmm(Q.bmm(t.sol))[:, 0, 0]
@@ -174,22 +183,89 @@ class TestFundMat(unittest.TestCase):
             err_msg="Matrix cost not equal to true cost",
         )
 
-    def test_sdpr_forward_nonoise(t):
+    def test_feasibility(self):
         """Test that the sdpr localization properly estimates the target
         transformation under no noise condition"""
         pass
         # # Instantiate
-        # fundmat_est = FundMatSDPBlock()
-        # F, e = fundmat_est(
-        #     t.keypoints_3D_src, t.keypoints_3D_trg, t.weights, verbose=True
-        # )
+        fundmat_est = FundMatSDPBlock()
+        # zero the weights and run the problem
+        wts = t.weights * torch.tensor(0.0)
+        Fs_est, es_est = fundmat_est(
+            t.src_img_pts, t.trg_img_pts, wts, rescale=False, verbose=True
+        )
+        # Check properties of solution
+        print("done")
 
-        # # TODO Check difference
-        # np.testing.assert_allclose(F_est, F_actual, atol=5e-7)
+    def test_nuclear_norm(self):
+        """Test optimization under nuclear norm"""
+        pass
+        # # Instantiate
+        fundmat_est = FundMatSDPBlock()
+        # zero the weights and run the problem
+        wts = t.weights * torch.tensor(0.0)
+        Fs_est, es_est, X = fundmat_est(
+            t.src_img_pts, t.trg_img_pts, wts, rescale=False, verbose=True
+        )
+        # Check properties of solution
+        assert np.linalg.matrix_rank(X[0]) == 4, ValueError("Solution should be Rank 4")
+
+    def test_sdpr_forward_nonoise(self):
+        """Test that the sdpr localization properly estimates the target
+        transformation under no noise condition"""
+
+        # # Instantiate
+        fundmat_est = FundMatSDPBlock()
+        Fs_est, es_est, X = fundmat_est(
+            t.src_img_pts,
+            t.trg_img_pts,
+            t.weights,
+            verbose=True,
+            rescale=False,
+            reg=0.0,
+        )
+        # Check Solution Rank
+        u, s, v = np.linalg.svd(X[0])
+        plt.semilogy(s, ".")
+        plt.show()
+
+    def test_sdpr_forward_withnoise(self):
+        """Test that the sdpr localization properly estimates the target
+        transformation"""
+
+        # Sizes
+        B = t.src_img_pts.size(0)
+        N = t.src_img_pts.size(2)
+        # Add Noise
+        sigma = torch.tensor(20)
+        trgs = t.trg_img_pts
+        trgs[:, :2, :] += sigma * torch.randn(B, 2, N)
+        srcs = t.src_img_pts
+        srcs[:, :2, :] += sigma * torch.randn(B, 2, N)
+
+        # Instantiate
+        fundmat_est = FundMatSDPBlock()
+
+        Fs_est, es_est, X = fundmat_est(
+            t.src_img_pts,
+            t.trg_img_pts,
+            t.weights,
+            verbose=True,
+            rescale=False,
+            reg=0.0,
+        )
+        # Check Solution Rank
+        u, s, v = np.linalg.svd(X[0])
+        plt.semilogy(s, ".")
+        plt.show()
 
 
 if __name__ == "__main__":
     t = TestFundMat()
     # t.test_constraints()
     # t.test_cost_matrix_nonoise()
-    t.test_cost_matrix_withnoise()
+    # t.test_cost_matrix_withnoise()
+
+    # t.test_feasibility()
+    # t.test_sdpr_forward_nonoise()
+    t.test_sdpr_forward_withnoise()

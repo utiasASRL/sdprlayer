@@ -16,7 +16,7 @@ from sdprlayers.layers.sdprlayer import SDPRLayer
 
 
 def get_gt_setup(
-    traj_type="circle",  # Trajectory format [clusters,circle]
+    traj_type="clusters",  # Trajectory format [clusters,circle]
     N_batch=1,  # Number of poses
     N_map=10,  # number of landmarks
     offs=np.array([[0, 0, 2]]).T,  # offset between poses and landmarks
