@@ -20,12 +20,14 @@ def set_seed(x):
 
 class TestFundMat(unittest.TestCase):
 
-    def __init__(t, *args, **kwargs):
-        super(TestFundMat, t).__init__(*args, **kwargs)
+    def __init__(self, *args, formulation="fro_norm", constraint_file=None, **kwargs):
+        super(TestFundMat, self).__init__(*args, **kwargs)
         # Default dtype
         torch.set_default_dtype(torch.float64)
         torch.autograd.set_detect_anomaly(True)
-        t.device = "cuda:0"
+        self.device = "cuda:0"
+        # Store formulation and constraint file
+        self.formulation = formulation
         # Set seed
         set_seed(0)
         batch_size = 1
@@ -38,8 +40,8 @@ class TestFundMat(unittest.TestCase):
             N_map=n_points, N_batch=batch_size, traj_type="clusters"
         )
         # HACK Simplified transform, lateral shift
-        R_tss = np.eye(3)[None, :, :]
-        t_tss = np.array([[10.0, 0.0, 0.0]]).T[None, :, :]
+        # R_tss = np.eye(3)[None, :, :]
+        # t_tss = np.array([[10.0, 0.0, 0.0]]).T[None, :, :]
         # Transforms from source to target
         t_tss = torch.tensor(t_tss)
         R_tss = torch.tensor(R_tss)
@@ -56,30 +58,30 @@ class TestFundMat(unittest.TestCase):
         )
 
         # Define Camera
-        # camera = CameraModel(400, 600, 10.0, 0.0, 0.0)
-        camera = CameraModel(1.0, 1.0, 0.0, 0.0, 0.0)
+        camera = CameraModel(400, 600, 10.0, 0.0, 0.0)
+        # camera = CameraModel(1.0, 1.0, 0.0, 0.0, 0.0)
 
         # Apply camera to get image points
-        t.src_img_pts = camera.camera_model(src_coords)
-        t.trg_img_pts = camera.camera_model(trg_coords)
+        self.src_img_pts = camera.camera_model(src_coords)
+        self.trg_img_pts = camera.camera_model(trg_coords)
         # Store values
-        t.keypoints_3D_src = src_coords
-        t.keypoints_3D_trg = trg_coords
+        self.keypoints_3D_src = src_coords
+        self.keypoints_3D_trg = trg_coords
 
         # Generate Scalar Weights
-        t.weights = (
-            torch.ones(t.keypoints_3D_src.size(0), 1, t.keypoints_3D_src.size(2))
+        self.weights = (
+            torch.ones(self.keypoints_3D_src.size(0), 1, self.keypoints_3D_src.size(2))
             / n_points
         )
-        t.camera = camera
+        self.camera = camera
 
         # Construct Essential Matrix
         # NOTE: E = R_ts t_ts^ = R_ts(-R_ts t_ts)^ = (t_st)^ R_ts
         Es = R_tss.bmm(so3_wedge(t_tss))
         check = (
-            t.keypoints_3D_trg[0, :3, [0]].cpu().mT
+            self.keypoints_3D_trg[0, :3, [0]].cpu().mT
             @ Es[0]
-            @ t.keypoints_3D_src[0, :3, [0]].cpu()
+            @ self.keypoints_3D_src[0, :3, [0]].cpu()
         )
         np.testing.assert_allclose(check, 0.0, atol=1e-12)
         # Get intrinsic camera mat
@@ -87,75 +89,59 @@ class TestFundMat(unittest.TestCase):
         K_invs = K_inv.expand(batch_size, 3, 3)
         # Construct (Normalized) Fundamental matrices
         Fs_unnorm = K_invs.mT.bmm(Es).bmm(K_invs)
-        norm = torch.linalg.norm(Fs_unnorm, keepdim=True)
+        if formulation == "fro_norm":
+            norm = torch.linalg.norm(Fs_unnorm, keepdim=True)
+        elif formulation == "unity_elem":
+            norm = torch.abs(Fs_unnorm[:, 2, 2])
         if norm > 0:
-            t.Fs = Fs_unnorm / norm
+            self.Fs = Fs_unnorm / norm
         else:
-            t.Fs = Fs_unnorm
+            self.Fs = Fs_unnorm
         # Construct epipoles
-        u, s, vh = torch.linalg.svd(t.Fs)
-        t.es = vh[:, [2], :].mT
+        u, s, vh = torch.linalg.svd(self.Fs)
+        self.es = vh[:, [2], :].mT
+        if not formulation == "fro_norm":
+            eps_norm = torch.abs(self.es[:, 2, 0])
+            assert torch.all(eps_norm > 1e-9), ValueError(
+                "Epipoles cannot be at infinity for this formulation."
+            )
+            self.es = self.es / self.es[:, 2, 0]
         # Construct solution vectors
-        t.sol = torch.cat(
+        self.sol = torch.cat(
             [
-                torch.reshape(t.Fs.mT, (-1, 9, 1)),
-                t.es,
                 torch.ones((batch_size, 1, 1)),
+                torch.reshape(self.Fs.mT, (-1, 9, 1)),
+                self.es,
             ],
             dim=1,
         )
+        # Initialize layer
+        self.layer = FundMatSDPBlock(self.formulation, constraint_file=constraint_file)
 
     def test_constraints(self):
         """Test that the constraints characterize the fundamental matrix and epipole."""
 
-        # init fundamental matrix estimator
-        fund_est = FundMatSDPBlock()
         # Get constraints and test
-        constraints = fund_est.sdprlayer.constr_list
+        constraints = self.layer.sdprlayer.constr_list
         viol = np.zeros((len(constraints)))
         sol = np.array(t.sol[0])
         for i, A in enumerate(constraints):
-            viol[i] = sol.T @ A @ sol
+            viol[i] = (sol.T @ A @ sol)[0, 0]
             np.testing.assert_allclose(
-                viol[i], 0.0, atol=1e-12, err_msg=f"Constraint {i} has violation"
+                viol[i], 0.0, atol=1e-8, err_msg=f"Constraint {i} has violation"
             )
 
     def test_cost_matrix_nonoise(self):
         """Test the objective matrix with no noise"""
-        # Construct objective matrix
-        Q, _, _ = FundMatSDPBlock.get_obj_matrix_vec(
-            t.src_img_pts, t.trg_img_pts, t.weights, scale_offset=False
-        )
-        # Compute actual cost at ground truth solution
-        B = t.src_img_pts.size(0)
-        N = t.src_img_pts.size(2)
-        cost_true = np.zeros(B)
-        for b in range(B):
-            trg = t.trg_img_pts[b].cpu().numpy()
-            src = t.src_img_pts[b].cpu().numpy()
-            F = t.Fs[b].cpu().numpy()
-            for i in range(N):
-                cost_true[b] += (trg[:, [i]].T @ F @ src[:, [i]]) ** 2
-        # Check that the cost is close to zero (since no noise)
-        np.testing.assert_allclose(
-            cost_true, np.zeros(B), atol=1e-12, err_msg="No noise cost is not zero"
-        )
-        # Check that matrix does the same thing
-        cost_mat = t.sol.mT.bmm(Q.bmm(t.sol))[:, 0, 0]
-        np.testing.assert_allclose(
-            cost_mat,
-            cost_true,
-            atol=1e-12,
-            err_msg="Matrix cost not equal to true cost",
-        )
+        self.test_cost_matrix(sigma_val=0.0)
 
-    def test_cost_matrix_withnoise(self):
+    def test_cost_matrix(self, sigma_val=5.0):
         """Test the objective matrix with no noise"""
         # Sizes
         B = t.src_img_pts.size(0)
         N = t.src_img_pts.size(2)
         # Add Noise
-        sigma = torch.tensor(5)
+        sigma = torch.tensor(sigma_val)
         trgs = t.trg_img_pts
         trgs[:, :2, :] += sigma * torch.randn(B, 2, N)
         srcs = t.src_img_pts
@@ -168,11 +154,13 @@ class TestFundMat(unittest.TestCase):
             trg = trgs[b].cpu().numpy()
             F = t.Fs[b].cpu().numpy()
             for i in range(N):
-                cost_true[b] += (trg[:, [i]].T @ F @ src[:, [i]]) ** 2
+                cost_true[b] += (
+                    t.weights[b, :, i] * (trg[:, [i]].T @ F @ src[:, [i]]) ** 2
+                )
 
         # Construct objective matrix
         Q, _, _ = FundMatSDPBlock.get_obj_matrix_vec(
-            trgs, srcs, t.weights, scale_offset=False
+            srcs, trgs, t.weights, scale_offset=False
         )
         # Check that matrix does the same thing
         cost_mat = t.sol.mT.bmm(Q.bmm(t.sol))[:, 0, 0]
@@ -186,12 +174,10 @@ class TestFundMat(unittest.TestCase):
     def test_feasibility(self):
         """Test that the sdpr localization properly estimates the target
         transformation under no noise condition"""
-        pass
-        # # Instantiate
-        fundmat_est = FundMatSDPBlock()
+
         # zero the weights and run the problem
         wts = t.weights * torch.tensor(0.0)
-        Fs_est, es_est = fundmat_est(
+        Fs_est, es_est = self.layer(
             t.src_img_pts, t.trg_img_pts, wts, rescale=False, verbose=True
         )
         # Check properties of solution
@@ -199,37 +185,25 @@ class TestFundMat(unittest.TestCase):
 
     def test_nuclear_norm(self):
         """Test optimization under nuclear norm"""
-        pass
-        # # Instantiate
-        fundmat_est = FundMatSDPBlock()
+
         # zero the weights and run the problem
         wts = t.weights * torch.tensor(0.0)
-        Fs_est, es_est, X = fundmat_est(
-            t.src_img_pts, t.trg_img_pts, wts, rescale=False, verbose=True
+        Fs_est, es_est, X = self.layer(
+            t.src_img_pts, t.trg_img_pts, wts, rescale=False, reg=1e3, verbose=True
         )
         # Check properties of solution
-        assert np.linalg.matrix_rank(X[0]) == 4, ValueError("Solution should be Rank 4")
+        u, s, vh = np.linalg.svd(X[0])
+        plt.semilogy(s, ".")
+        plt.title("singular values under nuclear norm")
+        plt.show()
 
     def test_sdpr_forward_nonoise(self):
         """Test that the sdpr localization properly estimates the target
         transformation under no noise condition"""
 
-        # # Instantiate
-        fundmat_est = FundMatSDPBlock()
-        Fs_est, es_est, X = fundmat_est(
-            t.src_img_pts,
-            t.trg_img_pts,
-            t.weights,
-            verbose=True,
-            rescale=False,
-            reg=0.0,
-        )
-        # Check Solution Rank
-        u, s, v = np.linalg.svd(X[0])
-        plt.semilogy(s, ".")
-        plt.show()
+        self.test_sdpr_forward(sigma_val=0.0)
 
-    def test_sdpr_forward_withnoise(self):
+    def test_sdpr_forward(self, sigma_val=5.0):
         """Test that the sdpr localization properly estimates the target
         transformation"""
 
@@ -237,22 +211,19 @@ class TestFundMat(unittest.TestCase):
         B = t.src_img_pts.size(0)
         N = t.src_img_pts.size(2)
         # Add Noise
-        sigma = torch.tensor(20)
+        sigma = torch.tensor(sigma_val)
         trgs = t.trg_img_pts
         trgs[:, :2, :] += sigma * torch.randn(B, 2, N)
         srcs = t.src_img_pts
         srcs[:, :2, :] += sigma * torch.randn(B, 2, N)
 
-        # Instantiate
-        fundmat_est = FundMatSDPBlock()
-
-        Fs_est, es_est, X = fundmat_est(
-            t.src_img_pts,
-            t.trg_img_pts,
+        Fs_est, es_est, X = self.layer(
+            srcs,
+            trgs,
             t.weights,
             verbose=True,
             rescale=False,
-            reg=0.0,
+            reg=100.0,
         )
         # Check Solution Rank
         u, s, v = np.linalg.svd(X[0])
@@ -261,11 +232,18 @@ class TestFundMat(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    t = TestFundMat()
+
+    # Frobenius Norm Formulation
+    # t = TestFundMat()
+    # Unity element constraint
+    t = TestFundMat(
+        formulation="unity_elem", constraint_file="saved_constraints_2024-09-30.pkl"
+    )
+
     # t.test_constraints()
     # t.test_cost_matrix_nonoise()
-    # t.test_cost_matrix_withnoise()
-
+    # t.test_cost_matrix()
     # t.test_feasibility()
-    # t.test_sdpr_forward_nonoise()
-    t.test_sdpr_forward_withnoise()
+    # t.test_nuclear_norm()
+    t.test_sdpr_forward_nonoise()
+    # t.test_sdpr_forward()

@@ -1,3 +1,5 @@
+import pickle
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -14,7 +16,7 @@ class FundMatSDPBlock(nn.Module):
     Semidefinite Programming Relaxation (SDPR)Layer.
     """
 
-    def __init__(self):
+    def __init__(self, formulation="fro_norm", constraint_file=None):
         """
         Initialize the FundMatSDPBlock class.
 
@@ -23,13 +25,28 @@ class FundMatSDPBlock(nn.Module):
                                   sensor frame.
         """
         super(FundMatSDPBlock, self).__init__()
+        # Define constraint dict
+        self.var_dict = {"h": 1, "F": 9, "e": 3}
 
         # Generate constraints
-        constraints = (
-            self.get_nullspace_constraint()
-            + self.get_epi_norm_constraints()
-            + self.get_fund_norm_constraint()
-        )
+        if formulation == "fro_norm":
+            constraints = (
+                self.get_epi_norm_constraints()
+                + self.get_fund_norm_constraint()
+                + self.get_nullspace_constraints()
+            )
+        elif formulation == "unity_elem":
+            constraints = (
+                self.get_epi_unity_constraints()
+                + self.get_fund_unity_constraints()
+                + self.get_nullspace_constraints()
+            )
+        else:
+            raise ValueError("formulation not known")
+        # Load Learned constraints
+        if constraint_file is not None:
+            learned_constraints = self.load_constr_from_file(constraint_file)
+            constraints += learned_constraints
 
         # Initialize SDPRLayer
         self.sdprlayer = SDPRLayer(n_vars=13, constraints=constraints)
@@ -55,6 +72,14 @@ class FundMatSDPBlock(nn.Module):
             torch.device: The device on which the module is located.
         """
         return next(module.parameters()).device
+
+    @staticmethod
+    def load_constr_from_file(filename):
+        """Load learned constraints from file"""
+        print("Loading Constraints from " + filename)
+        with open(filename, "rb") as handle:
+            data = pickle.load(handle)
+        return data["constraints"]
 
     def forward(
         self,
@@ -139,15 +164,15 @@ class FundMatSDPBlock(nn.Module):
         B = keypoints_src.shape[0]  # Batch dimension
         N = keypoints_src.shape[2]  # Number of points
         # Indices
-        f = slice(0, 9)
-        e = slice(9, 12)
-        h = 12
+        f = slice(1, 10)
+        e = slice(10, 12)
+        h = 0
         # Form data matrix from points and weights
         # NOTE: if s_k, t_k, w_k are the kth source, target and weights, this einsum computes:
         #      sum_k  ( w_k * s_k @ t_k^T )      on each batch dim
         weights_sqz = torch.squeeze(weights, 1)
         # Form [vecX]_k = vec( x_tk kron x_sk )
-        X = torch.einsum("bik, bjk->bijk", keypoints_trg, keypoints_src)
+        X = torch.einsum("bik, bjk->bijk", keypoints_src, keypoints_trg)
         vecX = X.reshape((B, 9, N))
         # Q = sum ( w_k vecX_k vecX_k.T )
         Q_ff = torch.einsum("bik,bjk,bk->bij", vecX, vecX, weights_sqz)
@@ -172,15 +197,14 @@ class FundMatSDPBlock(nn.Module):
             scales, offsets = None, None
         return Q, scales, offsets
 
-    @staticmethod
-    def get_nullspace_constraint():
+    def get_nullspace_constraints(self):
         """Generate 3 constraints that force the source epipole to be in the nullspace of the fundamental
         matrix."""
         # labels
         h = "h"
         F = "F"
         e = "e"
-        variables = {F: 9, e: 3, h: 1}
+        variables = self.var_dict
         constraints = []
         for i in range(3):
             A = PolyMatrix()
@@ -190,13 +214,12 @@ class FundMatSDPBlock(nn.Module):
             constraints += [A.get_matrix(variables)]
         return constraints
 
-    @staticmethod
-    def get_epi_norm_constraints():
-        """Generate constraint that epipole is homogeneous"""
+    def get_epi_norm_constraints(self):
+        """Generate constraint that epipole is normalized"""
         h = "h"
         F = "F"
         e = "e"
-        variables = {F: 9, e: 3, h: 1}
+        variables = self.var_dict
         A = PolyMatrix()
         # Constrain the epipolar line to have unit length
         A[e, e] = np.eye(3)
@@ -205,19 +228,60 @@ class FundMatSDPBlock(nn.Module):
 
         return constraints
 
-    @staticmethod
-    def get_fund_norm_constraint():
+    def get_epi_unity_constraints(self):
+        """Generate constraint that epipole is homogeneous"""
+        h = "h"
+        F = "F"
+        e = "e"
+        variables = self.var_dict
+        A = PolyMatrix()
+        # Constrain the third element of the epipole to be unity
+        A[h, e] = np.array([[0, 0, 1]]) / 2
+        A[h, h] = -1.0
+        constraints = [A.get_matrix(variables)]
+        A = PolyMatrix()
+        # Constrain the third element of the epipole to be unity
+        mat = np.zeros((3, 3))
+        mat[2, 2] = 1.0
+        A[e, e] = mat
+        A[h, h] = -1.0
+        constraints.append(A.get_matrix(variables))
+        return constraints
+
+    def get_fund_norm_constraint(self):
         """Constrain the Frobenius norm of the fundamental matrix to be one"""
         h = "h"
         F = "F"
         e = "e"
-        variables = {F: 9, e: 3, h: 1}
+        variables = self.var_dict
         A = PolyMatrix()
         # Constrain third vector element of e to be 1
         A[F, F] = np.eye(9)
         A[h, h] = -1.0
         constraints = [A.get_matrix(variables)]
 
+        return constraints
+
+    def get_fund_unity_constraints(self):
+        """Constrain final element of fundamental matrix"""
+        h = "h"
+        F = "F"
+        e = "e"
+        variables = self.var_dict
+        A = PolyMatrix()
+        # Constrain the third element of the epipole to be unity
+        mat = np.zeros((9, 1))
+        mat[8, 0] = 1.0 / 2.0
+        A[F, h] = mat
+        A[h, h] = -1.0
+        constraints = [A.get_matrix(variables)]
+        A = PolyMatrix()
+        # Constrain the third element of the epipole to be unity
+        mat = np.zeros((9, 9))
+        mat[8, 8] = 1.0
+        A[F, F] = mat
+        A[h, h] = -1.0
+        constraints.append(A.get_matrix(variables))
         return constraints
 
 
