@@ -13,14 +13,14 @@ from lifters.state_lifter import StateLifter
 from poly_matrix import PolyMatrix
 from pylgmath.so3.operations import hat
 
-from sdprlayers.layers.fundmat_est import FundMatSDPBlock
+from sdprlayers.layers.essential_est import EssentialSDPBlock
 
 root_dir = os.path.abspath(os.path.dirname(__file__) + "/../")
 sys.path.insert(0, root_dir)
 fig_folder = os.path.join(root_dir, "figs")
 
 
-class FundMatLifter(StateLifter):
+class EssentialLifter(StateLifter):
     EPS_SVD = 1e-10
     EPS_SPARSE = 1e-9
 
@@ -28,7 +28,7 @@ class FundMatLifter(StateLifter):
         # Initialize with just the standard shape of our var list
         super().__init__()
         # Update internal variable dictionary.
-        self.var_dict_ = dict(F=9, e=3, h=1)
+        self.var_dict_ = dict(h=1, e1=3, e2=3, e3=3, t=3)
         self.formulation = formulation
 
     def get_Q(self, noise=1e-3, output_poly=False):
@@ -49,37 +49,11 @@ class FundMatLifter(StateLifter):
         angle = 2 * np.pi * np.random.rand()
         R_ts = sm.angvec2r(angle, axis)
         # Get essential matrix
-        E = R_ts @ hat(t_ts)
-        # Generate random instrinsic matrix
-        sigma = 50
-        f_u = 500.0 + sigma * np.random.randn(1)[0]
-        f_v = 600.0 + sigma * np.random.randn(1)[0]
-        c_u = 10.0 + sigma * np.random.randn(1)[0]
-        c_v = 20.0 + sigma * np.random.randn(1)[0]
-        gamma = 0.0 + sigma * np.random.randn(1)[0]
-        K = np.array(
-            [
-                [f_u, gamma, c_u],
-                [0.0, f_v, c_v],
-                [0.0, 0.0, 1.0],
-            ]
-        )
-        K_inv = np.linalg.inv(K)
-        # Generate normalized Fundamental matrix
-        F_unnorm = K_inv.T @ E @ K
-        norm = np.linalg.norm(F_unnorm)
-        if self.formulation == "fro_norm":
-            F = F_unnorm / norm
-        else:
-            F = F_unnorm / F_unnorm[2, 2]
-        # Get epipole via svd
-        u, s, vh = np.linalg.svd(F)
-        epipole = vh[[2], :].T
-        if not self.formulation == "fro_norm":
-            epipole = epipole / epipole[2, 0]
+        t_ts = t_ts / np.linalg.norm(t_ts)
+        E = hat(t_ts) @ R_ts.T
+        vecE = np.reshape(E, (9, 1))
         # construct QCQP feasible point
-        vecF = np.reshape(F.T, (9, 1))
-        feas_pt = np.vstack([np.array([[1]]), vecF, epipole])
+        feas_pt = np.vstack([np.array([[1]]), vecE, t_ts])
         return feas_pt
 
     def sample_theta(self):
@@ -87,17 +61,15 @@ class FundMatLifter(StateLifter):
         pass
 
 
-def gen_learned_constraints(formulation="fro_norm", plot=False):
+def gen_learned_constraints(plot=False):
     """Generate the learned set of constraints"""
     # Define lifter
-    lifter = FundMatLifter(formulation=formulation)
+    lifter = EssentialLifter()
     # Define list of known constraints
     A_known = []
-    if formulation == "unity_elem":
-        layer = FundMatSDPBlock()
-        A_known += layer.get_nullspace_constraints()
-        A_known += layer.get_epi_unity_constraints()
-        A_known += layer.get_fund_unity_constraints()
+    layer = EssentialSDPBlock()
+    A_known += layer.get_t_norm_constraint()
+    A_known += layer.get_tcross_constraints()
 
     # Get learned constraints
     A_learned = lifter.get_A_learned(
@@ -108,7 +80,7 @@ def gen_learned_constraints(formulation="fro_norm", plot=False):
     # Save the constraints
     print("Learned Constraints Verified...Saving to file")
     date = datetime.today().strftime("%Y-%m-%d")
-    filename = "saved_constraints_" + date + ".pkl"
+    filename = "ess_saved_constraints_" + date + ".pkl"
     with open(filename, "wb") as handle:
         data = {"constraints": A_learned}
         pickle.dump(data, handle)
@@ -173,5 +145,4 @@ def read_sparse_mat(A, var_dict, show=False, homog="w_0"):
 
 
 if __name__ == "__main__":
-    # gen_learned_constraints(formulation="unity_elem")
-    gen_learned_constraints(formulation="fro_norm")
+    gen_learned_constraints()

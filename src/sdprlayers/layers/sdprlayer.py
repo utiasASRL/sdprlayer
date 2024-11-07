@@ -243,7 +243,7 @@ class SDPRLayer(CvxpyLayer):
         if "solver_args" in kwargs and "solve_method" in kwargs["solver_args"]:
             method = kwargs["solver_args"]["solve_method"]
             # Check if we are injecting a solution
-            if method == "local" or method == "mosek":
+            if method in ["local", "mosek", "decomp-mosek"]:
                 assert self.use_dual, "Primal not implemented. Set use_dual=True"
                 # TODO this loop should be set up so that we can run in parallel.
                 ext_vars_list = []
