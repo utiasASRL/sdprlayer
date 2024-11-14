@@ -4,6 +4,9 @@ import numpy as np
 import scipy as sp
 import torch
 import torch.nn as nn
+from cert_tools import HomQCQP
+from cert_tools.sparse_solvers import solve_dsdp
+from diffcp import cones
 from poly_matrix import PolyMatrix
 from torch.profiler import record_function
 
@@ -20,7 +23,7 @@ class EssentialSDPBlock(nn.Module):
     "An Efficient Solution to Non-Minimal Case Essential Matrix Estimation" by Ji Zhao
     """
 
-    def __init__(self):
+    def __init__(self, tol=1e-10):
         """
         Initialize the FundMatSDPBlock class.
 
@@ -36,12 +39,11 @@ class EssentialSDPBlock(nn.Module):
         # Generate constraints
         constraints = self.get_t_norm_constraint()
         constraints += self.get_tcross_constraints()
-        # constraints += self.get_tE_constraints()
 
         # Initialize SDPRLayer
-        self.sdprlayer = SDPRLayer(n_vars=13, use_dual=False, constraints=constraints)
+        self.sdprlayer = SDPRLayer(n_vars=13, use_dual=True, constraints=constraints)
 
-        tol = 1e-8
+        self.tol = tol
         self.mosek_params = {
             "MSK_IPAR_INTPNT_MAX_ITERATIONS": 1000,
             "MSK_DPAR_INTPNT_CO_TOL_PFEAS": tol,
@@ -50,6 +52,23 @@ class EssentialSDPBlock(nn.Module):
             "MSK_DPAR_INTPNT_CO_TOL_INFEAS": tol,
             "MSK_DPAR_INTPNT_CO_TOL_DFEAS": tol,
         }
+        # Initialize HomQCQP class for sparse decomposition
+        self.homQCQP = HomQCQP(homog_var="h")
+        # Get Example cost matrix
+        vec = torch.tensor([[[1, 1, 1]]]).mT
+        wt = torch.ones(1, 1, 1)
+        Q, _, _ = self.get_obj_matrix_vec(vec, vec, wt)
+        self.homQCQP.C = PolyMatrix.init_from_sparse(
+            Q[0].numpy(), var_dict=self.var_dict, symmetric=True
+        )
+        # Get Constraints
+        self.homQCQP.As = []
+        for A in constraints:
+            self.homQCQP.As.append(
+                PolyMatrix.init_from_sparse(A, var_dict=self.var_dict, symmetric=True)
+            )
+        # Perform clique decomposition
+        self.homQCQP.clique_decomposition()
 
     def get_device(module):
         """
@@ -102,43 +121,60 @@ class EssentialSDPBlock(nn.Module):
             Qs, scale, offset = self.get_obj_matrix_vec(
                 keypoints_src, keypoints_trg, weights, scale_offset=rescale
             )
-        # Set up solver parameters
-        # solver_args = {
-        #     "solve_method": "SCS",
-        #     "eps": 1e-7,
-        #     "normalize": True,
-        #     "max_iters": 100000,
-        #     "verbose": True,
-        # }
-        # solver_args = {
-        #     "solve_method": "mosek",
-        #     "mosek_params": self.mosek_params,
-        #     "verbose": verbose,
-        # }
-        # NOTE: Clarabel exploits chordal sparsity which is key to making sure that the solution is rank-1
-        tol = 1e-4
-        solver_args = dict(
-            solve_method="Clarabel",
-            verbose=True,
-            tol_gap_abs=tol,
-            tol_gap_rel=tol,
-            tol_feas=tol,
-            tol_infeas_abs=tol,
-            tol_infeas_rel=tol,
-            tol_ktratio=tol / 100,
-            chordal_decomposition_enable=True,
-            chordal_decomposition_complete_dual=True,
-        )
 
-        # TODO Rework this section to retrieve optimum
-        # Run layer
+        # Solve decomposed SDP
+        ext_vars_list = []
+        for Q in Qs:
+            # Overwrite stored cost
+            self.homQCQP.C = PolyMatrix.init_from_sparse(
+                Q.numpy(), var_dict=self.var_dict, symmetric=True
+            )
+            # Run solve
+            cliques, info = solve_dsdp(
+                self.homQCQP, form="dual", tol=self.tol, verbose=verbose
+            )
+            # Recover primal solution
+            Y, ranks, factor_dict = self.homQCQP.get_mr_completion(
+                cliques, var_list=list(self.var_dict.keys())
+            )
+            S = Y @ Y.T
+            # Recover dual solution
+            H = self.homQCQP.get_dual_matrix(
+                info["dual"], var_list=self.var_dict
+            ).toarray()
+            mults = info["mults"]
+            # Add solution to list to pass to layer
+            if self.sdprlayer.use_dual:
+                ext_vars_list.append(
+                    dict(
+                        x=mults,
+                        y=cones.vec_symm(S),
+                        s=cones.vec_symm(H),
+                    )
+                )
+            else:
+                ext_vars_list.append(
+                    dict(
+                        x=mults,
+                        y=cones.vec_symm(H),
+                        s=cones.vec_symm(S),
+                    )
+                )
+        # Solver set to external to bypass cvxpy forward solve
+        solver_args = dict(solve_method="external", ext_vars_list=ext_vars_list)
+        # call sdprlayer
         with record_function("SDPR: Run Optimization"):
             X, x = self.sdprlayer(Qs, solver_args=solver_args)
+
         # Extract solution
-        E_mats = torch.reshape(x[:, 1:10, :], (-1, 3, 3))
+        # NOTE: Homogenizing variable has been stripped from vector solution
+        E_mats = torch.reshape(x[:, 0:9, :], (-1, 3, 3))
         trans_vecs = x[:, -3:, :]
 
-        return E_mats, trans_vecs, X
+        # Solution rank
+        rank = np.max(ranks)
+
+        return E_mats, trans_vecs, X, rank
 
     @staticmethod
     def get_obj_matrix_vec(

@@ -47,6 +47,7 @@ class TestEssMat(unittest.TestCase):
         t_tss = torch.tensor(t_tss)
         R_tss = torch.tensor(R_tss)
         R_sts = R_tss.mT
+        self.R_tss = R_tss
         # Keypoints (3D) defined in source frame
         key_ss = torch.tensor(key_ss)[None, :, :].expand(batch_size, -1, -1)
         # Keypoints in target frame
@@ -61,7 +62,6 @@ class TestEssMat(unittest.TestCase):
 
         # Define Camera
         camera = CameraModel(400, 600, 10.0, 0.0, 0.0)
-        # camera = CameraModel(1.0, 1.0, 0.0, 0.0, 0.0)
 
         # Apply camera to get image points
         src_img_pts = camera.camera_model(src_coords)
@@ -169,13 +169,13 @@ class TestEssMat(unittest.TestCase):
         # Check properties of solution
         print("done")
 
-    def test_sdpr_forward_nonoise(self):
+    def test_sdpr_forward_nonoise(self, plot=False):
         """Test that the sdpr localization properly estimates the target
         transformation under no noise condition"""
 
-        self.test_sdpr_forward(sigma_val=0.0)
+        self.test_sdpr_forward(sigma_val=0.0, plot=plot)
 
-    def test_sdpr_forward(self, sigma_val=5.0):
+    def test_sdpr_forward(self, sigma_val=5.0, plot=False):
         """Test that the sdpr localization properly estimates the target
         transformation"""
 
@@ -189,7 +189,7 @@ class TestEssMat(unittest.TestCase):
         srcs = t.keypoints_src
         srcs[:, :2, :] += sigma * torch.randn(B, 2, N)
 
-        Es_est, ts_est, X = self.layer(
+        Es_est, ts_est, X, rank = self.layer(
             srcs,
             trgs,
             t.weights,
@@ -197,56 +197,47 @@ class TestEssMat(unittest.TestCase):
             rescale=False,
         )
         # Check Solution Rank
-        u, s, v = np.linalg.svd(X[0])
-        plt.semilogy(s, ".")
-        plt.show()
+        if plot:
+            u, s, v = np.linalg.svd(X[0])
+            plt.semilogy(s, ".")
+            plt.show()
+
+        # Check Rank
+        assert rank == 1, ValueError("Rank of solution is not 1")
 
         # Check that estimate matches actual
         E_est = Es_est[0].numpy()
         t_est = ts_est[0].numpy()
-        np.testing.assert_allclose(t_est, self.t_tss[0])
-        np.testing.assert_allclose(E_est, self.Es[0])
-
-    def test_sparse_solve(self):
-        problem = HomQCQP(homog_var="h")
-        var_sizes = self.layer.var_dict
-        problem.var_sizes = var_sizes
-        # Get cost function
-        trgs = t.keypoints_trg
-        srcs = t.keypoints_src
-        C_torch, _, _ = self.layer.get_obj_matrix_vec(
-            srcs, trgs, self.weights, scale_offset=False
-        )
-        C = C_torch[0].numpy()
-        problem.C, _ = PolyMatrix.init_from_sparse(C, var_sizes, symmetric=True)
-        # Get constraints
-        problem.As = []
-        for A in self.layer.sdprlayer.constr_list:
-            pmat, _ = PolyMatrix.init_from_sparse(A, var_sizes, symmetric=True)
-            problem.As.append(pmat)
-        # decompose
-        problem.clique_decomposition()
-        # Solve
-        X_list, info = solve_dsdp(problem, verbose=True, tol=1e-12)
-        Y, ranks, factor_dict = problem.get_mr_completion(
-            X_list, var_list=list(var_sizes.keys())
-        )
-        assert Y.shape[1] == 1, "solution not rank-1"
-        # Extract Essential Matrix
-        E_est = Y[1:10, :].reshape(3, 3)
-        t_est = Y[10:, :]
-        # Check close to ground truth
         E_gt = self.Es[0].numpy()
         t_gt = self.t_tss[0].numpy()
-        # Check sign ambiguities (Essential matrix defined up to sign)
-        if np.linalg.norm(E_gt - E_est) > np.linalg.norm(E_gt + E_est):
-            E_est = -E_est
-        np.testing.assert_allclose(
-            E_est, E_gt, atol=1e-5, err_msg="Essential Mat estimate is incorrect"
-        )
-        np.testing.assert_allclose(
-            t_est, t_gt, atol=1e-5, err_msg="Translation estimate is incorrect"
-        )
+
+        # If no noise, check that we are close to solution
+        if sigma_val == 0.0:
+            # Check sign ambiguity
+            if np.linalg.norm(E_gt - E_est) > np.linalg.norm(E_gt + E_est):
+                E_est = -E_est
+            if np.linalg.norm(t_est - E_est) > np.linalg.norm(t_est + E_est):
+                t_est = -t_est
+            np.testing.assert_allclose(t_est, t_gt, atol=1e-4)
+            np.testing.assert_allclose(E_est, E_gt, atol=1e-4)
+        else:
+            # Otherwise, check that the cost is better than the ground truth cost
+            b = 0
+            src = srcs[b].cpu().numpy()
+            trg = trgs[b].cpu().numpy()
+            E = t.Es[b].cpu().numpy()
+            cost_gt = 0.0
+            cost_est = 0.0
+            for i in range(N):
+                cost_gt += (
+                    self.weights[b, :, i] * (src[:, [i]].T @ E_gt @ trg[:, [i]]) ** 2
+                )
+                cost_est += (
+                    self.weights[b, :, i] * (src[:, [i]].T @ E_est @ trg[:, [i]]) ** 2
+                )
+            assert cost_est < cost_gt, ValueError(
+                "Estimate cost not lower than ground truth cost"
+            )
 
 
 if __name__ == "__main__":
@@ -258,5 +249,4 @@ if __name__ == "__main__":
     # t.test_cost_matrix()
     # t.test_feasibility()
     # t.test_sdpr_forward_nonoise()
-    t.test_sdpr_forward()
-    # t.test_sparse_solve()
+    t.test_sdpr_forward(sigma_val=200 / 800)
