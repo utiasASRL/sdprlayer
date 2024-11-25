@@ -7,11 +7,12 @@ import torch.nn as nn
 from cert_tools import HomQCQP
 from cert_tools.sparse_solvers import solve_dsdp
 from diffcp import cones
+from kornia.geometry import motion_from_essential_choose_solution
 from poly_matrix import PolyMatrix
 from torch.profiler import record_function
 
 from sdprlayers.layers.sdprlayer import SDPRLayer
-from sdprlayers.utils.lie_algebra import se3_inv, se3_log
+from sdprlayers.utils.lie_algebra import so3_wedge
 
 
 class EssentialSDPBlock(nn.Module):
@@ -21,20 +22,35 @@ class EssentialSDPBlock(nn.Module):
 
     SDP relaxation is based on:
     "An Efficient Solution to Non-Minimal Case Essential Matrix Estimation" by Ji Zhao
+
+    Essential matrix is defined by the equations:
+
+    point_target^T @ E @ point_source = 0
+
+    E = [t_st_t]^x R_ts
+
+    where
+
+    point_target = R_ts @ point_source + t_st_t
+
     """
 
-    def __init__(self, tol=1e-10):
+    def __init__(self, K_source=None, K_target=None, tol=1e-10):
         """
         Initialize the FundMatSDPBlock class.
-
+        Intrinsic matrix inputs are used solely to determine the best essential matrix for the given
         Args:
-            T_s_v (torch.tensor): 4x4 transformation matrix providing the transform from the vehicle frame to the
-                                  sensor frame.
+            tol = tolerance used for the SDP Solver
+            K_source = Intrinsic matrix of the source image points
+            K_target = Intrinsic matrix of the target image points
         """
         super(EssentialSDPBlock, self).__init__()
         # Define constraint dict
         self.var_dict = {"h": 1, "e1": 3, "e2": 3, "e3": 3, "t": 3}
         self.size = 13
+        # Intrinsic Matrices
+        self.K_source = K_source
+        self.K_target = K_target
 
         # Generate constraints
         constraints = self.get_t_norm_constraint()
@@ -96,7 +112,7 @@ class EssentialSDPBlock(nn.Module):
         keypoints_trg,
         weights,
         verbose=False,
-        rescale=True,
+        rescale=False,
     ):
         """
         Compute the optimal fundamental matrix relating source and target frame. This
@@ -114,7 +130,6 @@ class EssentialSDPBlock(nn.Module):
             F_trg_src (torch.tensor, Bx3x3): Fundamental matrix relating source and target frame.
             e_src (torch.tensor, Bx3x1): Epipole corresponding to the fundamental matrix.
         """
-        batch_size, _, n_points = keypoints_src.size()
 
         # Construct objective function
         with record_function("SDPR: Build Cost Matrix"):
@@ -127,7 +142,7 @@ class EssentialSDPBlock(nn.Module):
         for Q in Qs:
             # Overwrite stored cost
             self.homQCQP.C = PolyMatrix.init_from_sparse(
-                Q.numpy(), var_dict=self.var_dict, symmetric=True
+                Q.detach().numpy(), var_dict=self.var_dict, symmetric=True
             )
             # Run solve
             cliques, info = solve_dsdp(
@@ -142,7 +157,8 @@ class EssentialSDPBlock(nn.Module):
             H = self.homQCQP.get_dual_matrix(
                 info["dual"], var_list=self.var_dict
             ).toarray()
-            mults = info["mults"]
+
+            mults = [-y for y in info["mults"]]
             # Add solution to list to pass to layer
             if self.sdprlayer.use_dual:
                 ext_vars_list.append(
@@ -165,16 +181,35 @@ class EssentialSDPBlock(nn.Module):
         # call sdprlayer
         with record_function("SDPR: Run Optimization"):
             X, x = self.sdprlayer(Qs, solver_args=solver_args)
+        # Solution rank
+        rank = np.max(ranks)
 
         # Extract solution
         # NOTE: Homogenizing variable has been stripped from vector solution
         E_mats = torch.reshape(x[:, 0:9, :], (-1, 3, 3))
-        trans_vecs = x[:, -3:, :]
+        # There is ambiguity in the solution at this point due to the fact that there are 10 possible essential matrices for a given set of keypoint correspondences.
+        # To deal with this we compute the "best" rotation and translation using the kornia library
+        if self.K_source is None:
+            K_source = torch.eye(3).expand(E_mats.shape[0], -1, -1)
+        else:
+            K_source = self.K_source
 
-        # Solution rank
-        rank = np.max(ranks)
+        if self.K_target is None:
+            K_target = torch.eye(3).expand(E_mats.shape[0], -1, -1)
+        else:
+            K_target = self.K_target
+        # Choose the rotation and translation that best represent the keypoints
+        Rs, ts, points_3d = motion_from_essential_choose_solution(
+            E_mats,
+            K_source,
+            K_target,
+            keypoints_src[:, :2, :].mT,
+            keypoints_trg[:, :2, :].mT,
+        )
+        # reconstruct Essential matrices
+        Es = Rs.bmm(so3_wedge(ts))
 
-        return E_mats, trans_vecs, X, rank
+        return E_mats, ts, X, rank
 
     @staticmethod
     def get_obj_matrix_vec(
@@ -198,10 +233,10 @@ class EssentialSDPBlock(nn.Module):
         e = slice(1, 10)
         # Form data matrix from points and weights
         # NOTE: if s_k, t_k, w_k are the kth source, target and weights, the cost matrix is given by
-        #      sum_k  w_k * (s_k KRON t_k )(s_k KRON t_k )^T      on each batch dim
+        #      sum_k  w_k * (t_k KRON s_k )(t_k KRON s_k )^T      on each batch dim
         weights_sqz = torch.squeeze(weights, 1)
         # Form [vecX]_k = kron(a,b) = vec( a @ b^T ) = vec(X), for row major vectorization
-        X = torch.einsum("bik, bjk->bijk", keypoints_src, keypoints_trg)
+        X = torch.einsum("bik, bjk->bijk", keypoints_trg, keypoints_src)
         vecX = X.reshape((B, 9, N))
         # Q = sum ( w_k vecX_k vecX_k.T )
         Q_ff = torch.einsum("bik,bjk,bk->bij", vecX, vecX, weights_sqz)

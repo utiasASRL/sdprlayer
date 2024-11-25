@@ -4,6 +4,9 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from cert_tools import HomQCQP
+from cert_tools.sparse_solvers import solve_dsdp
+from poly_matrix import PolyMatrix
 
 import sdprlayers.utils.fund_mat_utils as utils
 from sdprlayers import FundMatSDPBlock
@@ -230,20 +233,45 @@ class TestFundMat(unittest.TestCase):
         plt.semilogy(s, ".")
         plt.show()
 
+    def test_sparse_solve(self):
+        problem = HomQCQP(homog_var="h")
+        var_sizes = self.layer.var_dict
+        problem.var_sizes = var_sizes
+        # Get cost function
+        trgs = t.trg_img_pts
+        srcs = t.src_img_pts
+        C_torch, _, _ = self.layer.get_obj_matrix_vec(
+            srcs, trgs, self.weights, scale_offset=False
+        )
+        C = C_torch[0].numpy()
+        problem.C = PolyMatrix.init_from_sparse(C, var_sizes, symmetric=True)
+        # Get constraints
+        problem.As = []
+        for A in self.layer.sdprlayer.constr_list:
+            pmat = PolyMatrix.init_from_sparse(A, var_sizes, symmetric=True)
+            problem.As.append(pmat)
+        # decompose
+        problem.clique_decomposition()
+        # Solve
+        X_list, info = solve_dsdp(problem, form="dual", verbose=True, tol=1e-10)
+        Y, ranks, factor_dict = problem.get_mr_completion(
+            X_list, var_list=list(var_sizes.keys())
+        )
+        assert Y.shape[1] == 1, "solution not rank-1"
+
 
 if __name__ == "__main__":
 
     # Frobenius Norm Formulation
     # t = TestFundMat()
     # Unity element constraint
-    t = TestFundMat(
-        formulation="unity_elem", constraint_file="saved_constraints_2024-09-30.pkl"
-    )
+    t = TestFundMat(formulation="unity_elem")
 
     # t.test_constraints()
     # t.test_cost_matrix_nonoise()
     # t.test_cost_matrix()
     # t.test_feasibility()
     # t.test_nuclear_norm()
-    t.test_sdpr_forward_nonoise()
+    # t.test_sdpr_forward_nonoise()
     # t.test_sdpr_forward()
+    t.test_sparse_solve()

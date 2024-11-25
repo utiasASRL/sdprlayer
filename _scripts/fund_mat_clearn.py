@@ -101,7 +101,7 @@ def gen_learned_constraints(formulation="fro_norm", plot=False):
 
     # Get learned constraints
     A_learned = lifter.get_A_learned(
-        A_known=A_known, var_dict=lifter.var_dict_, verbose=True
+        A_known=[], var_dict=lifter.var_dict_, verbose=True
     )
     for A in A_learned:
         read_sparse_mat(A, lifter.var_dict_, show=plot)
@@ -163,7 +163,7 @@ def read_sparse_mat(A, var_dict, show=False, homog="w_0"):
         A (_type_): _description_
         var_dict (_type_): _description_
     """
-    A_poly, _ = PolyMatrix.init_from_sparse(A, var_dict, symmetric=True)
+    A_poly = PolyMatrix.init_from_sparse(A, var_dict, symmetric=True)
     print(A_poly.get_expr(homog=homog))
     if show:
         ax = A_poly.matshow()
@@ -173,5 +173,5 @@ def read_sparse_mat(A, var_dict, show=False, homog="w_0"):
 
 
 if __name__ == "__main__":
-    # gen_learned_constraints(formulation="unity_elem")
-    gen_learned_constraints(formulation="fro_norm")
+    gen_learned_constraints(formulation="unity_elem")
+    # gen_learned_constraints(formulation="fro_norm")
