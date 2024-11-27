@@ -157,8 +157,7 @@ class EssentialSDPBlock(nn.Module):
             H = self.homQCQP.get_dual_matrix(
                 info["dual"], var_list=self.var_dict
             ).toarray()
-
-            mults = [-y for y in info["mults"]]
+            mults = [y for y in info["mults"]]
             # Add solution to list to pass to layer
             if self.sdprlayer.use_dual:
                 ext_vars_list.append(

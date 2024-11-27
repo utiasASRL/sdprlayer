@@ -4,7 +4,9 @@ import cvxpy as cp
 import numpy as np
 import scipy.linalg as la
 import scipy.sparse as sp
+import sparseqr as sqr
 import torch
+from cert_tools.linalg_tools import find_dependent_columns
 from cvxpylayers.torch import CvxpyLayer
 from diffcp import cones
 
@@ -33,9 +35,7 @@ class SDPRLayer(CvxpyLayer):
         objective=None,
         homogenize=False,
         use_dual=True,
-        local_solver=None,
-        local_args={},
-        certifier=None,
+        diff_qcqp=False,
     ):
         """Initialize the SDPRLayer class. This functions sets up the SDP relaxation
         using CVXPY, adding in parameters to be filled in later during forward function
@@ -58,28 +58,22 @@ class SDPRLayer(CvxpyLayer):
         If any of the objective or constraints are meant to be parameterized, then they should
         be set to None. Otherwise, they should be set to the fixed values.
 
-        Functionality for local_solvers and certifiers is currently not fully implemented.
-
         Args:
             n_vars (int): dimension of variable vector x
             constraints (list): list of constraints, either 3-tuple or matrices
             objective (tuple or array): objective function, either 3-tuple or matrix
             homogenize (boolean): defaults to False. If true, constraints and objective are converted to matrices from 3-tuples
-            local_solver=None,
-            local_args={},
-            certifier=None,
             use_dual=True,
         """
         # Store information
         self.homogenize = homogenize
         self.constr_list = constraints
         self.use_dual = use_dual
-        self.local_solver = local_solver
-        self.local_args = local_args
-        self.certifier = certifier
+        self.diff_qcqp = diff_qcqp
         # Add homogenization variable
         if homogenize:
             n_vars = n_vars + 1
+        self.n_vars = n_vars
         # parameter list (for cvxpylayers)
         # NOTE: parameters are the optimization matrices and are always
         # stored in homogenized form
@@ -122,14 +116,14 @@ class SDPRLayer(CvxpyLayer):
         # definition of extra slacks by CVXPY
         N_constrs = len(self.constr_list)
         # homenization constraint matrix
-        A_0 = sp.lil_array((n_vars, n_vars))
-        A_0[0, 0] = 1.0
-        if use_dual or local_solver is not None:
+        self.A_0 = sp.lil_array((n_vars, n_vars))
+        self.A_0[0, 0] = 1.0
+        if use_dual is not None:
             y = cp.Variable(shape=(N_constrs + 1,))
             rho = y[-1]
             objective = cp.Maximize(rho)
             LHS = cp.sum([y[i] * Ai for (i, Ai) in enumerate(self.constr_list)])
-            LHS += rho * A_0
+            LHS += rho * self.A_0
             constraint = LHS << Q
             problem = cp.Problem(objective, [constraint])
             variables = []
@@ -142,7 +136,7 @@ class SDPRLayer(CvxpyLayer):
             constraints = [X >> 0]
             for A in self.constr_list:
                 constraints += [cp.trace(A @ X) == 0.0]
-            constraints += [cp.trace(A_0 @ X) == 1.0]
+            constraints += [cp.trace(self.A_0 @ X) == 1.0]
             objective_cvx = cp.Minimize(cp.trace(Q @ X))
             problem = cp.Problem(objective=objective_cvx, constraints=constraints)
             variables = [X]
@@ -243,7 +237,7 @@ class SDPRLayer(CvxpyLayer):
         if "solver_args" in kwargs and "solve_method" in kwargs["solver_args"]:
             method = kwargs["solver_args"]["solve_method"]
             # Check if we are injecting a solution
-            if method in ["local", "mosek", "decomp-mosek"]:
+            if method == "mosek":
                 assert self.use_dual, "Primal not implemented. Set use_dual=True"
                 # TODO this loop should be set up so that we can run in parallel.
                 ext_vars_list = []
@@ -255,43 +249,22 @@ class SDPRLayer(CvxpyLayer):
                         # Enforce symmetry
                         parameters[i].value = (val + val.T) / 2.0
                     # Solve the problem
-                    if method == "mosek":
-                        assert "MOSEK" in cp.installed_solvers(), "MOSEK not installed"
-                        # Get parameters for mosek
-                        verbose = kwargs["solver_args"].get("verbose", False)
-                        mosek_params = kwargs["solver_args"].get(
-                            "mosek_params", mosek_params_dflt
-                        )
-                        self.problem.solve(
-                            solver=cp.MOSEK, verbose=verbose, mosek_params=mosek_params
-                        )
-                        # Solver check
-                        if not self.problem.status == "optimal":
-                            raise ValueError("MOSEK did not converge")
-                        # Extract primal and dual variables
-                        X = np.array(self.problem.constraints[0].dual_value)
-                        H = np.array(self.H.value)
-                        mults = self.problem.variables()[0].value
-                    elif method == "local":
-                        # Check if local solution methods have been defined.
-                        assert (
-                            self.local_solver is not None
-                        ), "Local solver not defined."
-                        assert self.certifier is not None, "Certifier not defined."
-                        # Run Local Solver
-                        x_cand = self.local_solver(**self.local_args)
-                        X = x_cand @ x_cand.T
-                        # Certify Local Solution
-                        H, mults = self.certifier_wrapper(
-                            objective=self.Q,
-                            constraints=self.constr_list,
-                            x_cand=x_cand,
-                        )
-                        # TODO Improve this check using some other library
-                        min_eig = np.min(np.linalg.eigvalsh(H))
-                        if min_eig < -1e-8:
-                            # TODO this should queue a reinitialization
-                            raise ValueError("Local solution not certified")
+                    assert "MOSEK" in cp.installed_solvers(), "MOSEK not installed"
+                    # Get parameters for mosek
+                    verbose = kwargs["solver_args"].get("verbose", False)
+                    mosek_params = kwargs["solver_args"].get(
+                        "mosek_params", mosek_params_dflt
+                    )
+                    self.problem.solve(
+                        solver=cp.MOSEK, verbose=verbose, mosek_params=mosek_params
+                    )
+                    # Solver check
+                    if not self.problem.status == "optimal":
+                        raise ValueError("MOSEK did not converge")
+                    # Extract primal and dual variables
+                    X = np.array(self.problem.constraints[0].dual_value)
+                    H = np.array(self.H.value)
+                    mults = self.problem.variables()[0].value
 
                     # Add to list of solutions
                     ext_vars_list += [
@@ -309,67 +282,46 @@ class SDPRLayer(CvxpyLayer):
                 else:
                     kwargs_new["solver_args"] = solver_args
 
-        # Call cvxpylayers forward function
-        res = super().forward(*param_vals_h, **kwargs_new)
-        # If using mosek or local then overwrite the primal solution for better numerical accuracy?
-
-        # Extract non-homogenized solution
-        Xs = res[0]
-        xs = self.recovery_map(Xs)
-        # Adjust dimensions
-        if ndims < 3:
-            xs = xs.squeeze(0)
-            Xs = Xs.squeeze(0)
-        return Xs, xs
-
-    def certifier_wrapper(self, objective, constraints, x_cand, **kwargs):
-        """Wrapper for certifier function. This function extracts parameter
-        values if necessary and then calls the (user-provided) certifier function."""
-        # Get Cost
-        if isinstance(objective, cp.Parameter):
-            Q = objective.value
-        elif isinstance(objective, np.ndarray) or sp.issparse(constraint):
-            Q = objective
+        # If using nonconvex backprop, overwrite solution
+        if self.diff_qcqp:
+            # call cvxpylayers to get solution
+            kwargs_new["solver_args"]["ret_diffcp_soln"] = True
+            soln = super().forward(*param_vals_h, **kwargs_new)
+            # Overwrite solution using QCQP autograd function
+            constraints = self.constr_list + [self.A_0]  # add homogenizing constraint
+            qcqp_func = _QCQPDiffFn(
+                self.Q, constraints, soln, self.n_vars, self.use_dual
+            )
+            xs = qcqp_func(*param_vals_h)
+            if ndims < 3:
+                xs = xs.squeeze(0)
+            return xs
         else:
-            raise ValueError("Objective must be a parameter or a numpy array")
-        # Get constraints
-        constraint_list = []
-        for constraint in constraints:
-            if isinstance(constraint, cp.Parameter):
-                constraint_list += [(constraint.value, 0.0)]
-            elif isinstance(constraint, np.ndarray) or sp.issparse(constraint):
-                constraint_list += [(constraint, 0.0)]
-            else:
-                raise ValueError("Constraint must be a parameter or a numpy array")
-        # Add homogenizing constraint
-        n_vars = Q.shape[0]
-        A_0 = sp.lil_array((n_vars, n_vars))
-        A_0[0, 0] = 1.0
-        constraint_list += [(A_0, 1.0)]
-
-        # Call certifier
-        return self.certifier(
-            objective=Q,
-            constraints=constraint_list,
-            x_cand=x_cand,
-            **kwargs,
-        )
+            soln = super().forward(*param_vals_h, **kwargs_new)
+            # Extract solutions
+            Xs = soln[0]
+            xs = self.recovery_map(Xs)
+            # Adjust dimensions
+            if ndims < 3:
+                xs = xs.squeeze(0)
+                Xs = Xs.squeeze(0)
+            return Xs, xs
 
     @staticmethod
-    def recovery_map(Xs, round=False):
+    def recovery_map(Xs, method="column"):
         """Extract the rank-1 solution from the SDP matrix solution"""
         # Expand dimension if not batched.
         if Xs.ndim == 2:
             Xs = Xs.unsqueeze(0)
         # recovery vector QCQP variable
-        if not round:
-            extract = torch.vmap(SDPRLayer.extract_rowcol)
-            xs = extract(Xs)
+        if method == "column":
+            round_func = torch.vmap(SDPRLayer.extract_column)
+        elif method == "eig":
+            round_func = torch.vmap(SDPRLayer.eig_round)
         else:
-            # Not yet implemented, use SVD to get singular vector with max
-            # singular value.
-            raise NotImplementedError()
-        return xs
+            raise ("Solution recovery function unknown.")
+
+        return round_func(Xs)
 
     @staticmethod
     def homog_matrix(F, fvec, f):
@@ -391,6 +343,19 @@ class SDPRLayer(CvxpyLayer):
         ER = sorted_eigs[-1] / sorted_eigs[-2]
         tight = ER > ER_min
         return tight, ER
+
+    @staticmethod
+    def extract_column(X):
+        """Assumes that the homogenized variable corresponds to the first row/col"""
+        x = (X[0:, [0]] + X[[0], 0:].T) / 2.0
+        return x
+
+    @staticmethod
+    def eig_round(X):
+        """Use eigenvalue decomposition to extract the best solution"""
+        vals, vecs = torch.linalg.eigh(X)
+        x = vecs[:, -1] * torch.sqrt(vals[-1])
+        return x
 
     @staticmethod
     def find_constraints(feas_samples, tolerance=1e-5):
@@ -426,11 +391,155 @@ class SDPRLayer(CvxpyLayer):
 
         return constraints
 
-    @staticmethod
-    def extract_rowcol(X):
-        """Assumes that the homogenized variable corresponds to the first row/col"""
-        x = (X[1:, [0]] + X[[0], 1:].T) / 2.0
-        return x
+
+def _QCQPDiffFn(
+    objective,
+    constraints,
+    soln,
+    nvars,
+    use_dual,
+):
+    class DiffQCQP(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, *params):
+            """Forward function is basically a dummy to store the required information for implicit backward pass."""
+            # keep track of which parts of the problem are parameterized
+            param_dict = dict(objective=False, constraints=[])
+            param_cnt = 0
+            # Add objective
+            if isinstance(objective, cp.Parameter):
+                ctx.objective = params[0]
+                param_dict["objective"] = True
+                param_cnt += 1
+            else:
+                ctx.objective = objective
+
+            # Add Constraints
+            param_ind = 1
+            constraint_list = []
+            for iConstr, constraint in enumerate(constraints):
+                if constraint is not None:
+                    constraint_list.append(constraint)
+                else:
+                    constraint_list.append(params[param_ind])
+                    param_dict["constraints"].append(iConstr)
+                    param_cnt += 1
+            ctx.constraints = np.stack(constraint_list, axis=0)
+            # Check that all parameters have been used
+            assert param_ind == len(params), ValueError(
+                "All parameters have not been used in QCQP Forward!"
+            )
+            ctx.param_dict = param_dict
+            # Retrieve solution values
+            xs, ys, ss = soln
+            if use_dual:
+                ctx.mults = xs
+                ctx.Hs = np.stack([cones.unvec_symm(s, nvars) for s in ss], axis=0)
+                Xs = np.stack([cones.unvec_symm(y, nvars) for y in ys], axis=0)
+            else:
+                ctx.mults = xs
+                ctx.Hs = np.stack([cones.unvec_symm(y, nvars) for y in ys], axis=0)
+                Xs = np.stack([cones.unvec_symm(s, nvars) for s in ss], axis=0)
+
+            # Check that relaxation is tight
+            Xs = torch.tensor(Xs)
+            for X in Xs:
+                tight, ER = SDPRLayer.check_tightness(X)
+                assert tight, ValueError(
+                    f"Cannot differentiate QCQP because relaxation is not tight. Eigenvalue Ratio: {ER}"
+                )
+            # Project solution
+            xs = SDPRLayer.recovery_map(Xs)
+            # Store solution as numpy array
+            ctx.xs = xs.numpy()
+
+            return xs
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            """Compute gradients by implicit differentiation of the QCQP KKT conditions."""
+            # Certified Solution
+            xs = ctx.xs
+            batch_dim = xs.shape[0]
+            # Loop through batches and compute gradient information
+            dH_bar, dA_quad, dy_bar_2 = [], [], []
+            for b in range(batch_dim):
+                # Construct A_bar
+                A_bar = []
+                for A in ctx.constraints:
+                    if len(A.shape) > 2:
+                        A = A[b]
+                    A_bar.append(A @ xs[b])
+                A_bar = np.hstack(A_bar)
+                # Get Objective
+                if len(ctx.objective.shape) > 2:
+                    Q = ctx.objective[b].numpy()
+                else:
+                    Q = ctx.objective.numpy()
+                q_bar = -Q @ xs[b]
+                # Solve for Lagrange multipliers and identify
+                mults, idx_keep = qr_solve(A_bar, q_bar)
+                A_bar = A_bar[:, idx_keep]
+                # Construct Dual PSD Variable
+                Hs = Q
+                for i, A in enumerate(ctx.constraints):
+                    Hs += A * mults[i]
+                # Construct Jacobian
+                zero_blk = np.zeros((A_bar.shape[1], A_bar.shape[1]))
+                M = np.block([[Hs, A_bar], [A_bar.T, zero_blk]])
+                # Pad incoming gradient (account for lagrange multipliers)
+                dz_bar = np.vstack([grad_output[b], np.zeros((A_bar.shape[1], 1))])
+                # Compute gradient wrt KKT RHS
+                dy_bar = np.linalg.solve(M, dz_bar)
+                dy_bar_1 = dy_bar[:nvars, :]
+                dy_bar_2.append(dy_bar[nvars:, :])
+                # Compute gradient wrt H
+                dH_bar.append(
+                    xs[b] @ dy_bar_1.T + dy_bar_1 @ xs[b].T - np.diag(xs[b] * dy_bar_1)
+                )
+                # Compute grad ( x^T A x )
+                dA_quad.append(2 * xs[b] @ xs[b].T - np.diag(np.diag(xs[b] @ xs[b].T)))
+            dH_bar = np.stack(dH_bar, axis=0)
+            dA_quad = np.stack(dA_quad, axis=0)
+            dy_bar_2 = np.stack(dy_bar_2, axis=0)
+            # Compute final gradients
+            param_grads = []
+            if ctx.param_dict["objective"]:
+                param_grads.append(torch.tensor(dH_bar))
+            for ind in ctx.param_dict["constraints"]:
+                dA = dH_bar * ctx.mults[:, ind]
+                dA += dA_quad * dy_bar_2[:, ind]
+                param_grads.append(dA)
+
+            return tuple(param_grads)
+
+    return DiffQCQP.apply
+
+
+def qr_solve(A, b, tolerance=1e-10):
+    """Use rank-revealing QR decomposition to solve for multipliers and identify linearly dependant columns in input matrix.
+
+    Args:
+        A (_type_): _description_
+        b (_type_): _description_
+    """
+    n = A.shape[1]
+    if sp.issparse(A):
+        A_sparse = A
+    else:
+        A_sparse = sp.csr_array(A)
+    # QR Decomposition
+    Qtb, R, p, rank = sqr.rz(A_sparse, b, tolerance=tolerance)
+    # Upper Triangular Solve
+    R = R.tocsr()[:rank, :rank]
+    Qtb = Qtb[:rank, :]
+    x_perm = sp.linalg.spsolve_triangular(R, Qtb, lower=False)
+    x_perm = np.vstack([x_perm, np.zeros((n - rank, 1))])
+    x = x_perm[p]
+    # Record indices of linearly dependent columns
+    idx_keep = p[:rank]
+
+    return x, idx_keep
 
 
 def get_nullspace(A_dense, method="qrp", tolerance=1e-5):

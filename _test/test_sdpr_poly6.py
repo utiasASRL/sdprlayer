@@ -6,10 +6,7 @@ import numpy as np
 import scipy.sparse as sp
 import torch
 
-from sdprlayer import SDPRLayer
-
-# from cert_tools.eopt_solvers import opts_cut_dflt, solve_eopt
-
+from sdprlayers.layers.sdprlayer import SDPRLayer
 
 root_dir = os.path.abspath(os.path.dirname(__file__) + "/../")
 
@@ -37,7 +34,7 @@ def get_prob_data():
     A[1, 2] = -1
     A[2, 1] = -1
     constraints += [A]
-    A = sp.csc_array((4, 4))  # x^3*x = x^2*x^2
+    A = sp.csc_array((4, 4))  # x^3*x = x^2*x^2 Redundant
     A[3, 1] = 1 / 2
     A[1, 3] = 1 / 2
     A[2, 2] = -1
@@ -92,18 +89,6 @@ def local_solver(p: torch.Tensor, x_init=0.0):
     # Convert to expected vector form
     x_hat = np.array([1, x, x**2, x**3])[:, None]
     return x_hat
-
-
-# def certifier(objective, constraints, x_cand):
-#     opts = opts_cut_dflt
-#     method = "cuts"
-#     _, output = solve_eopt(
-#         Q=objective, Constraints=constraints, x_cand=x_cand, opts=opts, method=method
-#     )
-#     if not output["status"] == "POS_LB":
-#         raise ValueError("Unable to certify solution")
-#     # diffcp assumes the form:  H = Q - A*mult
-#     return output["H"], -output["mults"]
 
 
 def test_run_sdp():
@@ -374,6 +359,54 @@ def test_grad_sdp_mosek(use_dual=True):
     )
 
 
+def test_grad_qcqp(use_dual=True):
+    """Test SDPRLayer with MOSEK as the solver"""
+    # Get data from data function
+    data = get_prob_data()
+    constraints = data["constraints"]
+
+    # Set up polynomial parameter tensor
+    p = torch.tensor(data["p_vals"], requires_grad=True)
+
+    # Create SDPR Layer
+    sdpr_args = dict(
+        n_vars=4, constraints=constraints, use_dual=use_dual, diff_qcqp=True
+    )
+    optlayer = SDPRLayer(**sdpr_args)
+
+    # Define loss
+    def gen_loss(p_val, **kwargs):
+        x_target = -1
+        x = optlayer(build_data_mat(p_val), **kwargs)
+        x_val = x[1, 0]
+        loss = 1 / 2 * (x_val - x_target) ** 2
+        return loss
+
+    # arguments for sdp solver
+    mosek_params = {
+        "MSK_IPAR_INTPNT_MAX_ITERATIONS": 500,
+        "MSK_DPAR_INTPNT_CO_TOL_PFEAS": 1e-12,
+        "MSK_DPAR_INTPNT_CO_TOL_REL_GAP": 1e-12,
+        "MSK_DPAR_INTPNT_CO_TOL_MU_RED": 1e-12,
+        "MSK_DPAR_INTPNT_CO_TOL_INFEAS": 1e-12,
+        "MSK_DPAR_INTPNT_CO_TOL_DFEAS": 1e-12,
+    }
+    sdp_solver_args = {
+        "solve_method": "mosek",
+        "mosek_params": mosek_params,
+        "verbose": True,
+    }
+
+    # Check gradient w.r.t. parameter p
+    torch.autograd.gradcheck(
+        lambda *x: gen_loss(*x, solver_args=sdp_solver_args),
+        [p],
+        eps=1e-4,
+        atol=1e-3,
+        rtol=0.0,
+    )
+
+
 def _test_grad_local(autograd_test=True):
     """This test function compares the local version of SDPRLayer with the
     SDP version. Local refers to the fact that the forward pass uses a local
@@ -487,8 +520,9 @@ if __name__ == "__main__":
     # test_prob_local(display=True)
     # test_grad_sdp()
     # test_grad_sdp_mosek()
+    test_grad_qcqp()
     # test_grad_local()
     # test_run_sdp()
     # test_prob_local()
     # test_redundant_constraint()
-    test_rank_maximization(display=True)
+    # test_rank_maximization(display=True)

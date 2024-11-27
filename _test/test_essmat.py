@@ -286,9 +286,9 @@ class TestEssMat(unittest.TestCase):
 
         # source-essential gradient
         inputs[0].requires_grad_(True)
-        eps = 1e-4
+        eps = 1e-3
         atol = 1e-5
-        rtol = 1e-1
+        rtol = 5e-2
         torch.autograd.gradcheck(
             lambda *x: layer_wrapper(*x, out="E"),
             inputs=inputs,
@@ -297,9 +297,9 @@ class TestEssMat(unittest.TestCase):
             rtol=rtol,
         )
         # source-translation gradient
-        eps = 1e-4
+        eps = 1e-3
         atol = 1e-5
-        rtol = 1e-1
+        rtol = 5e-2
         torch.autograd.gradcheck(
             lambda *x: layer_wrapper(*x, out="t"),
             inputs=inputs,
@@ -313,7 +313,7 @@ class TestEssMat(unittest.TestCase):
         inputs[1].requires_grad_(True)
         eps = 1e-3
         atol = 1e-5
-        rtol = 1e-1
+        rtol = 5e-2
         torch.autograd.gradcheck(
             lambda *x: layer_wrapper(*x, out="E"),
             inputs=inputs,
@@ -322,9 +322,9 @@ class TestEssMat(unittest.TestCase):
             rtol=rtol,
         )
         # target-translation gradient
-        eps = 1e-4
+        eps = 1e-3
         atol = 1e-5
-        rtol = 1e-1
+        rtol = 1e-2
         torch.autograd.gradcheck(
             lambda *x: layer_wrapper(*x, out="t"),
             inputs=inputs,
@@ -336,7 +336,7 @@ class TestEssMat(unittest.TestCase):
 
         # weight-essential gradient
         inputs[2].requires_grad_(True)
-        eps = 1e-2
+        eps = 1e-3
         atol = 1e-5
         rtol = 1e-1
         torch.autograd.gradcheck(
@@ -523,7 +523,7 @@ if __name__ == "__main__":
     # t.test_sdpr_forward_nonoise()
     # t.test_sdpr_forward(sigma_val=10 / 800)
     # t.test_cost_backward()
-    # t.test_layer_backward(sigma_val=0 / 800)
-    t.test_kornia_solution()
+    t.test_layer_backward(sigma_val=0 / 800)
+    # t.test_kornia_solution()
     # t.test_kornia_backward()
     # t.compare_with_kornia(sigma_val=0 / 800)
