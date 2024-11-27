@@ -35,7 +35,8 @@ class SDPRLayer(CvxpyLayer):
         objective=None,
         homogenize=False,
         use_dual=True,
-        diff_qcqp=False,
+        diff_qcqp=True,
+        redun_list=[],
     ):
         """Initialize the SDPRLayer class. This functions sets up the SDP relaxation
         using CVXPY, adding in parameters to be filled in later during forward function
@@ -70,6 +71,7 @@ class SDPRLayer(CvxpyLayer):
         self.constr_list = constraints
         self.use_dual = use_dual
         self.diff_qcqp = diff_qcqp
+        self.redun_list = redun_list
         # Add homogenization variable
         if homogenize:
             n_vars = n_vars + 1
@@ -228,6 +230,9 @@ class SDPRLayer(CvxpyLayer):
                     else:
                         param_vals_h[i] = param_vals_h[i].unsqueeze(0)
 
+        # Make input parameters symmetric
+        param_vals_h = [Symmetric.apply(param_val) for param_val in param_vals_h]
+
         # Define new kwargs to not affect original
         kwargs_new = deepcopy(kwargs)
 
@@ -244,10 +249,10 @@ class SDPRLayer(CvxpyLayer):
                 for iBatch in range(N_batch):
                     # Populate CVXPY Parameters with batch values
                     parameters = self.problem.parameters()
-                    for i in range(len(parameters)):
-                        val = param_vals_h[i][iBatch].cpu().detach().numpy()
-                        # Enforce symmetry
-                        parameters[i].value = (val + val.T) / 2.0
+                    for iParam in range(len(parameters)):
+                        parameters[iParam].value = (
+                            param_vals_h[i][iBatch].cpu().detach().numpy()
+                        )
                     # Solve the problem
                     assert "MOSEK" in cp.installed_solvers(), "MOSEK not installed"
                     # Get parameters for mosek
@@ -282,30 +287,37 @@ class SDPRLayer(CvxpyLayer):
                 else:
                     kwargs_new["solver_args"] = solver_args
 
-        # If using nonconvex backprop, overwrite solution
+        # Get torch tensor from CvxpyLayers
+        soln = super().forward(*param_vals_h, **kwargs_new)
+        Xs = soln[0]
+        # Extract solutions
+        xs = self.recovery_map(Xs)
+        # QCQP Backpropagation
         if self.diff_qcqp:
-            # call cvxpylayers to get solution
-            kwargs_new["solver_args"]["ret_diffcp_soln"] = True
-            soln = super().forward(*param_vals_h, **kwargs_new)
-            # Overwrite solution using QCQP autograd function
-            constraints = self.constr_list + [self.A_0]  # add homogenizing constraint
-            qcqp_func = _QCQPDiffFn(
-                self.Q, constraints, soln, self.n_vars, self.use_dual
-            )
-            xs = qcqp_func(*param_vals_h)
-            if ndims < 3:
-                xs = xs.squeeze(0)
-            return xs
-        else:
-            soln = super().forward(*param_vals_h, **kwargs_new)
-            # Extract solutions
-            Xs = soln[0]
-            xs = self.recovery_map(Xs)
-            # Adjust dimensions
-            if ndims < 3:
-                xs = xs.squeeze(0)
-                Xs = Xs.squeeze(0)
-            return Xs, xs
+            # Check that the whole batch is tight.
+            alltight = True
+            for X in Xs:
+                tight, ER = self.check_tightness(X)
+                if not tight:
+                    alltight = False
+                    break
+            # If using nonconvex backprop, overwrite solution IF all problems are tight.
+            if alltight:
+                # Overwrite solution using QCQP autograd function
+                constraints = self.constr_list + [
+                    self.A_0
+                ]  # add homogenizing constraint
+                qcqp_func = _QCQPDiffFn(
+                    xs, self.Q, constraints, self.n_vars, self.redun_list
+                )
+                xs = qcqp_func(*param_vals_h)
+
+        # Adjust dimensions
+        if ndims < 3:
+            xs = xs.squeeze(0)
+            Xs = Xs.squeeze(0)
+
+        return Xs, xs
 
     @staticmethod
     def recovery_map(Xs, method="column"):
@@ -392,12 +404,24 @@ class SDPRLayer(CvxpyLayer):
         return constraints
 
 
+class Symmetric(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, X):
+        return (X + X.transpose(-1, -2)) / 2
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        # diag = torch.diagonal(grad_output, dim1=-1, dim2=-2)
+        # return (grad_output + grad_output.mT) - torch.diag_embed(diag)
+        return 0.5 * (grad_output + grad_output.mT)
+
+
 def _QCQPDiffFn(
+    soln,
     objective,
     constraints,
-    soln,
     nvars,
-    use_dual,
+    redun_list,
 ):
     class DiffQCQP(torch.autograd.Function):
         @staticmethod
@@ -405,55 +429,43 @@ def _QCQPDiffFn(
             """Forward function is basically a dummy to store the required information for implicit backward pass."""
             # keep track of which parts of the problem are parameterized
             param_dict = dict(objective=False, constraints=[])
-            param_cnt = 0
+            param_ind = 0
             # Add objective
             if isinstance(objective, cp.Parameter):
-                ctx.objective = params[0]
+                ctx.objective = params[0].detach().numpy()
                 param_dict["objective"] = True
-                param_cnt += 1
+                param_ind += 1
             else:
-                ctx.objective = objective
+                ctx.objective = objective.detach().numpy()
 
             # Add Constraints
-            param_ind = 1
             constraint_list = []
             for iConstr, constraint in enumerate(constraints):
-                if constraint is not None:
-                    constraint_list.append(constraint)
-                else:
-                    constraint_list.append(params[param_ind])
+                if isinstance(constraint, cp.Parameter):
+                    # Check that parameterized constraint is not redundant
+                    assert iConstr not in redun_list, ValueError(
+                        "DiffQCQP: Cannot differentiate with respect to a redundant constraint"
+                    )
+                    # Add parameter value to constraint list
+                    A_val = params[param_ind].detach().numpy()
+                    constraint_list.append(A_val)
                     param_dict["constraints"].append(iConstr)
-                    param_cnt += 1
-            ctx.constraints = np.stack(constraint_list, axis=0)
+                    param_ind += 1
+                else:
+                    # Add to constraint value to list
+                    if iConstr not in redun_list:
+                        constraint_list.append(constraint)
+
+            ctx.constraints = constraint_list
             # Check that all parameters have been used
             assert param_ind == len(params), ValueError(
                 "All parameters have not been used in QCQP Forward!"
             )
             ctx.param_dict = param_dict
-            # Retrieve solution values
-            xs, ys, ss = soln
-            if use_dual:
-                ctx.mults = xs
-                ctx.Hs = np.stack([cones.unvec_symm(s, nvars) for s in ss], axis=0)
-                Xs = np.stack([cones.unvec_symm(y, nvars) for y in ys], axis=0)
-            else:
-                ctx.mults = xs
-                ctx.Hs = np.stack([cones.unvec_symm(y, nvars) for y in ys], axis=0)
-                Xs = np.stack([cones.unvec_symm(s, nvars) for s in ss], axis=0)
-
-            # Check that relaxation is tight
-            Xs = torch.tensor(Xs)
-            for X in Xs:
-                tight, ER = SDPRLayer.check_tightness(X)
-                assert tight, ValueError(
-                    f"Cannot differentiate QCQP because relaxation is not tight. Eigenvalue Ratio: {ER}"
-                )
-            # Project solution
-            xs = SDPRLayer.recovery_map(Xs)
             # Store solution as numpy array
-            ctx.xs = xs.numpy()
+            ctx.xs = soln.numpy()
 
-            return xs
+            return soln
 
         @staticmethod
         def backward(ctx, grad_output):
@@ -461,8 +473,9 @@ def _QCQPDiffFn(
             # Certified Solution
             xs = ctx.xs
             batch_dim = xs.shape[0]
+            # NOTE: should reimplement the following without a loop (vectorized)
             # Loop through batches and compute gradient information
-            dH_bar, dA_quad, dy_bar_2 = [], [], []
+            dH_bar, dA_quad, dy_bar_2, mult_list = [], [], [], []
             for b in range(batch_dim):
                 # Construct A_bar
                 A_bar = []
@@ -473,43 +486,44 @@ def _QCQPDiffFn(
                 A_bar = np.hstack(A_bar)
                 # Get Objective
                 if len(ctx.objective.shape) > 2:
-                    Q = ctx.objective[b].numpy()
+                    Q = ctx.objective[b]
                 else:
-                    Q = ctx.objective.numpy()
+                    Q = ctx.objective
                 q_bar = -Q @ xs[b]
                 # Solve for Lagrange multipliers and identify
                 mults, idx_keep = qr_solve(A_bar, q_bar)
+                mult_list.append(mults)
                 A_bar = A_bar[:, idx_keep]
                 # Construct Dual PSD Variable
-                Hs = Q
+                H = Q.copy()
                 for i, A in enumerate(ctx.constraints):
-                    Hs += A * mults[i]
+                    if len(A.shape) > 2:
+                        A = A[b]
+                    H += A * mults[i]
                 # Construct Jacobian
                 zero_blk = np.zeros((A_bar.shape[1], A_bar.shape[1]))
-                M = np.block([[Hs, A_bar], [A_bar.T, zero_blk]])
+                M = 2 * np.block([[H, A_bar], [A_bar.T, zero_blk]])
                 # Pad incoming gradient (account for lagrange multipliers)
-                dz_bar = np.vstack([grad_output[b], np.zeros((A_bar.shape[1], 1))])
-                # Compute gradient wrt KKT RHS
+                dz_bar = np.vstack([-grad_output[b], np.zeros((A_bar.shape[1], 1))])
+                # Backprop to KKT RHS
                 dy_bar = np.linalg.solve(M, dz_bar)
                 dy_bar_1 = dy_bar[:nvars, :]
                 dy_bar_2.append(dy_bar[nvars:, :])
-                # Compute gradient wrt H
-                dH_bar.append(
-                    xs[b] @ dy_bar_1.T + dy_bar_1 @ xs[b].T - np.diag(xs[b] * dy_bar_1)
-                )
+                # backprop to H
+                dH_bar.append(2 * xs[b] @ dy_bar_1.T)
                 # Compute grad ( x^T A x )
-                dA_quad.append(2 * xs[b] @ xs[b].T - np.diag(np.diag(xs[b] @ xs[b].T)))
+                dA_quad.append(xs[b] @ xs[b].T)
             dH_bar = np.stack(dH_bar, axis=0)
             dA_quad = np.stack(dA_quad, axis=0)
             dy_bar_2 = np.stack(dy_bar_2, axis=0)
+            mults = np.stack(mult_list, axis=0)
             # Compute final gradients
             param_grads = []
             if ctx.param_dict["objective"]:
                 param_grads.append(torch.tensor(dH_bar))
             for ind in ctx.param_dict["constraints"]:
-                dA = dH_bar * ctx.mults[:, ind]
-                dA += dA_quad * dy_bar_2[:, ind]
-                param_grads.append(dA)
+                dA = dH_bar * mults[:, ind] + dA_quad * dy_bar_2[:, ind]
+                param_grads.append(torch.tensor(dA))
 
             return tuple(param_grads)
 
@@ -537,7 +551,7 @@ def qr_solve(A, b, tolerance=1e-10):
     x_perm = np.vstack([x_perm, np.zeros((n - rank, 1))])
     x = x_perm[p]
     # Record indices of linearly dependent columns
-    idx_keep = p[:rank]
+    idx_keep = sorted(p[:rank])
 
     return x, idx_keep
 
