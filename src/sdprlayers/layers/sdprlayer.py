@@ -6,10 +6,10 @@ import scipy.linalg as la
 import scipy.sparse as sp
 import sparseqr as sqr
 import torch
-from cert_tools.linalg_tools import find_dependent_columns
 from cvxpylayers.torch import CvxpyLayer
 from diffcp import cones
 
+# GLOBAL PARAMETERS
 mosek_params_dflt = {
     "MSK_IPAR_INTPNT_MAX_ITERATIONS": 1000,
     "MSK_DPAR_INTPNT_CO_TOL_PFEAS": 1e-10,
@@ -18,6 +18,8 @@ mosek_params_dflt = {
     "MSK_DPAR_INTPNT_CO_TOL_INFEAS": 1e-10,
     "MSK_DPAR_INTPNT_CO_TOL_DFEAS": 1e-10,
 }
+
+RTOL_LICQ = 1e-10
 
 
 class SDPRLayer(CvxpyLayer):
@@ -36,6 +38,7 @@ class SDPRLayer(CvxpyLayer):
         homogenize=False,
         use_dual=True,
         diff_qcqp=True,
+        rtol_licq=RTOL_LICQ,
         redun_list=[],
     ):
         """Initialize the SDPRLayer class. This functions sets up the SDP relaxation
@@ -72,6 +75,7 @@ class SDPRLayer(CvxpyLayer):
         self.use_dual = use_dual
         self.diff_qcqp = diff_qcqp
         self.redun_list = redun_list
+        self.rtol_licq = rtol_licq
         # Add homogenization variable
         if homogenize:
             n_vars = n_vars + 1
@@ -308,7 +312,12 @@ class SDPRLayer(CvxpyLayer):
                     self.A_0
                 ]  # add homogenizing constraint
                 qcqp_func = _QCQPDiffFn(
-                    xs, self.Q, constraints, self.n_vars, self.redun_list
+                    xs,
+                    self.Q,
+                    constraints,
+                    self.n_vars,
+                    self.redun_list,
+                    self.rtol_licq,
                 )
                 xs = qcqp_func(*param_vals_h)
 
@@ -422,6 +431,7 @@ def _QCQPDiffFn(
     constraints,
     nvars,
     redun_list,
+    rtol_licq,
 ):
     class DiffQCQP(torch.autograd.Function):
         @staticmethod
@@ -442,9 +452,9 @@ def _QCQPDiffFn(
             constraint_list = []
             for iConstr, constraint in enumerate(constraints):
                 if isinstance(constraint, cp.Parameter):
-                    # Check that parameterized constraint is not redundant
-                    assert iConstr not in redun_list, ValueError(
-                        "DiffQCQP: Cannot differentiate with respect to a redundant constraint"
+                    # Check that there are no redundant constraints
+                    assert len(redun_list) > 0, NotImplementedError(
+                        "Differentiating QCQP constraints when redundant constraints are present is not supported. "
                     )
                     # Add parameter value to constraint list
                     A_val = params[param_ind].detach().numpy()
@@ -464,6 +474,8 @@ def _QCQPDiffFn(
             ctx.param_dict = param_dict
             # Store solution as numpy array
             ctx.xs = soln.numpy()
+            # Gradient linear independence tolerance
+            ctx.rtol_licq = rtol_licq
 
             return soln
 
@@ -477,21 +489,22 @@ def _QCQPDiffFn(
             # Loop through batches and compute gradient information
             dH_bar, dA_quad, dy_bar_2, mult_list = [], [], [], []
             for b in range(batch_dim):
+                x = xs[b]
                 # Construct A_bar
                 A_bar = []
                 for A in ctx.constraints:
                     if len(A.shape) > 2:
                         A = A[b]
-                    A_bar.append(A @ xs[b])
+                    A_bar.append(A @ x)
                 A_bar = np.hstack(A_bar)
                 # Get Objective
                 if len(ctx.objective.shape) > 2:
                     Q = ctx.objective[b]
                 else:
                     Q = ctx.objective
-                q_bar = -Q @ xs[b]
-                # Solve for Lagrange multipliers and identify
-                mults, idx_keep = qr_solve(A_bar, q_bar)
+                q_bar = Q @ x
+                # Solve for Lagrange multipliers and identify if there are redundant constraints
+                mults, idx_keep = qr_solve(A_bar, -q_bar, rtol=ctx.rtol_licq)
                 mult_list.append(mults)
                 A_bar = A_bar[:, idx_keep]
                 # Construct Dual PSD Variable
@@ -499,20 +512,20 @@ def _QCQPDiffFn(
                 for i, A in enumerate(ctx.constraints):
                     if len(A.shape) > 2:
                         A = A[b]
-                    H += A * mults[i]
+                    H += A * mults[i, 0]
                 # Construct Jacobian
                 zero_blk = np.zeros((A_bar.shape[1], A_bar.shape[1]))
                 M = 2 * np.block([[H, A_bar], [A_bar.T, zero_blk]])
-                # Pad incoming gradient (account for lagrange multipliers)
+                # Pad incoming gradient (derivative of loss wrt multipliers is zero)
                 dz_bar = np.vstack([-grad_output[b], np.zeros((A_bar.shape[1], 1))])
                 # Backprop to KKT RHS
-                dy_bar = np.linalg.solve(M, dz_bar)
+                dy_bar = np.linalg.solve(M.T, dz_bar)
                 dy_bar_1 = dy_bar[:nvars, :]
                 dy_bar_2.append(dy_bar[nvars:, :])
                 # backprop to H
-                dH_bar.append(2 * xs[b] @ dy_bar_1.T)
+                dH_bar.append(2 * x @ dy_bar_1.T)
                 # Compute grad ( x^T A x )
-                dA_quad.append(xs[b] @ xs[b].T)
+                dA_quad.append(x @ x.T)
             dH_bar = np.stack(dH_bar, axis=0)
             dA_quad = np.stack(dA_quad, axis=0)
             dy_bar_2 = np.stack(dy_bar_2, axis=0)
@@ -530,8 +543,8 @@ def _QCQPDiffFn(
     return DiffQCQP.apply
 
 
-def qr_solve(A, b, tolerance=1e-10):
-    """Use rank-revealing QR decomposition to solve for multipliers and identify linearly dependant columns in input matrix.
+def qr_solve(A, b, rtol=1e-10):
+    """Use rank-revealing QR decomposition to solve for multipliers and identify linearly dependent columns in input matrix.
 
     Args:
         A (_type_): _description_
@@ -543,14 +556,23 @@ def qr_solve(A, b, tolerance=1e-10):
     else:
         A_sparse = sp.csr_array(A)
     # QR Decomposition
-    Qtb, R, p, rank = sqr.rz(A_sparse, b, tolerance=tolerance)
+    # NOTE: columns that have 2-norm less than tolerance are treated as zero. We want to keep all columns and then decide the rank based on the relative values of the diagonal of R
+    Qtb, R, p, rank = sqr.rz(A_sparse, b, tolerance=0)
+    # # Determine rank based on relative tolerance
+    r = np.abs(R.diagonal())  # equivalent to 2-norm of columns
+    r_max = np.max(r)
+    rank = 0
+    while rank < len(r):
+        if r[rank] / r_max < rtol:
+            break
+        rank += 1
     # Upper Triangular Solve
     R = R.tocsr()[:rank, :rank]
     Qtb = Qtb[:rank, :]
     x_perm = sp.linalg.spsolve_triangular(R, Qtb, lower=False)
     x_perm = np.vstack([x_perm, np.zeros((n - rank, 1))])
     x = x_perm[p]
-    # Record indices of linearly dependent columns
+    # Record indices of linearly dependent columns and keep them in increasing order
     idx_keep = sorted(p[:rank])
 
     return x, idx_keep

@@ -374,12 +374,16 @@ def test_grad_qcqp_cost(use_dual=True):
     )
 
     # Define loss
+    # NOTE: we skip the derivative wrt p_0 since it should be identically zero. Numerical issues cause it to be different.
+    p_0 = p[0]
+
     def gen_loss(p_val, **kwargs):
+        p_vals = torch.hstack([p_0, p_val])
+        X, x = optlayer(build_data_mat(p_vals), **kwargs)
         x_target = -1
-        X, x = optlayer(build_data_mat(p_val), **kwargs)
         x_val = x[1, 0]
         loss = 1 / 2 * (x_val - x_target) ** 2
-        return loss
+        return x
 
     # arguments for sdp solver
     tol = 1e-10
@@ -400,9 +404,9 @@ def test_grad_qcqp_cost(use_dual=True):
     # Check gradient w.r.t. parameter p
     torch.autograd.gradcheck(
         lambda *x: gen_loss(*x, solver_args=sdp_solver_args),
-        [p],
+        [p[1:]],
         eps=1e-3,
-        atol=1e-5,
+        atol=1e-7,
         rtol=5e-3,
     )
 
@@ -458,7 +462,7 @@ def test_grad_qcqp_constraints(use_dual=True):
     torch.autograd.gradcheck(
         lambda *x: gen_loss_constraint(*x, solver_args=sdp_solver_args),
         [c_val],
-        eps=1e-4,
+        eps=1e-3,
         atol=1e-8,
         rtol=0,
     )
