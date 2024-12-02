@@ -395,5 +395,5 @@ if __name__ == "__main__":
     # test_prob_sdp()
     # test_grad_num()
     # test_grad_local()
-    # test_grad_qcqp_constraints()
-    test_grad_qcqp_cost()
+    test_grad_qcqp_constraints()
+    # test_grad_qcqp_cost()

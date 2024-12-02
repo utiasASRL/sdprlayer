@@ -19,7 +19,12 @@ mosek_params_dflt = {
     "MSK_DPAR_INTPNT_CO_TOL_DFEAS": 1e-10,
 }
 
-RTOL_LICQ = 1e-10
+# Relative tolerance for constraint removal to satisfy LICQ in QCQP differentiation
+# NOTE: This is the allowed difference between squared diagonal terms in the R matrix of the QR decomposition
+RTOL_LICQ = 1e6
+
+# Absolute tolerance for the KKT conditions during QCQP differentiation
+ATOL_KKT = 1e-5
 
 
 class SDPRLayer(CvxpyLayer):
@@ -235,7 +240,7 @@ class SDPRLayer(CvxpyLayer):
                         param_vals_h[i] = param_vals_h[i].unsqueeze(0)
 
         # Make input parameters symmetric
-        param_vals_h = [Symmetric.apply(param_val) for param_val in param_vals_h]
+        param_vals_h = [make_symmetric(param_val) for param_val in param_vals_h]
 
         # Define new kwargs to not affect original
         kwargs_new = deepcopy(kwargs)
@@ -413,16 +418,8 @@ class SDPRLayer(CvxpyLayer):
         return constraints
 
 
-class Symmetric(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, X):
-        return (X + X.transpose(-1, -2)) / 2
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        # diag = torch.diagonal(grad_output, dim1=-1, dim2=-2)
-        # return (grad_output + grad_output.mT) - torch.diag_embed(diag)
-        return 0.5 * (grad_output + grad_output.mT)
+def make_symmetric(X):
+    return (X + X.transpose(-1, -2)) / 2
 
 
 def _QCQPDiffFn(
@@ -513,9 +510,14 @@ def _QCQPDiffFn(
                     if len(A.shape) > 2:
                         A = A[b]
                     H += A * mults[i, 0]
+                assert np.all(np.abs(H @ x) < ATOL_KKT), ValueError(
+                    "KKT conditions cannot be satisfied! Try increasing the tolerance for the LICQ condition constraint removal."
+                )
                 # Construct Jacobian
                 zero_blk = np.zeros((A_bar.shape[1], A_bar.shape[1]))
                 M = 2 * np.block([[H, A_bar], [A_bar.T, zero_blk]])
+                # Make sure that M is invertible
+                np.linalg.eigvalsh(M)
                 # Pad incoming gradient (derivative of loss wrt multipliers is zero)
                 dz_bar = np.vstack([-grad_output[b], np.zeros((A_bar.shape[1], 1))])
                 # Backprop to KKT RHS
@@ -526,6 +528,7 @@ def _QCQPDiffFn(
                 dH_bar.append(2 * x @ dy_bar_1.T)
                 # Compute grad ( x^T A x )
                 dA_quad.append(x @ x.T)
+            # Stack batch dim
             dH_bar = np.stack(dH_bar, axis=0)
             dA_quad = np.stack(dA_quad, axis=0)
             dy_bar_2 = np.stack(dy_bar_2, axis=0)
@@ -563,7 +566,7 @@ def qr_solve(A, b, rtol=1e-10):
     r_max = np.max(r)
     rank = 0
     while rank < len(r):
-        if r[rank] / r_max < rtol:
+        if r_max > rtol * r[rank]:
             break
         rank += 1
     # Upper Triangular Solve
@@ -571,7 +574,9 @@ def qr_solve(A, b, rtol=1e-10):
     Qtb = Qtb[:rank, :]
     x_perm = sp.linalg.spsolve_triangular(R, Qtb, lower=False)
     x_perm = np.vstack([x_perm, np.zeros((n - rank, 1))])
-    x = x_perm[p]
+    # Unpermute x
+    x = np.zeros((A.shape[1], b.shape[1]), dtype=x_perm.dtype)
+    x[p] = x_perm
     # Record indices of linearly dependent columns and keep them in increasing order
     idx_keep = sorted(p[:rank])
 

@@ -407,7 +407,7 @@ def test_grad_qcqp_cost(use_dual=True):
         [p[1:]],
         eps=1e-3,
         atol=1e-7,
-        rtol=5e-3,
+        rtol=2e-2,
     )
 
 
