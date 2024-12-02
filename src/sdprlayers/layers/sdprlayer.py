@@ -505,11 +505,12 @@ def _QCQPDiffFn(
                 mult_list.append(mults)
                 A_bar = A_bar[:, idx_keep]
                 # Construct Dual PSD Variable
-                H = Q.copy()
+                H_list = [sp.csc_array(Q)]
                 for i, A in enumerate(ctx.constraints):
                     if len(A.shape) > 2:
                         A = A[b]
-                    H += A * mults[i, 0]
+                    H_list.append(A * mults[i, 0])
+                H = sum(H_list).toarray()
                 assert np.all(np.abs(H @ x) < ATOL_KKT), ValueError(
                     "KKT conditions cannot be satisfied! Try increasing the tolerance for the LICQ condition constraint removal."
                 )
@@ -517,7 +518,10 @@ def _QCQPDiffFn(
                 zero_blk = np.zeros((A_bar.shape[1], A_bar.shape[1]))
                 M = 2 * np.block([[H, A_bar], [A_bar.T, zero_blk]])
                 # Make sure that M is invertible
-                np.linalg.eigvalsh(M)
+                m_eigs = np.abs(np.linalg.eigvalsh(M))
+                assert np.all(m_eigs > 0), ValueError(
+                    "KKT-Solution Jacobian is not invertible. The constraint gradients may be linearly dependent. Try decreasing the LICQ tolerance."
+                )
                 # Pad incoming gradient (derivative of loss wrt multipliers is zero)
                 dz_bar = np.vstack([-grad_output[b], np.zeros((A_bar.shape[1], 1))])
                 # Backprop to KKT RHS
@@ -546,7 +550,7 @@ def _QCQPDiffFn(
     return DiffQCQP.apply
 
 
-def qr_solve(A, b, rtol=1e-10):
+def qr_solve(A, b, rtol=1e-10, atol=1e-10):
     """Use rank-revealing QR decomposition to solve for multipliers and identify linearly dependent columns in input matrix.
 
     Args:
@@ -557,10 +561,10 @@ def qr_solve(A, b, rtol=1e-10):
     if sp.issparse(A):
         A_sparse = A
     else:
-        A_sparse = sp.csr_array(A)
+        A_sparse = sp.csc_array(A)
     # QR Decomposition
     # NOTE: columns that have 2-norm less than tolerance are treated as zero. We want to keep all columns and then decide the rank based on the relative values of the diagonal of R
-    Qtb, R, p, rank = sqr.rz(A_sparse, b, tolerance=0)
+    Qtb, R, p, rank = sqr.rz(A_sparse, b, tolerance=atol)
     # # Determine rank based on relative tolerance
     r = np.abs(R.diagonal())  # equivalent to 2-norm of columns
     r_max = np.max(r)

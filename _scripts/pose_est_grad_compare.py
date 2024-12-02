@@ -11,14 +11,16 @@ from sdprlayers.utils.lie_algebra import se3_exp, se3_inv, se3_log
 
 
 # Function to get point clouds and ground truth
-def get_point_clouds(n_points=30, n_batch=1, noise_std=0.0):
+def get_point_clouds(n_points=30, n_batch=1, noise_std=0.0, precision=torch.double):
     """Generate random point cloud and its transformed version. The transformation used is also randomly generated."""
     print("Generating points...")
+    # Set default torch precision
+    torch.set_default_dtype(precision)
     # Define random, homogenized points
-    points_s = 2 * torch.rand(n_batch, 3, n_points, dtype=torch.float) - 1
+    points_s = 2 * torch.rand(n_batch, 3, n_points, dtype=precision) - 1
     points_s = torch.concatenate([points_s, torch.ones((n_batch, 1, n_points))], axis=1)
     # Define random SE(3) transform
-    pert_se3 = torch.rand(n_batch, 6, dtype=torch.float)
+    pert_se3 = torch.rand(n_batch, 6, dtype=precision)
     T_t_s = se3_exp(pert_se3)
 
     # Transform points
@@ -28,7 +30,7 @@ def get_point_clouds(n_points=30, n_batch=1, noise_std=0.0):
     noise = torch.concatenate([noise, torch.zeros((n_batch, 1, n_points))], axis=1)
     points_t = points_t + noise
     # Get weights
-    weights = torch.ones((n_batch, 1, n_points))
+    weights = torch.ones((n_batch, 1, n_points), dtype=precision)
     print("...Done")
     return points_s, points_t, weights, T_t_s
 
@@ -43,6 +45,7 @@ def get_soln_and_jac(estimator, points_t, points_s, weights, T_t_s_gt, **kwargs)
     T_s_v = torch.eye(4)  # vehicle to sensor transform set to identity
     n_batch = points_t.shape[0]  # number of batches
     n_points = points_t.shape[2]  # number of points in the point cloud
+    precision = points_t.dtype  # precision of the points
     # Create estimator module
     if estimator == "svd":
         forward = SVDPoseEstimator(T_s_v=T_s_v)
@@ -82,7 +85,7 @@ def get_soln_and_jac(estimator, points_t, points_s, weights, T_t_s_gt, **kwargs)
             )
         elif estimator == "lieopt-rand":
             # Random SE3 transform
-            pert_se3 = torch.rand(n_batch, 6, dtype=torch.float)
+            pert_se3 = torch.rand(n_batch, 6, dtype=precision)
             T_t_s_init = se3_exp(pert_se3)
             kwargs.update(dict(T_trg_src_init=T_t_s_init[[b], :, :]))
 
@@ -209,6 +212,8 @@ def process_grad_data(filename="_results/grad_comp_20241202T1158.pkl"):
                 trans_err_std=np.std(trans_err),
                 rot_err_mean=np.mean(rot_err),
                 rot_err_std=np.std(rot_err),
+                time_forward=df_2["time_f"].values[0],
+                time_backward=df_2["time_b"].values[0],
             )
         )
     df_out = DataFrame(data)
@@ -244,13 +249,13 @@ if __name__ == "__main__":
     # Tests
     # test_jac_func("svd")
     # test_jac_func("sdpr")
-    test_jac_func("sdpr-qcqpdiff")
+    # test_jac_func("sdpr-qcqpdiff")
     # test_jac_func("lieopt-gt-unroll")
     # test_jac_func("lieopt-rand")
 
     # # Generate data (no noise)
-    # fname = gen_estimator_data(n_points=30, n_batch=10, noise_std=0.0)
+    # fname = gen_estimator_data(n_points=30, n_batch=100, noise_std=0.1)
     # # Post process
     # process_grad_data(filename=fname)
 
-    # process_grad_data(filename="_results/grad_comp_20241202T1452.pkl")
+    process_grad_data(filename="_results/grad_comp_20241202T1616.pkl")
