@@ -9,13 +9,13 @@ from sdprlayers.layers.sdprlayer import SDPRLayer
 from sdprlayers.utils.lie_algebra import se3_inv, se3_log
 
 
-class PoseSDPBlock(nn.Module):
+class SDPPoseEstimator(nn.Module):
     """
     Compute the relative pose between the source and target frames using
     Semidefinite Programming Relaxation (SDPR)Layer.
     """
 
-    def __init__(self, T_s_v):
+    def __init__(self, T_s_v, diff_qcqp=False):
         """
         Initialize the PoseSDPBlock class.
 
@@ -23,17 +23,24 @@ class PoseSDPBlock(nn.Module):
             T_s_v (torch.tensor): 4x4 transformation matrix providing the transform from the vehicle frame to the
                                   sensor frame.
         """
-        super(PoseSDPBlock, self).__init__()
+        super(SDPPoseEstimator, self).__init__()
 
         # Generate constraints
         constraints = (
-            self.gen_orthoganal_constraints()
+            self.gen_orthogonal_constraints()
             + self.gen_handedness_constraints()
             + self.gen_row_col_constraints()
         )
+        # Redundant constraints
+        redun_list = list(range(9, len(constraints)))
 
         # Initialize SDPRLayer
-        self.sdprlayer = SDPRLayer(n_vars=13, constraints=constraints)
+        self.sdprlayer = SDPRLayer(
+            n_vars=13,
+            constraints=constraints,
+            diff_qcqp=diff_qcqp,
+            redun_list=redun_list,
+        )
 
         self.register_buffer("T_s_v", T_s_v)
         tol = 1e-12
@@ -67,6 +74,7 @@ class PoseSDPBlock(nn.Module):
         Returns:
             T_trg_src (torch.tensor, Bx4x4): relative transform from the source to the target frame.
         """
+        device = keypoints_3D_src.device
         batch_size, _, n_points = keypoints_3D_src.size()
 
         # Construct objective function
@@ -91,8 +99,8 @@ class PoseSDPBlock(nn.Module):
         with record_function("SDPR: Run Optimization"):
             X, x = self.sdprlayer(Qs, solver_args=solver_args)
         # Extract solution
-        t_trg_src_intrg = x[:, 9:]
-        R_trg_src = torch.reshape(x[:, 0:9], (-1, 3, 3)).transpose(-1, -2)
+        t_trg_src_intrg = x[:, 10:]
+        R_trg_src = torch.reshape(x[:, 1:10], (-1, 3, 3)).transpose(-1, -2)
         t_src_trg_intrg = -t_trg_src_intrg
         # Create transformation matrix
         zeros = torch.zeros(batch_size, 1, 3).type_as(keypoints_3D_src)  # Bx1x3
@@ -102,7 +110,7 @@ class PoseSDPBlock(nn.Module):
         T_trg_src = torch.cat([rot_cols, trans_cols], dim=2)  # Bx4x4
 
         # Convert from sensor to vehicle frame
-        T_s_v = self.T_s_v.expand(batch_size, 4, 4).cuda()
+        T_s_v = self.T_s_v.expand(batch_size, 4, 4).to(device)
         T_trg_src = se3_inv(T_s_v).bmm(T_trg_src).bmm(T_s_v)
 
         return T_trg_src
@@ -135,6 +143,7 @@ class PoseSDPBlock(nn.Module):
         """
         B = keypoints_3D_src.shape[0]  # Batch dimension
         N = keypoints_3D_src.shape[2]  # Number of points
+        device = keypoints_3D_src.device  # Get device
         # Indices
         h = 0
         c = slice(1, 10)
@@ -142,14 +151,14 @@ class PoseSDPBlock(nn.Module):
         # relabel and dehomogenize
         m = keypoints_3D_src[:, :3, :]
         y = keypoints_3D_trg[:, :3, :]
-        Q_n = torch.zeros(B, N, 13, 13).cuda()
+        Q_n = torch.zeros(B, N, 13, 13).to(device)
         # world frame keypoint vector outer product
         M = torch.einsum("bin,bjn->bnij", m, m)  # BxNx3x3
         if inv_cov_weights is not None:
             W = inv_cov_weights  # BxNx3x3
         else:
             # Weight with identity if no weights are provided
-            W = torch.eye(3, 3).cuda().expand(B, N, -1, -1)
+            W = torch.eye(3, 3).to(device).expand(B, N, -1, -1)
         # diagonal elements
         Q_n[:, :, c, c] = kron(M, W)  # BxNx9x9
         Q_n[:, :, t, t] = W  # BxNx3x3
@@ -170,7 +179,7 @@ class PoseSDPBlock(nn.Module):
         # remove constant offset
         if scale_offset:
             offsets = Q[:, 0, 0].clone()
-            Q[:, 0, 0] = torch.zeros(B).cuda()
+            Q[:, 0, 0] = torch.zeros(B).to(device)
             # rescale
             scales = torch.norm(Q, p="fro")
             Q = Q / torch.norm(Q, p="fro")
@@ -178,9 +187,8 @@ class PoseSDPBlock(nn.Module):
             scales, offsets = None, None
         return Q, scales, offsets
 
-    @staticmethod
     def get_obj_matrix(
-        keypoints_3D_src, keypoints_3D_trg, weights, inv_cov_weights=None
+        self, keypoints_3D_src, keypoints_3D_trg, weights, inv_cov_weights=None
     ):
         """
         Compute the QCQP (Quadratically Constrained Quadratic Program) objective matrix
@@ -201,6 +209,8 @@ class PoseSDPBlock(nn.Module):
         Returns:
             list: A list of tensors representing the QCQP objective matrices for each batch.
         """
+        # Get device
+        device = keypoints_3D_src.device
         # Get batch dimension
         N_batch = keypoints_3D_src.shape[0]
         # Indices
@@ -208,19 +218,19 @@ class PoseSDPBlock(nn.Module):
         c = slice(1, 10)
         t = slice(10, 13)
         Q_batch = []
-        scales = torch.zeros(N_batch).cuda()
-        offsets = torch.zeros(N_batch).cuda()
+        scales = torch.zeros(N_batch).to(device)
+        offsets = torch.zeros(N_batch).to(device)
         for b in range(N_batch):
             Q_es = []
             for i in range(keypoints_3D_trg.shape[-1]):
                 if inv_cov_weights is None:
-                    W_ij = torch.eye(3).cuda()
+                    W_ij = torch.eye(3).to(device)
                 else:
                     W_ij = inv_cov_weights[b, i, :, :]
                 m_j0_0 = keypoints_3D_src[b, :3, [i]]
                 y_ji_i = keypoints_3D_trg[b, :3, [i]]
                 # Define matrix
-                Q_e = torch.zeros(13, 13).cuda()
+                Q_e = torch.zeros(13, 13).to(device)
                 # Diagonals
                 Q_e[c, c] = kron(m_j0_0 @ m_j0_0.T, W_ij)
                 Q_e[t, t] = W_ij
@@ -250,7 +260,7 @@ class PoseSDPBlock(nn.Module):
         return torch.stack(Q_batch), scales, offsets
 
     @staticmethod
-    def gen_orthoganal_constraints():
+    def gen_orthogonal_constraints():
         """Generate 6 orthongonality constraints for rotation matrices"""
         # labels
         h = "h"

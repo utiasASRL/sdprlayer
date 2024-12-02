@@ -5,12 +5,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from sdprlayers import PoseSDPBlock
-from sdprlayers import stereo_tuner as st
+from sdprlayers import LieOptPoseEstimator, SDPPoseEstimator, SVDPoseEstimator
 from sdprlayers.utils.keypoint_tools import get_inv_cov_weights
 from sdprlayers.utils.lie_algebra import se3_exp, se3_inv, se3_log
 from sdprlayers.utils.plot_tools import plot_ellipsoid
 from sdprlayers.utils.stereo_camera_model import StereoCameraModel
+from sdprlayers.utils.stereo_tuner import get_gt_setup
 
 matplotlib.use("TkAgg")
 
@@ -29,19 +29,9 @@ class TestLocalize(unittest.TestCase):
         t.device = "cuda:0"
         # Set seed
         set_seed(0)
-        # Define camera
-        camera = st.StereoCamera(
-            f_u=484.5,
-            f_v=484.5,
-            c_u=0.0,
-            c_v=0.0,
-            b=0.24,
-            sigma_u=0.0,
-            sigma_v=0.0,
-        )
         batch_size = 1
         # Set up test problem
-        r_v0s, C_v0s, r_ls = st.get_gt_setup(
+        r_v0s, C_v0s, r_ls = get_gt_setup(
             N_map=50, N_batch=batch_size, traj_type="circle"
         )
         r_v0s = torch.tensor(r_v0s)
@@ -86,12 +76,24 @@ class TestLocalize(unittest.TestCase):
         t.stereo_cam = stereo_cam
         t.T_s_v = T_s_v.cuda()
 
+    def test_svd_forward(t):
+        """Test that the SVD Block properly estimates the target transformation"""
+
+        # Instantiate
+        svd_block = SVDPoseEstimator(t.T_s_v)
+        # Run forward with data
+
+        T_trg_src = svd_block(t.keypoints_3D_src, t.keypoints_3D_trg, t.weights)
+        # Check that
+        diff = se3_log(se3_inv(T_trg_src.cpu()).bmm(t.T_trg_src)).numpy()
+        np.testing.assert_allclose(diff, np.zeros((1, 6)), atol=1e-12)
+
     def test_sdpr_forward(t):
         """Test that the sdpr localization properly estimates the target
         transformation"""
 
         # Instantiate
-        sdpr_block = PoseSDPBlock(t.T_s_v)
+        sdpr_block = SDPPoseEstimator(t.T_s_v)
         T_trg_src = sdpr_block(
             t.keypoints_3D_src, t.keypoints_3D_trg, t.weights, verbose=True
         )
@@ -108,7 +110,7 @@ class TestLocalize(unittest.TestCase):
             t.keypoints_3D_trg, valid, t.stereo_cam
         )
         # Instantiate
-        sdpr_block = PoseSDPBlock(t.T_s_v)
+        sdpr_block = SDPPoseEstimator(t.T_s_v)
         Q, scales, offsets = sdpr_block.get_obj_matrix(
             t.keypoints_3D_src, t.keypoints_3D_trg, t.weights, inv_cov_weights
         )
@@ -128,7 +130,7 @@ class TestLocalize(unittest.TestCase):
         )
 
         # Instantiate
-        sdpr_block = PoseSDPBlock(t.T_s_v)
+        sdpr_block = SDPPoseEstimator(t.T_s_v)
         T_trg_src = sdpr_block(
             t.keypoints_3D_src,
             t.keypoints_3D_trg,
@@ -139,6 +141,114 @@ class TestLocalize(unittest.TestCase):
 
         diff = se3_log(se3_inv(T_trg_src.cpu()).bmm(t.T_trg_src)).numpy()
         np.testing.assert_allclose(diff, np.zeros((1, 6)), atol=1e-6)
+
+    def test_grad_Q(self):
+        # Get matrix weights - assuming 0.5 pixel std dev
+        valid = t.weights > 0
+        inv_cov_weights, cov = get_inv_cov_weights(
+            t.keypoints_3D_trg, valid, t.stereo_cam
+        )
+        # Instantiate
+        sdpr_block = SDPPoseEstimator(t.T_s_v)
+
+        Q, _, _ = sdpr_block.get_obj_matrix_vec(
+            t.keypoints_3D_src, t.keypoints_3D_trg, t.weights, inv_cov_weights
+        )
+        Q.requires_grad_(True)
+
+        tol = 1e-12
+        mosek_params = {
+            "MSK_IPAR_INTPNT_MAX_ITERATIONS": 1000,
+            "MSK_DPAR_INTPNT_CO_TOL_PFEAS": tol,
+            "MSK_DPAR_INTPNT_CO_TOL_REL_GAP": tol,
+            "MSK_DPAR_INTPNT_CO_TOL_MU_RED": tol * 1e-2,
+            "MSK_DPAR_INTPNT_CO_TOL_INFEAS": tol,
+            "MSK_DPAR_INTPNT_CO_TOL_DFEAS": tol,
+        }
+
+        solver_args = {
+            "solve_method": "mosek",
+            "mosek_params": mosek_params,
+            "verbose": True,
+        }
+
+        def forward_mat(Q_mat):
+            X, x = sdpr_block.sdprlayer(Q_mat, solver_args=solver_args)
+            return x
+
+        torch.autograd.gradcheck(
+            func=forward_mat, eps=1e-5, atol=1e-10, rtol=1e-2, inputs=[Q]
+        )
+
+    def test_lieopt_forward(t):
+        """Test that the local localization properly estimates the target
+        transformation"""
+
+        # Instantiate
+        lie_block = LieOptPoseEstimator(t.T_s_v, 1, 50)
+        # lie_block.to(t.device)
+        lie_block.cuda()
+        # Run with ground truth initialization
+        T_trg_src = lie_block(
+            t.keypoints_3D_src, t.keypoints_3D_trg, t.weights, t.T_trg_src.cuda()
+        )
+        # Check that the difference is small
+        diff = se3_log(se3_inv(T_trg_src.cpu()).bmm(t.T_trg_src)).numpy()
+        np.testing.assert_allclose(diff, np.zeros((1, 6)), atol=1e-8)
+
+        # Define perturbation
+        pert = 0.1
+        xi_pert = torch.tensor([[pert, pert, pert, pert, pert, pert]])
+        T_pert = se3_exp(xi_pert)
+        T_init = T_pert.bmm(t.T_trg_src)
+        # Run with perturbed starting point
+        T_trg_src = lie_block(
+            t.keypoints_3D_src, t.keypoints_3D_trg, t.weights, T_init.cuda()
+        )
+        # Check that the difference is small
+        diff = se3_log(se3_inv(T_trg_src.cpu()).bmm(t.T_trg_src)).numpy()
+        np.testing.assert_allclose(diff, np.zeros((1, 6)), atol=1e-10)
+
+    def test_lieopt_mat_weight_forward(t):
+        """Test that the lie algebra localization properly estimates the target
+        transformation. Use matrix weights."""
+        # Get matrix weights - assuming 0.5 pixel std dev
+        valid = t.weights > 0
+        inv_cov_weights, cov = get_inv_cov_weights(
+            t.keypoints_3D_trg, valid, t.stereo_cam
+        )
+
+        # Instantiate
+        lie_block = LieOptPoseEstimator(t.T_s_v, 1, 50)
+        lie_block.to(t.device)
+        # Test with ground truth initialization
+        T_trg_src = lie_block(
+            t.keypoints_3D_src,
+            t.keypoints_3D_trg,
+            t.weights,
+            t.T_trg_src.cuda(),
+            inv_cov_weights,
+            verbose=True,
+        )
+        diff = se3_log(se3_inv(T_trg_src.cpu()).bmm(t.T_trg_src)).numpy()
+        np.testing.assert_allclose(diff, np.zeros((1, 6)), atol=1e-7)
+        # Define perturbation
+        pert = 0.5
+        xi_pert = torch.tensor([[pert, pert, pert, pert, pert, pert]])
+        T_pert = se3_exp(xi_pert)
+        T_init = T_pert.bmm(t.T_trg_src)
+        # Test with perturbed starting point
+        T_trg_src = lie_block(
+            t.keypoints_3D_src,
+            t.keypoints_3D_trg,
+            t.weights,
+            T_init.cuda(),
+            inv_cov_weights,
+            verbose=True,
+        )
+        # Check that the difference is small
+        diff = se3_log(se3_inv(T_trg_src.cpu()).bmm(t.T_trg_src)).numpy()
+        np.testing.assert_allclose(diff, np.zeros((1, 6)), atol=1e-8)
 
     def test_inv_cov_numerical(t, plot=False):
         N_pts = 1000
@@ -232,6 +342,10 @@ if __name__ == "__main__":
     t = TestLocalize()
     # t.test_sdpr_mat_weight_forward()
     # t.test_sdpr_mat_weight_cost()
-    t.test_sdpr_forward()
+    # t.test_sdpr_forward()
     # t.test_inv_cov_weights()
     # t.test_inv_cov_numerical(plot=True)
+    # t.test_svd_forward()
+    # t.test_lieopt_forward()
+    # t.test_lieopt_mat_weight_forward()
+    t.test_grad_Q()

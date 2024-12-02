@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.profiler import record_function
 
-from src.utils.stereo_camera_model import StereoCameraModel
+from sdprlayers.utils.stereo_camera_model import StereoCameraModel
 
 """
 Original source code: git@github.com:utiasASRL/deep_learned_visual_features.git
