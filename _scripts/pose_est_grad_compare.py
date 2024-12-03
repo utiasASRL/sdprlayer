@@ -9,6 +9,17 @@ from tqdm import tqdm
 from sdprlayers import LieOptPoseEstimator, SDPPoseEstimator, SVDPoseEstimator
 from sdprlayers.utils.lie_algebra import se3_exp, se3_inv, se3_log
 
+# List of estimators
+estimator_list = [
+    "svd",
+    "sdpr",
+    "sdpr-qcqpdiff",
+    "sdpr-qcqpdiff-reuse",
+    "lieopt-gt",
+    "lieopt-gt-unroll",
+    "lieopt-rand",
+]
+
 
 # Function to get point clouds and ground truth
 def get_point_clouds(n_points=30, n_batch=1, noise_std=0.0, precision=torch.double):
@@ -53,6 +64,8 @@ def get_soln_and_jac(estimator, points_t, points_s, weights, T_t_s_gt, **kwargs)
         forward = SDPPoseEstimator(T_s_v=T_s_v, diff_qcqp=False)
     elif estimator == "sdpr-qcqpdiff":
         forward = SDPPoseEstimator(T_s_v=T_s_v, diff_qcqp=True)
+    elif estimator == "sdpr-qcqpdiff-reuse":
+        forward = SDPPoseEstimator(T_s_v=T_s_v, diff_qcqp=True, resolve_kkt=False)
     elif estimator in ["lieopt-gt", "lieopt-gt-unroll", "lieopt-rand"]:
         forward = LieOptPoseEstimator(T_s_v=T_s_v, N_batch=1, N_map=n_points)
     elif estimator == "lieopt-rand":
@@ -132,18 +145,9 @@ def gen_estimator_data(n_points=30, n_batch=1, noise_std=0.0):
     points_s, points_t, weights, T_t_s_gt = get_point_clouds(
         n_points=n_points, n_batch=n_batch, noise_std=noise_std
     )
-    # define estimators
-    estimators = [
-        "svd",
-        "sdpr",
-        "sdpr-qcqpdiff",
-        "lieopt-gt",
-        "lieopt-gt-unroll",
-        "lieopt-rand",
-    ]
 
     data_dicts = []
-    for iEst, estimator in enumerate(estimators):
+    for iEst, estimator in enumerate(estimator_list):
         T_t_s_est, jacobians, time_f, time_b = get_soln_and_jac(
             estimator, points_t, points_s, weights, T_t_s_gt
         )
@@ -225,14 +229,7 @@ def test_jac_func(estimator="lieopt-rand", n_points=30, n_batch=2, noise_std=0.0
     points_s, points_t, weights, T_t_s_gt = get_point_clouds(
         n_points=n_points, n_batch=n_batch, noise_std=noise_std
     )
-    assert estimator in [
-        "svd",
-        "sdpr",
-        "sdpr-qcqpdiff",
-        "lieopt-gt",
-        "lieopt-gt-unroll",
-        "lieopt-rand",
-    ], ValueError("Estimator not recognized")
+    assert estimator in estimator_list, ValueError("Estimator not recognized")
     # Test estimator
     T_t_s, jacobians, time_f, time_b = get_soln_and_jac(
         estimator, points_t, points_s, weights, T_t_s_gt=T_t_s_gt
@@ -249,7 +246,8 @@ if __name__ == "__main__":
     # Tests
     # test_jac_func("svd")
     # test_jac_func("sdpr")
-    # test_jac_func("sdpr-qcqpdiff")
+    # test_jac_func("sdpr-qcqpdiff", noise_std=0.5)
+    test_jac_func("sdpr-qcqpdiff-reuse", n_batch=50)
     # test_jac_func("lieopt-gt-unroll")
     # test_jac_func("lieopt-rand")
 
@@ -258,4 +256,4 @@ if __name__ == "__main__":
     # # Post process
     # process_grad_data(filename=fname)
 
-    process_grad_data(filename="_results/grad_comp_20241202T1616.pkl")
+    # process_grad_data(filename="_results/grad_comp_20241202T1616.pkl")

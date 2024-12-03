@@ -15,7 +15,7 @@ class SDPPoseEstimator(nn.Module):
     Semidefinite Programming Relaxation (SDPR)Layer.
     """
 
-    def __init__(self, T_s_v, diff_qcqp=False):
+    def __init__(self, T_s_v, diff_qcqp=False, resolve_kkt=True):
         """
         Initialize the PoseSDPBlock class.
 
@@ -40,6 +40,7 @@ class SDPPoseEstimator(nn.Module):
             constraints=constraints,
             diff_qcqp=diff_qcqp,
             redun_list=redun_list,
+            resolve_kkt=resolve_kkt,
         )
 
         self.register_buffer("T_s_v", T_s_v)
