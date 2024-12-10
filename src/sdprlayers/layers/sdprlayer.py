@@ -43,7 +43,7 @@ class SDPRLayer(CvxpyLayer):
         homogenize=False,
         use_dual=True,
         diff_qcqp=True,
-        resolve_kkt=True,
+        resolve_kkt=False,
         rtol_licq=RTOL_LICQ,
         redun_list=[],
     ):
@@ -307,7 +307,7 @@ class SDPRLayer(CvxpyLayer):
             Xs = soln[0][0]
             # Extract solutions
             xs = self.recovery_map(Xs)
-            mults = soln[1]  # Lagrange multipliers
+            mults = [-mult for mult in soln[1]]  # Lagrange multipliers
             if self.use_dual:
                 hs = soln[3]
             else:
@@ -474,10 +474,6 @@ def _QCQPDiffFn(
             constraint_list = []
             for iConstr, constraint in enumerate(constraints):
                 if isinstance(constraint, cp.Parameter):
-                    # Check that there are no redundant constraints
-                    assert len(redun_list) > 0, NotImplementedError(
-                        "Differentiating QCQP constraints when redundant constraints are present is not supported. "
-                    )
                     # Add parameter value to constraint list
                     A_val = params[param_ind].detach().numpy()
                     constraint_list.append(A_val)
@@ -516,12 +512,12 @@ def _QCQPDiffFn(
             for b in range(batch_dim):
                 x = xs[b]
                 # Construct A_bar
-                A_bar = []
+                grad_g = []
                 for A in ctx.constraints:
                     if len(A.shape) > 2:
                         A = A[b]
-                    A_bar.append(A @ x)
-                A_bar = np.hstack(A_bar)
+                    grad_g.append(A @ x)
+                grad_g = np.hstack(grad_g)
                 if ctx.resolve_kkt:
                     # Get Objective
                     if len(ctx.objective.shape) > 2:
@@ -530,9 +526,9 @@ def _QCQPDiffFn(
                         Q = ctx.objective
                     q_bar = Q @ x
                     # Solve for Lagrange multipliers and identify if there are redundant constraints
-                    mults, idx_keep = qr_solve(A_bar, -q_bar, rtol=ctx.rtol_licq)
+                    mults, idx_keep = qr_solve(grad_g, -q_bar, rtol=ctx.rtol_licq)
                     mult_list.append(mults)
-                    A_bar_ind = A_bar[:, idx_keep]
+                    grad_g_ind = grad_g[:, idx_keep]
                     # Construct Dual PSD Variable
                     H_list = [sp.csc_array(Q)]
                     for i, A in enumerate(ctx.constraints):
@@ -544,8 +540,8 @@ def _QCQPDiffFn(
                         "KKT conditions cannot be satisfied! Try increasing the tolerance for the LICQ condition constraint removal."
                     )
                     # Construct Jacobian
-                    zero_blk = np.zeros((A_bar_ind.shape[1], A_bar_ind.shape[1]))
-                    M = 2 * np.block([[H, A_bar_ind], [A_bar_ind.T, zero_blk]])
+                    zero_blk = np.zeros((grad_g_ind.shape[1], grad_g_ind.shape[1]))
+                    M = 2 * np.block([[H, grad_g_ind], [grad_g_ind.T, zero_blk]])
                     # Make sure that M is invertible
                     m_eigs = np.abs(np.linalg.eigvalsh(M))
                     assert np.all(m_eigs > 0), ValueError(
@@ -553,23 +549,22 @@ def _QCQPDiffFn(
                     )
                     # Pad incoming gradient (derivative of loss wrt multipliers is zero)
                     dz_bar = np.vstack(
-                        [-grad_output[b], np.zeros((A_bar_ind.shape[1], 1))]
+                        [-grad_output[b], np.zeros((grad_g_ind.shape[1], 1))]
                     )
                     # Backprop to KKT RHS
                     dy_bar = np.linalg.solve(M.T, dz_bar)
                 else:
                     # Get certificate
                     H = Hs[b]
-                    # Get linear independant constraint gradients
-                    _, idx_keep = qr_solve(A_bar, None, rtol=ctx.rtol_licq)
-                    A_bar_ind = A_bar[:, idx_keep]
                     # Construct Jacobian
-                    zero_blk = np.zeros((A_bar_ind.shape[1], A_bar.shape[1]))
-                    M = 2 * np.block([[H, A_bar], [A_bar_ind.T, zero_blk]])
+                    zero_blk = np.zeros((grad_g.shape[1], grad_g.shape[1]))
+                    M = 2 * np.block([[H, grad_g], [grad_g.T, zero_blk]])
                     # Pad incoming gradient (derivative of loss wrt multipliers is zero)
-                    dz_bar = np.vstack([-grad_output[b], np.zeros((A_bar.shape[1], 1))])
+                    dz_bar = np.vstack(
+                        [-grad_output[b], np.zeros((grad_g.shape[1], 1))]
+                    )
                     # Backprop to KKT RHS
-                    dy_bar, _ = qr_solve(M.T, dz_bar)
+                    dy_bar, keep_inds = qr_solve(M.T, dz_bar, rtol=ctx.rtol_licq)
                 dy_bar_1 = dy_bar[:nvars, :]
                 dy_bar_2.append(dy_bar[nvars:, :])
                 # backprop to H

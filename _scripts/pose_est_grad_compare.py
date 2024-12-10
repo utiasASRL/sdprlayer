@@ -181,11 +181,9 @@ def process_grad_data(filename="_results/grad_comp_20241202T1158.pkl"):
     # get values for the SVD solution
     df_svd = df[df["estimator"] == "svd"]
     iInput = 0
-    err_svd = df_svd["xi_err"].values[0]
     jacs_svd = torch.stack(
         [jacs[iInput] for jacs in df_svd["jacobians"].values[0]]
     ).numpy()
-    jacs_norm_svd = np.sqrt(np.einsum("bij,bij->b", jacs_svd, jacs_svd))
 
     # Loop through other solutions and compare with svd solution
     estimators = df.estimator.to_list()
@@ -201,17 +199,12 @@ def process_grad_data(filename="_results/grad_comp_20241202T1158.pkl"):
             [jacs[iInput] for jacs in df_2["jacobians"].values[0]]
         ).numpy()
         # Compare Jacobians
-        jac_norms = np.sqrt(np.einsum("bij,bij->b", jacs, jacs))
-        dot_prods = np.einsum("bij,bij->b", jacs_svd, jacs)
-        cos_dist = dot_prods / jac_norms / jacs_norm_svd - 1
-        mag_dist = jac_norms / jacs_norm_svd - 1
+        jac_diff = np.max(np.abs(jacs - jacs_svd), axis=(1, 2))
         data.append(
             dict(
                 estimator=estimator,
-                cos_dist_mean=np.mean(cos_dist),
-                cos_dist_std=np.std(cos_dist),
-                mag_dist_mean=np.mean(mag_dist),
-                mag_dist_std=np.std(mag_dist),
+                jac_diff_mean=np.mean(jac_diff),
+                jac_diff_std=np.std(jac_diff),
                 trans_err_mean=np.mean(trans_err),
                 trans_err_std=np.std(trans_err),
                 rot_err_mean=np.mean(rot_err),

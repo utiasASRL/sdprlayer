@@ -293,7 +293,11 @@ def test_grad_qcqp_cost(use_dual=True):
     p = torch.tensor(data["p_vals"], requires_grad=True)
     # Create SDPR Layer
     optlayer = SDPRLayer(
-        n_vars=3, constraints=constraints, use_dual=use_dual, diff_qcqp=True
+        n_vars=3,
+        constraints=constraints,
+        use_dual=use_dual,
+        diff_qcqp=True,
+        resolve_kkt=False,
     )
 
     # Define loss
@@ -306,10 +310,10 @@ def test_grad_qcqp_cost(use_dual=True):
         x_target = -1
         x_val = x[1, 0]
         loss = 1 / 2 * (x_val - x_target) ** 2
-        return x
+        return x[1:]
 
     # arguments for sdp solver
-    tol = 1e-10
+    tol = 1e-12
     mosek_params = {
         "MSK_IPAR_INTPNT_MAX_ITERATIONS": 500,
         "MSK_DPAR_INTPNT_CO_TOL_PFEAS": tol,
@@ -329,8 +333,8 @@ def test_grad_qcqp_cost(use_dual=True):
         lambda *x: gen_loss(*x, solver_args=sdp_solver_args),
         [p[1:]],
         eps=1e-4,
-        atol=1e-7,
-        rtol=1e-2,
+        atol=1e-10,
+        rtol=5e-3,
     )
 
 
@@ -354,7 +358,7 @@ def test_grad_qcqp_constraints(use_dual=True):
         constraints=constraints,
         use_dual=use_dual,
         diff_qcqp=True,
-        redun_list=[2],
+        resolve_kkt=False,
     )
 
     def gen_loss_constraint(constraint, **kwargs):
@@ -385,7 +389,7 @@ def test_grad_qcqp_constraints(use_dual=True):
     torch.autograd.gradcheck(
         lambda *x: gen_loss_constraint(*x, solver_args=sdp_solver_args),
         [c_val],
-        eps=1e-6,
+        eps=1e-3,
         atol=1e-10,
         rtol=1e-2,
     )
