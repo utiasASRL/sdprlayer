@@ -7,8 +7,8 @@ import scipy.sparse as sp
 import torch
 from pandas import DataFrame, read_pickle
 
-from sdprlayer import PolyMinLayer, SDPRLayer, polyval
-from sdprlayer.plot_tools import savefig
+from sdprlayers import PolyMinLayer, SDPRLayer, polyval
+from sdprlayers.utils.plot_tools import savefig
 
 torch.set_default_dtype(torch.float64)
 
@@ -58,10 +58,18 @@ class Poly6Example:
         return dict(p_vals=p_vals, constraints=constraints, x_cand=x_cand)
 
     def tune_poly_sdpr(
-        self, x_min_targ=-1.0, p_val_targ=5, max_iter=2000, lr=1e-3, verbose=False
+        self,
+        x_min_targ=-1.0,
+        p_val_targ=5,
+        max_iter=2000,
+        lr=1e-3,
+        verbose=False,
+        diff_qcqp=True,
     ):
         # Create SDPR Layer
-        optlayer = SDPRLayer(n_vars=4, constraints=self.constraints)
+        optlayer = SDPRLayer(
+            n_vars=4, constraints=self.constraints, use_dual=False, diff_qcqp=diff_qcqp
+        )
 
         # Set up polynomial parameter tensor
         p = torch.tensor(self.p_vals, requires_grad=True)
@@ -70,9 +78,13 @@ class Poly6Example:
         def gen_loss(poly, **kwargs):
             sdp_solver_args = {"eps": 1e-9}
             sol, x = optlayer(build_data_mat(poly), solver_args=sdp_solver_args)
-            x_min = (sol[1, 0] + sol[0, 1]) / 2
+            if diff_qcqp:
+                x_min = x[1, 0]
+            else:
+                x_min = (sol[1, 0] + sol[0, 1]) / 2
             loss = 1 / 2 * (x_min - x_min_targ) ** 2
             loss += 1 / 2 * (polyval(poly, x_min) - p_val_targ) ** 2
+
             return loss, sol
 
         # Define Optimizer
@@ -304,26 +316,26 @@ def run_analysis(n_iters=5000, x_targ=1.7, p_targ=7.3, lr=1e-2):
         x_min_targ=x_targ, p_val_targ=p_targ, max_iter=n_iters, lr=lr, verbose=True
     )
     plot_polynomial(p_opt_sdpr)
-    # tune polynomial - torch - Global min
-    p_opt_th, info_th1 = prob.tune_poly_torch(
-        x_min_targ=x_targ,
-        p_val_targ=p_targ,
-        max_iter=n_iters,
-        x_init=-2.0,
-        lr=lr,
-        verbose=True,
-    )
-    plot_polynomial(p_opt_th)
-    # tune polynomial - torch - local min
-    p_opt_th_loc, info_th2 = prob.tune_poly_torch(
-        x_min_targ=x_targ,
-        p_val_targ=p_targ,
-        max_iter=n_iters,
-        x_init=2.0,
-        lr=lr,
-        verbose=True,
-    )
-    plot_polynomial(p_opt_th_loc)
+    # # tune polynomial - torch - Global min
+    # p_opt_th, info_th1 = prob.tune_poly_torch(
+    #     x_min_targ=x_targ,
+    #     p_val_targ=p_targ,
+    #     max_iter=n_iters,
+    #     x_init=-2.0,
+    #     lr=lr,
+    #     verbose=True,
+    # )
+    # plot_polynomial(p_opt_th)
+    # # tune polynomial - torch - local min
+    # p_opt_th_loc, info_th2 = prob.tune_poly_torch(
+    #     x_min_targ=x_targ,
+    #     p_val_targ=p_targ,
+    #     max_iter=n_iters,
+    #     x_init=2.0,
+    #     lr=lr,
+    #     verbose=True,
+    # )
+    # plot_polynomial(p_opt_th_loc)
     plt.plot(x_targ, p_targ, "k+")
     plt.legend(
         ["Init", "SDPR", "Torch (init=-2)", "Torch (init=-2)", "Target Glob Min"]
@@ -332,16 +344,16 @@ def run_analysis(n_iters=5000, x_targ=1.7, p_targ=7.3, lr=1e-2):
     plt.show()
 
     # save data
-    folder = "/home/cho/research/sdpr_backprop/_scripts/outputs"
+    folder = "_results"
     info_sdpr.to_pickle(os.path.join(folder, "poly6_sdpr.pkl"))
-    info_th1.to_pickle(os.path.join(folder, "poly6_th1.pkl"))
-    info_th2.to_pickle(os.path.join(folder, "poly6_th2.pkl"))
+    # info_th1.to_pickle(os.path.join(folder, "poly6_th1.pkl"))
+    # info_th2.to_pickle(os.path.join(folder, "poly6_th2.pkl"))
 
 
 # POST PROCESSING
 def plot_poly_evolution(ax, filename="poly6_sdpr.pkl", step=None, N_pts=10):
     # Load data
-    folder = "/home/cho/research/sdpr_backprop/_scripts/outputs"
+    folder = "_results"
     filename = os.path.join(folder, filename)
     info = read_pickle(filename)
     polys = np.array(info["poly"].values)
@@ -389,7 +401,7 @@ def plot_final_polys():
     x_targ = 1.7
     p_targ = 7.3
     # Load data
-    folder = "/home/cho/research/sdpr_backprop/_scripts/outputs"
+    folder = "_results"
     filename = os.path.join(folder, "poly6_sdpr.pkl")
     info_sdpr = read_pickle(filename)
     p_opt_sdpr = np.array(info_sdpr["poly"].values)[-1]
@@ -447,6 +459,6 @@ def plot_all(save=False, make_title=False):
 
 if __name__ == "__main__":
     # test_poly_torch()
-    # run_analysis()
+    run_analysis()
     # plot_all(save=True)
-    test_rank_maximization()
+    # test_rank_maximization()
