@@ -32,7 +32,7 @@ class SDPPoseEstimator(nn.Module):
             + self.gen_row_col_constraints()
         )
         # Redundant constraints
-        redun_list = list(range(9, len(constraints)))
+        redun_list = list(range(7, len(constraints)))
 
         # Initialize SDPRLayer
         self.sdprlayer = SDPRLayer(
