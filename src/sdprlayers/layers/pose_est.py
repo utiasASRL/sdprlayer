@@ -15,7 +15,7 @@ class SDPPoseEstimator(nn.Module):
     Semidefinite Programming Relaxation (SDPR)Layer.
     """
 
-    def __init__(self, T_s_v, diff_qcqp=False, resolve_kkt=True):
+    def __init__(self, T_s_v, diff_qcqp=False, compute_multipliers=False):
         """
         Initialize the PoseSDPBlock class.
 
@@ -40,7 +40,8 @@ class SDPPoseEstimator(nn.Module):
             constraints=constraints,
             diff_qcqp=diff_qcqp,
             redun_list=redun_list,
-            resolve_kkt=resolve_kkt,
+            compute_multipliers=compute_multipliers,
+            use_dual=True,
         )
 
         self.register_buffer("T_s_v", T_s_v)
@@ -61,6 +62,8 @@ class SDPPoseEstimator(nn.Module):
         weights,
         inv_cov_weights=None,
         verbose=False,
+        solver_args=None,
+        return_loss=False,
     ):
         """
         Compute the pose, T_trg_src, from the source to the target frame.
@@ -80,7 +83,7 @@ class SDPPoseEstimator(nn.Module):
 
         # Construct objective function
         with record_function("SDPR: Build Cost Matrix"):
-            Qs, scale, offset = self.get_obj_matrix_vec(
+            Qs, scales, offsets = self.get_obj_matrix_vec(
                 keypoints_3D_src, keypoints_3D_trg, weights, inv_cov_weights
             )
         # Set up solver parameters
@@ -91,17 +94,19 @@ class SDPPoseEstimator(nn.Module):
         #     "max_iters": 100000,
         #     "verbose": False,
         # }
-        solver_args = {
-            "solve_method": "mosek",
-            "mosek_params": self.mosek_params,
-            "verbose": verbose,
-        }
+        if solver_args is None:
+            solver_args = {
+                "solve_method": "mosek",
+                "mosek_params": self.mosek_params,
+                "verbose": verbose,
+            }
         # Run layer
         with record_function("SDPR: Run Optimization"):
-            X, x = self.sdprlayer(Qs, solver_args=solver_args)
+            Xs, xs = self.sdprlayer(Qs, solver_args=solver_args)
+
         # Extract solution
-        t_trg_src_intrg = x[:, 10:]
-        R_trg_src = torch.reshape(x[:, 1:10], (-1, 3, 3)).transpose(-1, -2)
+        t_trg_src_intrg = xs[:, 10:]
+        R_trg_src = torch.reshape(xs[:, 1:10], (-1, 3, 3)).transpose(-1, -2)
         t_src_trg_intrg = -t_trg_src_intrg
         # Create transformation matrix
         zeros = torch.zeros(batch_size, 1, 3).type_as(keypoints_3D_src)  # Bx1x3
@@ -114,7 +119,11 @@ class SDPPoseEstimator(nn.Module):
         T_s_v = self.T_s_v.expand(batch_size, 4, 4).to(device)
         T_trg_src = se3_inv(T_s_v).bmm(T_trg_src).bmm(T_s_v)
 
-        return T_trg_src
+        if return_loss:
+            loss = torch.vmap(torch.trace)(Xs @ Qs) * scales + offsets
+            return T_trg_src, loss
+        else:
+            return T_trg_src
 
     @staticmethod
     def get_obj_matrix_vec(

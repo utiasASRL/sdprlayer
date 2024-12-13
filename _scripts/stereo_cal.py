@@ -7,9 +7,9 @@ import torch
 from pandas import DataFrame
 from spatialmath import SO3
 
-import sdprlayer.stereo_tuner as st
-from sdprlayer.stereo_tuner import skew
-from utils import make_axes_transparent, make_dirs_safe, savefig
+import sdprlayers.utils.stereo_tuner as st
+from sdprlayers.utils.plot_tools import make_axes_transparent, make_dirs_safe, savefig
+from sdprlayers.utils.stereo_tuner import skew
 
 # Define camera ground truth
 cam_gt = st.StereoCamera(
@@ -506,9 +506,23 @@ def tune_baseline(
             C_p0s_gt=C_p0s,
             r_ls=r_ls,
             pixel_meass=pixel_meass,
+            diff_qcqp=False,
             verbose=True,
         )
-    else:
+    elif tuner == "sdpr-dq":
+        iter_info = st.tune_stereo_params_sdpr(
+            cam_torch=cam_torch,
+            params=params,
+            opt=opt,
+            term_crit=term_crit,
+            r_p0s_gt=r_p0s,
+            C_p0s_gt=C_p0s,
+            r_ls=r_ls,
+            pixel_meass=pixel_meass,
+            diff_qcqp=True,
+            verbose=True,
+        )
+    elif "theseus" in tuner:
         # Generate random initializations
         if gt_init:
             r_p0s_init = r_p0s.clone()
@@ -541,6 +555,8 @@ def tune_baseline(
             verbose=True,
             opt_kwargs=opt_kwargs,
         )
+    else:
+        raise ValueError("tuner unknown!")
 
     return iter_info
 
@@ -554,7 +570,7 @@ def compare_tune_baseline(N_batch=20, N_runs=10, mode="prob_data"):
     # termination criteria
     term_crit = {
         "max_iter": 150,
-        "tol_grad_sq": 1e-6,
+        "tol_grad_sq": 1e-5,
         "tol_loss": 1e-10,
     }
     # Folder name
@@ -579,7 +595,7 @@ def compare_tune_baseline(N_batch=20, N_runs=10, mode="prob_data"):
                 plot=False,
             )
             info.append(prob_data)
-    elif mode == "spdr":
+    elif mode == "sdpr":
         info_p = load(open(folder + "/stereo_tune_prob_data.pkl", "rb"))
         for i in range(N_runs):
             # Run tuners
@@ -587,6 +603,21 @@ def compare_tune_baseline(N_batch=20, N_runs=10, mode="prob_data"):
             info.append(
                 tune_baseline(
                     "spdr",
+                    opt_select=opt_select,
+                    b_offs=offset,
+                    N_batch=N_batch,
+                    prob_data=info_p[i],
+                    term_crit=term_crit,
+                )
+            )
+    elif mode == "sdpr-dq":
+        info_p = load(open(folder + "/stereo_tune_prob_data.pkl", "rb"))
+        for i in range(N_runs):
+            # Run tuners
+            print(f"Run {i+1} of {N_runs}: SDPR-DiffQCQP")
+            info.append(
+                tune_baseline(
+                    "sdpr-dq",
                     opt_select=opt_select,
                     b_offs=offset,
                     N_batch=N_batch,
@@ -644,13 +675,13 @@ def compare_tune_baseline(N_batch=20, N_runs=10, mode="prob_data"):
 
 def compare_tune_baseline_pp(fname="str_tune_b0p003_sgd_20b_50r", ind=0):
     # Load data
-    folder = os.path.dirname(os.path.realpath(__file__))
-    folder = os.path.join(folder, "outputs")
-    folder = os.path.join(folder, fname)
+    folder = os.path.join("_scripts/outputs", fname)
 
-    info_s = load(open(folder + "/stereo_tune_spdr.pkl", "rb"))[ind]
+    info_s = load(open(folder + "/stereo_tune_sdpr-dq.pkl", "rb"))[ind]
     info_tl = load(open(folder + "/stereo_tune_theseus_rand.pkl", "rb"))[ind]
     info_tg = load(open(folder + "/stereo_tune_theseus_gt.pkl", "rb"))[ind]
+    # info_tl = load(open(folder + "/stereo_tune_sdpr.pkl", "rb"))[ind]
+
     # Plot loss
     fig, axs = plt.subplots(2, 2, figsize=(10, 10))
     axs[0, 0].plot(info_tl["loss"], label="Theseus (rand init)")
@@ -734,7 +765,7 @@ def get_statistics(fname="str_tune_b0p003_sgd_20b_50r"):
     folder = os.path.join(folder, "outputs")
     folder = os.path.join(folder, fname)
 
-    info_s = load(open(folder + "/stereo_tune_spdr.pkl", "rb"))
+    info_s = load(open(folder + "/stereo_tune_sdpr-dq.pkl", "rb"))
     info_tl = load(open(folder + "/stereo_tune_theseus_rand.pkl", "rb"))
     info_tg = load(open(folder + "/stereo_tune_theseus_gt.pkl", "rb"))
     b_true = cam_gt.b
@@ -804,7 +835,7 @@ def baseline_param_plots(fname="str_tune_b0p003_sgd_20b_50r"):
     folder = os.path.join(folder, "outputs")
     folder = os.path.join(folder, fname)
 
-    info_s = load(open(folder + "/stereo_tune_spdr.pkl", "rb"))
+    info_s = load(open(folder + "/stereo_tune_sdpr-dq.pkl", "rb"))
     info_tl = load(open(folder + "/stereo_tune_theseus_rand.pkl", "rb"))
     info_tg = load(open(folder + "/stereo_tune_theseus_gt.pkl", "rb"))
     err_init = 0.003
@@ -860,7 +891,7 @@ def plot_grad_innerloss(fname="str_tune_b0p003_sgd_20b_50r", ind=0):
     folder = os.path.join(folder, "outputs")
     folder = os.path.join(folder, fname)
 
-    info_s = load(open(folder + "/stereo_tune_spdr.pkl", "rb"))[ind]
+    info_s = load(open(folder + "/stereo_tune_sdpr-dq.pkl", "rb"))[ind]
     info_tl = load(open(folder + "/stereo_tune_theseus_rand.pkl", "rb"))[ind]
     info_tg = load(open(folder + "/stereo_tune_theseus_gt.pkl", "rb"))[ind]
     # process inner losses
@@ -1013,7 +1044,7 @@ if __name__ == "__main__":
 
     # Local minimum search and setup plots
     # find_local_minima(store_data=True)
-    intialization_plots()
+    # intialization_plots()
 
     # Comparison over multiple instances (batch):
     # Run these to generate all of the data for comparison. Will
@@ -1021,14 +1052,23 @@ if __name__ == "__main__":
 
     # compare_tune_baseline(N_batch=20, N_runs=50, mode="prob_data")
     # compare_tune_baseline(N_batch=20, N_runs=50, mode="spdr")
+    # compare_tune_baseline(N_batch=20, N_runs=50, mode="sdpr-dq")
     # compare_tune_baseline(N_batch=20, N_runs=50, mode="theseus_gt")
     # compare_tune_baseline(N_batch=20, N_runs=50, mode="theseus_rand")
 
     # Post Processing scripts:
     # compare_tune_baseline_pp(ind=0)
-    # get_statistics()
-    # baseline_param_plots()
-    # plot_grad_innerloss()
+    get_statistics()
+    baseline_param_plots()
+    plot_grad_innerloss()
 
     # Noise analysis (This was not really used)
     # baseline_noise_analysis(N_batch=20, N_runs=10)
+
+    # Testing
+    # n_batch = 20
+    # compare_tune_baseline(N_batch=n_batch, N_runs=1, mode="prob_data")
+    # compare_tune_baseline(N_batch=n_batch, N_runs=1, mode="sdpr")
+    # compare_tune_baseline(N_batch=n_batch, N_runs=1, mode="theseus_gt")
+    # compare_tune_baseline(N_batch=n_batch, N_runs=1, mode="sdpr-dq")
+    # compare_tune_baseline_pp(fname="str_tune_b0p003_sgd_20b_1r")

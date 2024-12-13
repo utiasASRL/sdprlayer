@@ -63,9 +63,13 @@ def get_soln_and_jac(estimator, points_t, points_s, weights, T_t_s_gt, **kwargs)
     elif estimator == "sdpr":
         forward = SDPPoseEstimator(T_s_v=T_s_v, diff_qcqp=False)
     elif estimator == "sdpr-qcqpdiff":
-        forward = SDPPoseEstimator(T_s_v=T_s_v, diff_qcqp=True)
+        forward = SDPPoseEstimator(
+            T_s_v=T_s_v, diff_qcqp=True, compute_multipliers=True
+        )
     elif estimator == "sdpr-qcqpdiff-reuse":
-        forward = SDPPoseEstimator(T_s_v=T_s_v, diff_qcqp=True, resolve_kkt=False)
+        forward = SDPPoseEstimator(
+            T_s_v=T_s_v, diff_qcqp=True, compute_multipliers=False
+        )
     elif estimator in ["lieopt-gt", "lieopt-gt-unroll", "lieopt-rand"]:
         forward = LieOptPoseEstimator(T_s_v=T_s_v, N_batch=1, N_map=n_points)
     elif estimator == "lieopt-rand":
@@ -217,15 +221,19 @@ def process_grad_data(filename="_results/grad_comp_20241202T1158.pkl"):
     print(df_out)
 
 
-def test_jac_func(estimator="lieopt-rand", n_points=30, n_batch=2, noise_std=0.0):
+def test_jac_func(estimator="lieopt-rand", n_points=30, n_batch=5, noise_std=0.0):
     # Get points
     points_s, points_t, weights, T_t_s_gt = get_point_clouds(
         n_points=n_points, n_batch=n_batch, noise_std=noise_std
     )
     assert estimator in estimator_list, ValueError("Estimator not recognized")
     # Test estimator
-    T_t_s, jacobians, time_f, time_b = get_soln_and_jac(
+    T_t_s, jacs, time_f, time_b = get_soln_and_jac(
         estimator, points_t, points_s, weights, T_t_s_gt=T_t_s_gt
+    )
+
+    _, jacs_svd, _, _ = get_soln_and_jac(
+        "svd", points_t, points_s, weights, T_t_s_gt=T_t_s_gt
     )
 
     try:
@@ -234,19 +242,24 @@ def test_jac_func(estimator="lieopt-rand", n_points=30, n_batch=2, noise_std=0.0
         if estimator == "lieopt-rand":
             print("Converged to local min")
 
+    for b in range(n_batch):
+        for i in range(3):
+            np.testing.assert_allclose(jacs[b][i], jacs_svd[b][i], atol=1e-7)
+
 
 if __name__ == "__main__":
     # Tests
     # test_jac_func("svd")
     # test_jac_func("sdpr")
-    # test_jac_func("sdpr-qcqpdiff", noise_std=0.5)
-    test_jac_func("sdpr-qcqpdiff-reuse", n_batch=50)
+    # test_jac_func("sdpr-qcqpdiff")
+    # test_jac_func("sdpr-qcqpdiff-reuse")
     # test_jac_func("lieopt-gt-unroll")
     # test_jac_func("lieopt-rand")
 
-    # # Generate data (no noise)
-    # fname = gen_estimator_data(n_points=30, n_batch=100, noise_std=0.1)
-    # # Post process
-    # process_grad_data(filename=fname)
+    # Generate data (no noise)
+    fname = gen_estimator_data(n_points=30, n_batch=100, noise_std=0.1)
+    # Post process
+    process_grad_data(filename=fname)
 
+    # Re-process existing results.
     # process_grad_data(filename="_results/grad_comp_20241202T1616.pkl")

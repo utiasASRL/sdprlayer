@@ -1,6 +1,7 @@
 from copy import deepcopy
 
 import cvxpy as cp
+import matplotlib.pyplot as plt
 import numpy as np
 import scipy.linalg as la
 import scipy.sparse as sp
@@ -19,12 +20,13 @@ mosek_params_dflt = {
     "MSK_DPAR_INTPNT_CO_TOL_DFEAS": 1e-10,
 }
 
-# Relative tolerance for constraint removal to satisfy LICQ in QCQP differentiation
-# NOTE: This is the allowed difference between squared diagonal terms in the R matrix of the QR decomposition
-RTOL_LICQ = 1e6
-
+# When recomputing the lagrange multipliers, this is the tolerance for a singular value of the
+LICQ_TOL = 1e-9
 # Absolute tolerance for the KKT conditions during QCQP differentiation
 ATOL_KKT = 1e-5
+# Tolerance for residuals in LSQR solve
+# (see https://docs.scipy.org/doc/scipy/reference/generated/scipy.sparse.linalg.lsqr.html#lsqr)
+LSQR_TOL = 1e-12
 
 
 class SDPRLayer(CvxpyLayer):
@@ -43,8 +45,9 @@ class SDPRLayer(CvxpyLayer):
         homogenize=False,
         use_dual=True,
         diff_qcqp=True,
-        resolve_kkt=False,
-        rtol_licq=RTOL_LICQ,
+        compute_multipliers=False,
+        licq_tol=LICQ_TOL,
+        lsqr_tol=LSQR_TOL,
         redun_list=[],
     ):
         """Initialize the SDPRLayer class. This functions sets up the SDP relaxation
@@ -81,8 +84,9 @@ class SDPRLayer(CvxpyLayer):
         self.use_dual = use_dual
         self.diff_qcqp = diff_qcqp
         self.redun_list = redun_list
-        self.resolve_kkt = resolve_kkt
-        self.rtol_licq = rtol_licq
+        self.compute_multipliers = compute_multipliers
+        self.licq_tol = licq_tol
+        self.lsqr_tol = lsqr_tol
         # Add homogenization variable
         if homogenize:
             n_vars = n_vars + 1
@@ -339,8 +343,9 @@ class SDPRLayer(CvxpyLayer):
                     constraints,
                     self.n_vars,
                     self.redun_list,
-                    self.rtol_licq,
-                    self.resolve_kkt,
+                    self.licq_tol,
+                    self.compute_multipliers,
+                    self.lsqr_tol,
                 )
                 xs = qcqp_func(*param_vals_h)
         else:
@@ -454,9 +459,10 @@ def _QCQPDiffFn(
     objective,
     constraints,
     nvars,
-    redun_list,
-    rtol_licq,
-    resolve_kkt,
+    redundant_inds,
+    licq_tol,
+    compute_multipliers,
+    lsqr_tol,
 ):
     class DiffQCQP(torch.autograd.Function):
         @staticmethod
@@ -474,19 +480,20 @@ def _QCQPDiffFn(
                 ctx.objective = objective.detach().numpy()
 
             # Add Constraints
-            constraint_list = []
-            for iConstr, constraint in enumerate(constraints):
-                if isinstance(constraint, cp.Parameter):
+            constraint_mats = []
+            for iConstr, A in enumerate(constraints):
+                if isinstance(A, cp.Parameter):
                     # Add parameter value to constraint list
                     A_val = params[param_ind].detach().numpy()
-                    constraint_list.append(A_val)
+                    constraint_mats.append(A_val)
                     param_dict["constraints"].append(iConstr)
                     param_ind += 1
                 else:
                     # Add to constraint value to list
-                    if iConstr not in redun_list:
-                        constraint_list.append(constraint)
-            ctx.constraints = constraint_list
+                    constraint_mats.append(A)
+            # Store constraints and redundant constraint list
+            ctx.constraints = constraint_mats
+            ctx.redundant_inds = redundant_inds
             # Check that all parameters have been used
             assert param_ind == len(params), ValueError(
                 "All parameters have not been used in QCQP Forward!"
@@ -498,9 +505,9 @@ def _QCQPDiffFn(
             ctx.Hs = Hs
             ctx.mults = mults
             # Store parameters
-            ctx.rtol_licq = rtol_licq  # Relative tolerance for constraint removal to satisfy LICQ in QCQP differentiation
-            ctx.resolve_kkt = resolve_kkt  # Flag to resolve KKT conditions
-
+            ctx.licq_tol = licq_tol  # Relative tolerance for constraint removal to satisfy LICQ in QCQP differentiation
+            ctx.compute_multipliers = compute_multipliers  # Flag to recompute lagrange multipliers of non-redundant constraints.
+            ctx.lsqr_tol = lsqr_tol  # Tolerance for LSQR residual
             return xs
 
         @staticmethod
@@ -511,65 +518,80 @@ def _QCQPDiffFn(
             batch_dim = xs.shape[0]
             # NOTE: should reimplement the following without a loop (vectorized)
             # Loop through batches and compute gradient information
-            dH_bar, dA_quad, dy_bar_2, mult_list = [], [], [], []
+            dH_bar, dA_quad, dy_bar_2_list, mult_list = [], [], [], []
             for b in range(batch_dim):
                 x = xs[b]
-                # Construct A_bar
-                grad_g = []
-                for A in ctx.constraints:
+                # Construct the constraint gradients
+                G = []  # All constraint gradients
+                G_r = []  # Linearly independent constraint gradients
+                for iConst, A in enumerate(ctx.constraints):
                     if len(A.shape) > 2:
                         A = A[b]
-                    grad_g.append(A @ x)
-                grad_g = np.hstack(grad_g)
-                if ctx.resolve_kkt:
+                    c_grad = x.T @ A
+                    G.append(c_grad)
+                    if iConst not in ctx.redundant_inds:
+                        G_r.append(c_grad)
+                G = np.vstack(G)
+                G_r = np.vstack(G_r)
+
+                # Solve for multipliers
+                if ctx.compute_multipliers or ctx.mults is None:
                     # Get Objective
                     if len(ctx.objective.shape) > 2:
                         Q = ctx.objective[b]
                     else:
                         Q = ctx.objective
                     q_bar = Q @ x
-                    # Solve for Lagrange multipliers and identify if there are redundant constraints
-                    mults, idx_keep = qr_solve(grad_g, -q_bar, rtol=ctx.rtol_licq)
-                    mult_list.append(mults)
-                    grad_g_ind = grad_g[:, idx_keep]
-                    # Construct Dual PSD Variable
+
+                    # Solve for Lagrange Multipliers (for all constraints)
+                    mults = np.linalg.lstsq(G_r.T, -q_bar, rcond=ctx.licq_tol)[0]
+
+                    # Construct Certificate matrix and set redundant Lagrange multipliers to zero
                     H_list = [sp.csc_array(Q)]
+                    all_mults = []
+                    cnt = 0
                     for i, A in enumerate(ctx.constraints):
+                        # Only add non-redundant constraints
+                        if i not in ctx.redundant_inds:
+                            all_mults.append(mults[cnt, 0])
+                            cnt += 1
+                        else:
+                            all_mults.append(0.0)
                         if len(A.shape) > 2:
                             A = A[b]
-                        H_list.append(A * mults[i, 0])
-                    H = sum(H_list).toarray()
-                    assert np.all(np.abs(H @ x) < ATOL_KKT), ValueError(
+                        H_list.append(A * all_mults[i])
+                    H_r = sum(H_list).toarray()
+                    mult_list.append([all_mults])
+                    assert np.all(np.abs(H_r @ x) < ATOL_KKT), ValueError(
                         "KKT conditions cannot be satisfied! Try increasing the tolerance for the LICQ condition constraint removal."
                     )
-                    # Construct Jacobian
-                    zero_blk = np.zeros((grad_g_ind.shape[1], grad_g_ind.shape[1]))
-                    M = 2 * np.block([[H, grad_g_ind], [grad_g_ind.T, zero_blk]])
-                    # Make sure that M is invertible
-                    m_eigs = np.abs(np.linalg.eigvalsh(M))
-                    assert np.all(m_eigs > 0), ValueError(
-                        "KKT-Solution Jacobian is not invertible. The constraint gradients may be linearly dependent. Try decreasing the LICQ tolerance."
-                    )
+                    # Construct Jacobian Matrix Function
+                    M = make_jac_linop(H=H_r, G=G_r, G_r=G_r)
                     # Pad incoming gradient (derivative of loss wrt multipliers is zero)
-                    dz_bar = np.vstack(
-                        [-grad_output[b], np.zeros((grad_g_ind.shape[1], 1))]
-                    )
-                    # Backprop to KKT RHS
-                    dy_bar = np.linalg.solve(M.T, dz_bar)
+                    dz_bar = np.vstack([-grad_output[b], np.zeros((G_r.shape[0], 1))])
                 else:
                     # Get certificate
                     H = Hs[b]
-                    # Construct Jacobian
-                    zero_blk = np.zeros((grad_g.shape[1], grad_g.shape[1]))
-                    M = 2 * np.block([[H, grad_g], [grad_g.T, zero_blk]])
+                    # Construct Jacobian Matrix Function
+                    M = make_jac_linop(H=H, G=G, G_r=G_r)
                     # Pad incoming gradient (derivative of loss wrt multipliers is zero)
-                    dz_bar = np.vstack(
-                        [-grad_output[b], np.zeros((grad_g.shape[1], 1))]
-                    )
-                    # Backprop to KKT RHS
-                    dy_bar, keep_inds = qr_solve(M.T, dz_bar, rtol=ctx.rtol_licq)
+                    dz_bar = np.vstack([-grad_output[b], np.zeros((G.shape[0], 1))])
+                # Backprop to KKT RHS
+                ls_sol = sp.linalg.lsqr(
+                    M.T, dz_bar, atol=ctx.lsqr_tol, btol=ctx.lsqr_tol
+                )
+                dy_bar = ls_sol[0][:, None]
                 dy_bar_1 = dy_bar[:nvars, :]
-                dy_bar_2.append(dy_bar[nvars:, :])
+                # Fill with zeros at redundant entries
+                dy_bar_2 = []
+                cnt = 0
+                for i, val in enumerate(ctx.constraints):
+                    if i in ctx.redundant_inds:
+                        dy_bar_2.append(0.0)
+                    else:
+                        dy_bar_2.append(dy_bar[nvars + cnt, 0])
+                        cnt += 1
+                dy_bar_2_list.append(dy_bar_2)
                 # backprop to H
                 dH_bar.append(2 * x @ dy_bar_1.T)
                 # Compute grad ( x^T A x )
@@ -577,69 +599,58 @@ def _QCQPDiffFn(
             # Stack batch dim
             dH_bar = np.stack(dH_bar, axis=0)
             dA_quad = np.stack(dA_quad, axis=0)
-            dy_bar_2 = np.stack(dy_bar_2, axis=0)
-            if resolve_kkt:
+            dy_bar_2 = np.stack(dy_bar_2_list, axis=0)
+            if ctx.compute_multipliers or ctx.mults is None:
                 mults = np.stack(mult_list, axis=0)
             else:
                 mults = np.stack(ctx.mults, axis=0)
-            # Compute final gradients
+            # Set up dims for broadcast
+            mults = mults[:, :, None]
+            dy_bar_2 = dy_bar_2[:, :, None]
+            # Compute gradients
             param_grads = []
             if ctx.param_dict["objective"]:
                 param_grads.append(torch.tensor(dH_bar))
             for ind in ctx.param_dict["constraints"]:
-                dA = dH_bar * mults[:, ind] + dA_quad * dy_bar_2[:, ind]
-                param_grads.append(torch.tensor(dA))
+                if ind in ctx.redundant_inds:
+                    raise ValueError(
+                        "Cannot compute derivative of redundant constraint"
+                    )
+                else:
+                    dA = dH_bar * mults[:, [ind], :] + dA_quad * dy_bar_2[:, [ind], :]
+                    param_grads.append(torch.tensor(dA))
 
             return tuple(param_grads)
 
     return DiffQCQP.apply
 
 
-def qr_solve(A, b=None, rtol=1e6, atol=1e-10):
-    """Use rank-revealing QR decomposition to solve for multipliers and identify linearly dependent columns in input matrix.
-
-    Args:
-        A (_type_): _description_
-        b (_type_): _description_
+def make_jac_linop(H, G, G_r):
+    """Construct Linear Operator corresponding to KKT Jacobian
+    NOTE: This operator is symmetric.
+    The equivalent matrix is as follows:
+    M = 2 * np.block([[H, G.T], [G_r, zero_blk]])
     """
-    n = A.shape[1]
-    if sp.issparse(A):
-        A_sparse = A
-    else:
-        A_sparse = sp.csc_array(A)
-    # Check if system is to be solved
-    if b is not None:
-        solve_system = True
-    else:
-        solve_system = False
-        b = np.zeros((A.shape[0], 1))
+    # Concatenate upper blocks of matrix
+    nvars = H.shape[0]
 
-    # QR Decomposition
-    # NOTE: columns that have 2-norm less than tolerance are treated as zero. We want to keep all columns and then decide the rank based on the relative values of the diagonal of R
-    Qtb, R, p, rank = sqr.rz(A_sparse, b, tolerance=atol)
-    # # Determine rank based on relative tolerance
-    r = np.abs(R.diagonal())  # equivalent to 2-norm of columns
-    r_max = np.max(r)
-    rank = 0
-    while rank < len(r):
-        if r_max > rtol * r[rank]:
-            break
-        rank += 1
-    # Upper Triangular Solve
-    if solve_system:
-        R = R.tocsr()[:rank, :rank]
-        Qtb = Qtb[:rank, :]
-        x_perm = sp.linalg.spsolve_triangular(R, Qtb, lower=False)
-        x_perm = np.vstack([x_perm, np.zeros((n - rank, 1))])
-        # Unpermute x
-        x = np.zeros((A.shape[1], b.shape[1]), dtype=x_perm.dtype)
-        x[p] = x_perm
-    else:
-        x = None
-    # Record indices of linearly dependent columns and keep them in increasing order
-    idx_keep = sorted(p[:rank])
+    # Define matrix vector product
+    def matvec(x):
+        if len(x.shape) < 2:
+            x = x[:, None]
+        H_G = np.hstack([H, G.T])
+        return 2 * np.vstack([H_G @ x, G_r @ x[:nvars]])
 
-    return x, idx_keep
+    # Define adjoint (same since symmetric)
+    def rmatvec(x):
+        if len(x.shape) < 2:
+            x = x[:, None]
+        H_G = np.hstack([H, G_r.T])
+        return 2 * np.vstack([H_G @ x, G @ x[:nvars]])
+
+    shape = (H.shape[0] + G_r.shape[0], H.shape[1] + G.shape[0])
+    linop = sp.linalg.LinearOperator(shape=shape, matvec=matvec, rmatvec=rmatvec)
+    return linop
 
 
 def get_nullspace(A_dense, method="qrp", tolerance=1e-5):

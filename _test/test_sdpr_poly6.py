@@ -416,7 +416,7 @@ def test_grad_qcqp_cost(use_dual=True):
         constraints=constraints,
         use_dual=use_dual,
         diff_qcqp=True,
-        resolve_kkt=False,
+        compute_multipliers=False,
     )
 
     # Define loss
@@ -457,7 +457,7 @@ def test_grad_qcqp_cost(use_dual=True):
     )
 
 
-def test_grad_qcqp_constraints(use_dual=True):
+def test_grad_qcqp_constraints(use_dual=True, n_batch=1):
     """Test diff through qcqp in SDPRLayer with MOSEK as the solver.
     Differentiate wrt constraints."""
     # Get data from data function
@@ -483,7 +483,7 @@ def test_grad_qcqp_constraints(use_dual=True):
     def gen_loss_constraint(constraint, **kwargs):
         x_target = -1
         X, x = optlayer(constraint, **kwargs)
-        x_val = x[1, 0]
+        x_val = x[:, 1, 0]
         loss = 1 / 2 * (x_val - x_target) ** 2
         return loss
 
@@ -504,6 +504,7 @@ def test_grad_qcqp_constraints(use_dual=True):
     }
 
     c_val = torch.tensor(constraint_val.toarray(), requires_grad=True)
+    c_val = c_val.repeat(n_batch, 1, 1)
 
     torch.autograd.gradcheck(
         lambda *x: gen_loss_constraint(*x, solver_args=sdp_solver_args),
@@ -514,7 +515,7 @@ def test_grad_qcqp_constraints(use_dual=True):
     )
 
 
-def _test_grad_local(autograd_test=True):
+def DEAD_test_grad_local(autograd_test=True):
     """This test function compares the local version of SDPRLayer with the
     SDP version. Local refers to the fact that the forward pass uses a local
     solver and the reverse pass uses the certificate."""

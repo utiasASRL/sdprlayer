@@ -10,7 +10,7 @@ import theseus as th
 import torch
 from poly_matrix import PolyMatrix
 
-from sdprlayers.layers.sdprlayer import SDPRLayer
+from sdprlayers import SDPPoseEstimator
 
 
 class StereoCamera:
@@ -187,79 +187,6 @@ def kron(A, B):
     )
 
 
-def get_stereo_data_mat(cam_torch: StereoCamera, r_ls, pixel_meass):
-    """Get a batch of data matrices for stereo calibration problem."""
-    if not isinstance(pixel_meass, torch.Tensor):
-        pixel_meass = torch.tensor(pixel_meass)
-    # Get euclidean measurements from pixels
-    meas, weights = cam_torch.inverse(pixel_meass)
-    N_batch = meas.shape[0]
-    # Indices
-    h = [0]
-    c = slice(1, 10)
-    t = slice(10, 13)
-    Q_batch = []
-    scales = torch.zeros(N_batch, dtype=torch.double)
-    offsets = torch.zeros(N_batch, dtype=torch.double)
-    for b in range(N_batch):
-        Q_es = []
-        for i in range(meas.shape[-1]):
-            W_ij = weights[b, i]
-            m_j0_0 = r_ls[b, :, [i]]
-            if m_j0_0.shape == (1, 3):
-                m_j0_0 = m_j0_0.T
-            y_ji_i = meas[b, :, [i]]
-            # Define matrix
-            Q_e = torch.zeros(13, 13, dtype=torch.double)
-            # Diagonals
-            Q_e[c, c] = kron(m_j0_0 @ m_j0_0.T, W_ij)
-            Q_e[t, t] = W_ij
-            Q_e[h, h] = y_ji_i.T @ W_ij @ y_ji_i
-            # Off Diagonals
-            Q_e[c, t] = -kron(m_j0_0, W_ij)
-            Q_e[t, c] = Q_e[c, t].T
-            Q_e[c, h] = -kron(m_j0_0, W_ij @ y_ji_i)
-            Q_e[h, c] = Q_e[c, h].T
-            Q_e[t, h] = W_ij @ y_ji_i
-            Q_e[h, t] = Q_e[t, h].T
-
-            # Add to overall matrix
-            Q_es += [Q_e]
-        Q = torch.stack(Q_es).sum(dim=0)
-        # remove constant offset
-        offsets[b] = Q[0, 0].clone()
-        Q[0, 0] = 0.0
-        # Rescale
-        scales[b] = torch.norm(Q, p="fro")
-        Q = Q / torch.norm(Q, p="fro")
-        Q_batch += [Q]
-
-    return torch.stack(Q_batch), scales, offsets
-
-
-# Loss Function
-def get_vars_from_mats(Xs):
-    "extract variables from SDP solution matrices"
-    if Xs.ndim == 2:
-        Xs = Xs.unsqueeze(0)
-    # TODO should be able to vectorize this
-    r_p0s, C_p0s = [], []
-    for X in Xs:
-        # Check rank
-        sorted_eigs = np.sort(np.linalg.eigvalsh(X.detach().numpy()))
-        sorted_eigs = np.abs(sorted_eigs)
-        assert sorted_eigs[-1] / sorted_eigs[-2] > 1e6, "X is not rank-1"
-        # extract solutions
-        r_p0_inP = (X[10:, [0]] + X[[0], 10:].T) / 2.0
-        C_vec = (X[1:10, [0]] + X[[0], 1:10].T) / 2.0
-        C_p0 = C_vec.reshape((3, 3)).T
-        r_p0s += [C_p0.T @ r_p0_inP]
-        C_p0s += [C_p0]
-    r_p0s = torch.stack(r_p0s)
-    C_p0s = torch.stack(C_p0s)
-    return r_p0s, C_p0s
-
-
 def get_outer_loss(r_p0s, C_p0s, r_p0s_gt, C_p0s_gt):
     "Outer optimization losses"
     # Translation error
@@ -278,98 +205,6 @@ term_crit_def = {
 }  # Optimization termination criteria
 
 
-# SDPR OPTIMIZATION
-
-
-def get_constraints():
-    """Generate constraints for problem"""
-    constraints = []
-    constraints += gen_orthoganal_constraints()
-    constraints += gen_row_col_constraints()
-    constraints += gen_handedness_constraints()
-
-    return constraints
-
-
-def gen_orthoganal_constraints():
-    """Generate 6 orthongonality constraints for rotation matrices"""
-    # labels
-    h = "h"
-    C = "C"
-    t = "t"
-    variables = {h: 1, C: 9, t: 3}
-    constraints = []
-    for i in range(3):
-        for j in range(i, 3):
-            A = PolyMatrix()
-            E = np.zeros((3, 3))
-            E[i, j] = 1.0 / 2.0
-            A[C, C] = np.kron(E + E.T, np.eye(3))
-            if i == j:
-                A[h, h] = -1.0
-            else:
-                A[h, h] = 0.0
-            constraints += [A.get_matrix(variables)]
-    return constraints
-
-
-def gen_row_col_constraints():
-    """Generate constraint that every row vector length equal every column vector length"""
-    # labels
-    h = "h"
-    C = "C"
-    t = "t"
-    variables = {h: 1, C: 9, t: 3}
-    # define constraints
-    constraints = []
-    for i in range(3):
-        for j in range(3):
-            A = PolyMatrix()
-            c_col = np.zeros(9)
-            ind = 3 * j + np.array([0, 1, 2])
-            c_col[ind] = np.ones(3)
-            c_row = np.zeros(9)
-            ind = np.array([0, 3, 6]) + i
-            c_row[ind] = np.ones(3)
-            A[C, C] = np.diag(c_col - c_row)
-            constraints += [A.get_matrix(variables)]
-    return constraints
-
-
-def gen_handedness_constraints():
-    """Generate Handedness Constraints - Equivalent to the determinant =1
-    constraint for rotation matrices. See Tron,R et al:
-    On the Inclusion of Determinant Constraints in Lagrangian Duality for 3D SLAM"""
-    # labels
-    h = "h"
-    C = "C"
-    t = "t"
-    variables = {h: 1, C: 9, t: 3}
-    # define constraints
-    constraints = []
-    i, j, k = 0, 1, 2
-    for col_ind in range(3):
-        l, m, n = 0, 1, 2
-        for row_ind in range(3):
-            # Define handedness matrix and vector
-            mat = np.zeros((9, 9))
-            mat[3 * j + m, 3 * k + n] = 1 / 2
-            mat[3 * j + n, 3 * k + m] = -1 / 2
-            mat = mat + mat.T
-            vec = np.zeros((9, 1))
-            vec[i * 3 + l] = -1 / 2
-            # Create constraint
-            A = PolyMatrix()
-            A[C, C] = mat
-            A[C, h] = vec
-            constraints += [A.get_matrix(variables)]
-            # cycle row indices
-            l, m, n = m, n, l
-        # Cycle column indicies
-        i, j, k = j, k, i
-    return constraints
-
-
 def tune_stereo_params_sdpr(
     cam_torch: StereoCamera,
     params,
@@ -381,28 +216,31 @@ def tune_stereo_params_sdpr(
     term_crit=term_crit_def,
     verbose=False,
     solver="SCS",
+    diff_qcqp=False,
 ):
-    constraints_list = get_constraints()
+
     # Build Layer
-    sdpr_layer = SDPRLayer(13, constraints=constraints_list, use_dual=False)
+    estimator = SDPPoseEstimator(T_s_v=torch.eye(4), diff_qcqp=diff_qcqp)
 
     # define closure
     def closure():
         # zero grad
         opt.zero_grad()
-        # generate loss
-        Qs, scales, offsets = get_stereo_data_mat(cam_torch, r_ls, pixel_meass)
-        if solver == "SCS":
-            solver_args = {"solve_method": "SCS", "eps": 1e-9}
-        elif solver == "mosek":
-            solver_args = {"solve_method": "mosek"}
-        else:
-            raise ValueError("Invalid solver")
-        Xs = sdpr_layer(Qs, solver_args=solver_args)[0]
-        # Compute and store inner loss
-        loss_inner = torch.vmap(torch.trace)(Xs @ Qs) * scales + offsets
+        # Generate points and weights from pixel measurements
+        rs_l_inT, inv_cov_weights = cam_torch.inverse(pixel_meass)
+        weights_scalar = torch.ones(rs_l_inT.shape[0], 1, rs_l_inT.shape[2])
+        # Run Estimator
+        T_trg_src, loss_inner = estimator(
+            keypoints_3D_src=r_ls,
+            keypoints_3D_trg=rs_l_inT,
+            weights=weights_scalar,
+            inv_cov_weights=inv_cov_weights,
+            solver_args=None,
+            return_loss=True,
+        )
         # Extract variables
-        r_p0s, C_p0s = get_vars_from_mats(Xs)
+        C_p0s = T_trg_src[:, :3, :3]
+        r_p0s = C_p0s.mT.bmm(-T_trg_src[:, :3, [3]])
         # Generate loss
         loss_outer = get_outer_loss(r_p0s, C_p0s, r_p0s_gt, C_p0s_gt)
         # backprop
@@ -448,8 +286,6 @@ def tune_stereo_params_sdpr(
 
 
 # THESEUS OPTIMIZATION
-
-
 def build_theseus_layer(N_map, N_batch=1, opt_kwargs_in={}):
     """Build theseus layer for stereo problem
 
