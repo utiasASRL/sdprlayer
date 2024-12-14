@@ -2,7 +2,7 @@
 import os
 
 import matplotlib.pyplot as plt
-import np
+import numpy as np
 
 root_dir = os.getcwd()
 fig_dir = os.path.join(root_dir, "figs")

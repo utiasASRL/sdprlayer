@@ -20,13 +20,16 @@ mosek_params_dflt = {
     "MSK_DPAR_INTPNT_CO_TOL_DFEAS": 1e-10,
 }
 
-# When recomputing the lagrange multipliers, this is the tolerance for a singular value of the
-LICQ_TOL = 1e-9
-# Absolute tolerance for the KKT conditions during QCQP differentiation
-ATOL_KKT = 1e-5
+# When recomputing the lagrange multipliers, tolerance is the smallest singular value of the
+# constraint gradient matrix that is treated as non-zero.
+LICQ_TOL = 1e-8
+# Tolerance for norm of residuals of the KKT conditions.
+ATOL_KKT = 1e-6
 # Tolerance for residuals in LSQR solve
 # (see https://docs.scipy.org/doc/scipy/reference/generated/scipy.sparse.linalg.lsqr.html#lsqr)
-LSQR_TOL = 1e-8
+LSQR_TOL = 1e-10
+# Minimum Eigenvalue Ratio for Tightness Check.
+ER_MIN = 1e6
 
 
 class SDPRLayer(CvxpyLayer):
@@ -348,15 +351,29 @@ class SDPRLayer(CvxpyLayer):
                     self.lsqr_tol,
                 )
                 xs = qcqp_func(*param_vals_h)
+            else:
+                xs = None
         else:
             # Get torch tensor from CvxpyLayers
             soln = super().forward(*param_vals_h, **kwargs_new)
             Xs = soln[0]
-            # Extract solutions
-            xs = self.recovery_map(Xs)
+            # Check that the whole batch is tight.
+            alltight = True
+            for X in Xs:
+                tight, ER = self.check_tightness(X)
+                if not tight:
+                    alltight = False
+                    break
+            if alltight:
+                # Extract solutions
+                xs = self.recovery_map(Xs)
+            else:
+                xs = None
+
         # Adjust dimensions
         if ndims < 3:
-            xs = xs.squeeze(0)
+            if xs is not None:
+                xs = xs.squeeze(0)
             Xs = Xs.squeeze(0)
 
         return Xs, xs
@@ -390,9 +407,9 @@ class SDPRLayer(CvxpyLayer):
         return Q
 
     @staticmethod
-    def check_tightness(X, ER_min=1e6):
+    def check_tightness(X, ER_min=ER_MIN):
         if torch.is_tensor(X):
-            X = X.detach().numpy()
+            X = X.detach().cpu().numpy()
         # Check rank
         sorted_eigs = np.sort(np.linalg.eigvalsh(X))
         sorted_eigs = np.abs(sorted_eigs)
@@ -473,18 +490,18 @@ def _QCQPDiffFn(
             param_ind = 0
             # Add objective
             if isinstance(objective, cp.Parameter):
-                ctx.objective = params[0].detach().numpy()
+                ctx.objective = params[0].detach().cpu().numpy()
                 param_dict["objective"] = True
                 param_ind += 1
             else:
-                ctx.objective = objective.detach().numpy()
+                ctx.objective = objective.detach().cpu().numpy()
 
             # Add Constraints
             constraint_mats = []
             for iConstr, A in enumerate(constraints):
                 if isinstance(A, cp.Parameter):
                     # Add parameter value to constraint list
-                    A_val = params[param_ind].detach().numpy()
+                    A_val = params[param_ind].detach().cpu().numpy()
                     constraint_mats.append(A_val)
                     param_dict["constraints"].append(iConstr)
                     param_ind += 1
@@ -501,7 +518,7 @@ def _QCQPDiffFn(
             ctx.param_dict = param_dict
 
             # Store solution and certificate matrix
-            ctx.xs = xs.numpy()
+            ctx.xs = xs.detach().cpu().numpy()
             ctx.Hs = Hs
             ctx.mults = mults
             # Store parameters
@@ -513,6 +530,8 @@ def _QCQPDiffFn(
         @staticmethod
         def backward(ctx, grad_output):
             """Compute gradients by implicit differentiation of the QCQP KKT conditions."""
+            device = grad_output.device
+            grad_output = grad_output.cpu()
             # Certified Solution
             xs = ctx.xs
             batch_dim = xs.shape[0]
@@ -561,10 +580,10 @@ def _QCQPDiffFn(
                             A = A[b]
                         H_list.append(A * all_mults[i])
                     H_r = sum(H_list).toarray()
-                    mult_list.append([all_mults])
-                    assert np.all(np.abs(H_r @ x) < ATOL_KKT), ValueError(
+                    assert np.linalg.norm(H_r @ x) < ATOL_KKT, ValueError(
                         "KKT conditions cannot be satisfied! Try increasing the tolerance for the LICQ condition constraint removal."
                     )
+                    mult_list.append([all_mults])
                     # Construct Jacobian Matrix Function
                     M = make_jac_linop(H=H_r, G=G_r, G_r=G_r)
                     # Pad incoming gradient (derivative of loss wrt multipliers is zero)
@@ -619,7 +638,8 @@ def _QCQPDiffFn(
                 else:
                     dA = dH_bar * mults[:, [ind], :] + dA_quad * dy_bar_2[:, [ind], :]
                     param_grads.append(torch.tensor(dA))
-
+            # Push back to original device
+            param_grads = [grad.to(device) for grad in param_grads]
             return tuple(param_grads)
 
     return DiffQCQP.apply
