@@ -26,7 +26,7 @@ LICQ_TOL = 1e-9
 ATOL_KKT = 1e-5
 # Tolerance for residuals in LSQR solve
 # (see https://docs.scipy.org/doc/scipy/reference/generated/scipy.sparse.linalg.lsqr.html#lsqr)
-LSQR_TOL = 1e-12
+LSQR_TOL = 1e-8
 
 
 class SDPRLayer(CvxpyLayer):
@@ -638,15 +638,13 @@ def make_jac_linop(H, G, G_r):
     def matvec(x):
         if len(x.shape) < 2:
             x = x[:, None]
-        H_G = np.hstack([H, G.T])
-        return 2 * np.vstack([H_G @ x, G_r @ x[:nvars]])
+        return 2 * np.vstack([H @ x[:nvars] + G.T @ x[nvars:], G_r @ x[:nvars]])
 
     # Define adjoint (same since symmetric)
     def rmatvec(x):
         if len(x.shape) < 2:
             x = x[:, None]
-        H_G = np.hstack([H, G_r.T])
-        return 2 * np.vstack([H_G @ x, G @ x[:nvars]])
+        return 2 * np.vstack([H @ x[:nvars] + G_r.T @ x[nvars:], G @ x[:nvars]])
 
     shape = (H.shape[0] + G_r.shape[0], H.shape[1] + G.shape[0])
     linop = sp.linalg.LinearOperator(shape=shape, matvec=matvec, rmatvec=rmatvec)

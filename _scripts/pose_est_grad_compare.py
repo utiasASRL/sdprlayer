@@ -6,8 +6,10 @@ import torch
 from pandas import DataFrame, read_pickle
 from tqdm import tqdm
 
+from _scripts.stereo_cal import get_cal_data
 from sdprlayers import LieOptPoseEstimator, SDPPoseEstimator, SVDPoseEstimator
 from sdprlayers.utils.lie_algebra import se3_exp, se3_inv, se3_log
+from sdprlayers.utils.stereo_tuner import StereoCamera
 
 # List of estimators
 estimator_list = [
@@ -35,7 +37,7 @@ def get_point_clouds(n_points=30, n_batch=1, noise_std=0.0, precision=torch.doub
     T_t_s = se3_exp(pert_se3)
 
     # Transform points
-    points_t = T_t_s @ points_s
+    points_t = (T_t_s @ points_s).clone()
     # Add noise
     noise = noise_std * torch.randn(n_batch, 3, n_points)
     noise = torch.concatenate([noise, torch.zeros((n_batch, 1, n_points))], axis=1)
@@ -46,7 +48,49 @@ def get_point_clouds(n_points=30, n_batch=1, noise_std=0.0, precision=torch.doub
     return points_s, points_t, weights, T_t_s
 
 
-def get_soln_and_jac(estimator, points_t, points_s, weights, T_t_s_gt, **kwargs):
+def get_stereo_point_clouds(n_batch=30, noise_std=0.0, precision=torch.double):
+    """Get point clouds and associated matrix weights for stereo calibration setup"""
+    # Define camera
+    camera = StereoCamera(
+        f_u=484.5,
+        f_v=484.5,
+        c_u=0.0,
+        c_v=0.0,
+        b=0.24,
+        sigma_u=noise_std,
+        sigma_v=noise_std,
+    )
+    # Use setup from baseline calibration example
+    rs_ts_s, Cs_ts, points_s, cam_meas = get_cal_data(
+        radius=3,
+        board_dims=[1.0, 1.0],
+        N_squares=[8, 8],
+        N_batch=n_batch,
+        setup="cone",
+        plot=False,
+        cam=camera,
+    )
+    # Get ground truth transform
+    T_top = torch.cat([Cs_ts, -Cs_ts.bmm(rs_ts_s)], dim=2)
+    T_bottom = torch.tensor([[0, 0, 0, 1]]).repeat(n_batch, 1, 1)
+    T_t_s = torch.cat([T_top, T_bottom], dim=1)
+
+    # Retrieve points and weights from camera measurements
+    points_t, mat_wts = camera.inverse(cam_meas)
+    points_t = points_t.clone()
+    # get scalar weights (unit)
+    n_points = points_t.shape[2]
+    weights = torch.ones((n_batch, 1, n_points), dtype=precision)
+    # Add homogeneous coord
+    points_s = torch.cat([points_s, torch.ones((n_batch, 1, n_points))], axis=1)
+    points_t = torch.cat([points_t, torch.ones((n_batch, 1, n_points))], axis=1)
+
+    return points_s, points_t, weights, mat_wts, T_t_s
+
+
+def get_soln_and_jac(
+    estimator, points_t, points_s, weights, mat_wts, T_t_s_gt, **kwargs
+):
     """Apply estimator to point clouds and obtain solution and solution gradient.
     NOTE: gradients are computed sequentially using torch's grad function and then assembled into a Jacobian for each input. We also loop over the batch dimension.
     All computations are done on the CPU sequentially.
@@ -89,6 +133,9 @@ def get_soln_and_jac(estimator, points_t, points_s, weights, T_t_s_gt, **kwargs)
             points_t[[b], :, :].requires_grad_(True),
             weights[[b], :, :].requires_grad_(True),
         ]
+        if not estimator == "svd" and mat_wts is not None:
+            kwargs.update(dict(inv_cov_weights=mat_wts[[b], :, :, :]))
+
         # Apply forward pass of estimator and time the response
         Tf_0 = time.time()
         # If running Lie group optimization, set intialization for each batch
@@ -136,7 +183,7 @@ def get_soln_and_jac(estimator, points_t, points_s, weights, T_t_s_gt, **kwargs)
     return estimates, jacobians, time_f, time_b
 
 
-def gen_estimator_data(n_points=30, n_batch=1, noise_std=0.0):
+def gen_estimator_data(n_points=30, n_batch=1, noise_std=0.0, use_mat_wts=False):
     """Compare Solutions and gradients of different estimators
 
     Args:
@@ -146,14 +193,20 @@ def gen_estimator_data(n_points=30, n_batch=1, noise_std=0.0):
     """
 
     # Generate input data
-    points_s, points_t, weights, T_t_s_gt = get_point_clouds(
-        n_points=n_points, n_batch=n_batch, noise_std=noise_std
-    )
+    if use_mat_wts:
+        points_s, points_t, weights, mat_wts, T_t_s_gt = get_stereo_point_clouds(
+            n_batch=n_batch, noise_std=noise_std
+        )
+    else:
+        points_s, points_t, weights, T_t_s_gt = get_point_clouds(
+            n_points=n_points, n_batch=n_batch, noise_std=noise_std
+        )
+        mat_wts = None
 
     data_dicts = []
     for iEst, estimator in enumerate(estimator_list):
         T_t_s_est, jacobians, time_f, time_b = get_soln_and_jac(
-            estimator, points_t, points_s, weights, T_t_s_gt
+            estimator, points_t, points_s, weights, mat_wts, T_t_s_gt
         )
         # Compute distance from ground truth value
         xi_err = se3_log(se3_inv(T_t_s_est) @ T_t_s_gt)
@@ -169,10 +222,16 @@ def gen_estimator_data(n_points=30, n_batch=1, noise_std=0.0):
         )
         data_dicts.append(data_dict)
     df = DataFrame(data_dicts)
+
+    # Store to file
     import time
 
     timestr = time.strftime("%Y%m%dT%H%M")
-    fname = "_results/grad_comp_" + timestr + ".pkl"
+    if use_mat_wts:
+        wt_str = "matwt_"
+    else:
+        wt_str = "sclwt"
+    fname = "_results/grad_comp_" + wt_str + timestr + ".pkl"
     df.to_pickle(fname)
     return fname
 
@@ -221,20 +280,33 @@ def process_grad_data(filename="_results/grad_comp_20241202T1158.pkl"):
     print(df_out)
 
 
-def test_jac_func(estimator="lieopt-rand", n_points=30, n_batch=5, noise_std=0.0):
+def test_jac_func(
+    estimator="lieopt-rand", n_points=30, n_batch=5, noise_std=0.0, use_mat_wts=False
+):
     # Get points
-    points_s, points_t, weights, T_t_s_gt = get_point_clouds(
-        n_points=n_points, n_batch=n_batch, noise_std=noise_std
-    )
+    if use_mat_wts:
+        points_s, points_t, weights, mat_wts, T_t_s_gt = get_stereo_point_clouds(
+            n_batch=n_batch, noise_std=noise_std
+        )
+    else:
+        points_s, points_t, weights, T_t_s_gt = get_point_clouds(
+            n_points=n_points, n_batch=n_batch, noise_std=noise_std
+        )
+        mat_wts = None
     assert estimator in estimator_list, ValueError("Estimator not recognized")
     # Test estimator
     T_t_s, jacs, time_f, time_b = get_soln_and_jac(
-        estimator, points_t, points_s, weights, T_t_s_gt=T_t_s_gt
+        estimator, points_t, points_s, weights, mat_wts, T_t_s_gt=T_t_s_gt
     )
 
-    _, jacs_svd, _, _ = get_soln_and_jac(
-        "svd", points_t, points_s, weights, T_t_s_gt=T_t_s_gt
-    )
+    if use_mat_wts:
+        _, jacs_true, _, _ = get_soln_and_jac(
+            "lieopt-gt", points_t, points_s, weights, mat_wts, T_t_s_gt=T_t_s_gt
+        )
+    else:
+        _, jacs_true, _, _ = get_soln_and_jac(
+            "svd", points_t, points_s, weights, mat_wts, T_t_s_gt=T_t_s_gt
+        )
 
     try:
         np.testing.assert_allclose(T_t_s, T_t_s_gt, atol=1e-6)
@@ -243,23 +315,26 @@ def test_jac_func(estimator="lieopt-rand", n_points=30, n_batch=5, noise_std=0.0
             print("Converged to local min")
 
     for b in range(n_batch):
-        for i in range(3):
-            np.testing.assert_allclose(jacs[b][i], jacs_svd[b][i], atol=1e-7)
+        for i in range(2):
+            np.testing.assert_allclose(jacs[b][i], jacs_true[b][i], atol=1e-7)
 
 
 if __name__ == "__main__":
     # Tests
-    # test_jac_func("svd")
-    # test_jac_func("sdpr")
-    # test_jac_func("sdpr-qcqpdiff")
-    # test_jac_func("sdpr-qcqpdiff-reuse")
-    # test_jac_func("lieopt-gt-unroll")
-    # test_jac_func("lieopt-rand")
+    use_mat_wts = True
+    test_jac_func("svd", use_mat_wts=use_mat_wts)
+    # test_jac_func("sdpr", use_mat_wts=use_mat_wts)
+    # test_jac_func("sdpr-qcqpdiff", noise_std=0.0, use_mat_wts=use_mat_wts)
+    # test_jac_func("sdpr-qcqpdiff-reuse", use_mat_wts=use_mat_wts)
+    # test_jac_func("lieopt-gt-unroll", use_mat_wts=use_mat_wts)
+    # test_jac_func("lieopt-rand", use_mat_wts=use_mat_wts)
 
-    # Generate data (no noise)
-    fname = gen_estimator_data(n_points=30, n_batch=100, noise_std=0.1)
-    # Post process
-    process_grad_data(filename=fname)
+    # # Generate data (no noise)
+    # fname = gen_estimator_data(
+    #     n_points=30, n_batch=100, noise_std=0.1, use_mat_wts=use_mat_wts
+    # )
+    # # Post process
+    # process_grad_data(filename=fname)
 
     # Re-process existing results.
     # process_grad_data(filename="_results/grad_comp_20241202T1616.pkl")

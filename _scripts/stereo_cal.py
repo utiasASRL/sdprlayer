@@ -63,6 +63,7 @@ def get_cal_data(
     cone_angles=(np.pi / 4, np.pi / 4),  # camera FOV (alpha), region cone (beta)
     plot=False,
     plot_pixel_meas=False,
+    cam=cam_gt,
 ):
     """Generate Ground truth pose and landmark data. Also generate pixel measurements"""
     # Ground Truth Map Points
@@ -137,7 +138,7 @@ def get_cal_data(
         C_p0 = C_p0s[i]
         r_ls += [r_l]
         r_l_inC = C_p0 @ (r_l - r_p)
-        pixel_meass += [cam_gt.forward(r_l_inC)]
+        pixel_meass += [cam.forward(r_l_inC)]
         if plot_pixel_meas:
             plot_pixel_meas(pixel_meass[-1])
     pixel_meass = torch.tensor(np.stack(pixel_meass))
@@ -1050,7 +1051,7 @@ if __name__ == "__main__":
     # Run these to generate all of the data for comparison. Will
     # populate outputs folder.
 
-    # compare_tune_baseline(N_batch=20, N_runs=50, mode="prob_data")
+    compare_tune_baseline(N_batch=20, N_runs=50, mode="prob_data")
     # compare_tune_baseline(N_batch=20, N_runs=50, mode="spdr")
     # compare_tune_baseline(N_batch=20, N_runs=50, mode="sdpr-dq")
     # compare_tune_baseline(N_batch=20, N_runs=50, mode="theseus_gt")
