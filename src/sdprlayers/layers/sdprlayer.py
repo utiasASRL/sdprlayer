@@ -22,9 +22,9 @@ mosek_params_dflt = {
 
 # When recomputing the lagrange multipliers, tolerance is the smallest singular value of the
 # constraint gradient matrix that is treated as non-zero.
-LICQ_TOL = 1e-8
+LICQ_TOL = 1e-7
 # Tolerance for norm of residuals of the KKT conditions.
-ATOL_KKT = 1e-6
+ATOL_KKT = 1e-5
 # Tolerance for residuals in LSQR solve
 # (see https://docs.scipy.org/doc/scipy/reference/generated/scipy.sparse.linalg.lsqr.html#lsqr)
 LSQR_TOL = 1e-10
@@ -563,7 +563,9 @@ def _QCQPDiffFn(
                     q_bar = Q @ x
 
                     # Solve for Lagrange Multipliers (for all constraints)
-                    mults = np.linalg.lstsq(G_r.T, -q_bar, rcond=ctx.licq_tol)[0]
+                    res = np.linalg.lstsq(G_r.T, -q_bar, rcond=ctx.licq_tol)
+                    mults = res[0]
+                    rank = res[2]
 
                     # Construct Certificate matrix and set redundant Lagrange multipliers to zero
                     H_list = [sp.csc_array(Q)]

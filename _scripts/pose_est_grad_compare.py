@@ -337,22 +337,30 @@ def test_jac_func(
         np.testing.assert_allclose(jacs[b][i], jacs_true[b][i], atol=1e-5)
 
 
+def set_seed(seed=0):
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+
+
 if __name__ == "__main__":
+    # Seed
+    set_seed()
+
     # Tests
     use_mat_wts = True
     # test_jac_func("svd", use_mat_wts=use_mat_wts)
     # test_jac_func("sdpr", use_mat_wts=use_mat_wts)
-    test_jac_func("sdpr-qcqpdiff", noise_std=1, use_mat_wts=use_mat_wts)
+    # test_jac_func("sdpr-qcqpdiff", noise_std=0.5, use_mat_wts=use_mat_wts)
     # test_jac_func("sdpr-qcqpdiff-reuse", noise_std=0.1, use_mat_wts=use_mat_wts)
     # test_jac_func("lieopt-gt-unroll", use_mat_wts=use_mat_wts)
     # test_jac_func("lieopt-rand", use_mat_wts=use_mat_wts)
 
-    # # Generate data (no noise)
-    # fname = gen_estimator_data(
-    #     n_points=30, n_batch=100, noise_std=5, use_mat_wts=use_mat_wts
-    # )
-    # # Post process
-    # process_grad_data(filename=fname, use_mat_wts=use_mat_wts)
+    # Generate data (no noise)
+    fname = gen_estimator_data(
+        n_points=30, n_batch=50, noise_std=1, use_mat_wts=use_mat_wts
+    )
+    # Post process
+    process_grad_data(filename=fname, use_mat_wts=use_mat_wts)
 
     # Re-process existing results.
     # process_grad_data(
