@@ -32,7 +32,7 @@ class SDPPoseEstimator(nn.Module):
             + self.gen_row_col_constraints()
         )
         # Redundant constraints
-        redun_list = list(range(7, len(constraints)))
+        redun_list = list(range(6, len(constraints)))
 
         # Initialize SDPRLayer
         self.sdprlayer = SDPRLayer(
@@ -168,7 +168,7 @@ class SDPPoseEstimator(nn.Module):
             W = inv_cov_weights  # BxNx3x3
         else:
             # Weight with identity if no weights are provided
-            W = torch.eye(3, 3).to(device).expand(B, N, -1, -1)
+            W = torch.eye(3, 3).to(device).expand(B, N, -1, -1) / N
         # diagonal elements
         Q_n[:, :, c, c] = kron(M, W)  # BxNx9x9
         Q_n[:, :, t, t] = W  # BxNx3x3

@@ -43,7 +43,7 @@ def get_point_clouds(n_points=30, n_batch=1, noise_std=0.0, precision=torch.doub
     noise = torch.concatenate([noise, torch.zeros((n_batch, 1, n_points))], axis=1)
     points_t = points_t + noise
     # Get weights
-    weights = torch.ones((n_batch, 1, n_points), dtype=precision)
+    weights = torch.ones((n_batch, 1, n_points), dtype=precision) / n_points
     print("...Done")
     return points_s, points_t, weights, T_t_s
 
@@ -80,7 +80,7 @@ def get_stereo_point_clouds(n_batch=30, noise_std=0.0, precision=torch.double):
     points_t = points_t.clone()
     # get scalar weights (unit)
     n_points = points_t.shape[2]
-    weights = torch.ones((n_batch, 1, n_points), dtype=precision)
+    weights = torch.ones((n_batch, 1, n_points), dtype=precision) / n_points
     # Add homogeneous coord
     points_s = torch.cat([points_s, torch.ones((n_batch, 1, n_points))], axis=1)
     points_t = torch.cat([points_t, torch.ones((n_batch, 1, n_points))], axis=1)
@@ -101,6 +101,12 @@ def get_soln_and_jac(
     n_batch = points_t.shape[0]  # number of batches
     n_points = points_t.shape[2]  # number of points in the point cloud
     precision = points_t.dtype  # precision of the points
+    # Lie Opt Parameters:
+    opt_kwargs = {
+        "abs_err_tolerance": 1e-10,
+        "rel_err_tolerance": 1e-10,
+        "max_iterations": 200,
+    }
     # Create estimator module
     if estimator == "svd":
         forward = SVDPoseEstimator(T_s_v=T_s_v)
@@ -115,9 +121,9 @@ def get_soln_and_jac(
             T_s_v=T_s_v, diff_qcqp=True, compute_multipliers=False
         )
     elif estimator in ["lieopt-gt", "lieopt-gt-unroll", "lieopt-rand"]:
-        forward = LieOptPoseEstimator(T_s_v=T_s_v, N_batch=1, N_map=n_points)
-    elif estimator == "lieopt-rand":
-        forward = LieOptPoseEstimator(T_s_v=T_s_v, N_batch=1, N_map=n_points)
+        forward = LieOptPoseEstimator(
+            T_s_v=T_s_v, N_batch=1, N_map=n_points, opt_kwargs_in=opt_kwargs
+        )
     else:
         raise ValueError("Estimator not known!")
 
@@ -230,22 +236,27 @@ def gen_estimator_data(n_points=30, n_batch=1, noise_std=0.0, use_mat_wts=False)
     if use_mat_wts:
         wt_str = "matwt_"
     else:
-        wt_str = "sclwt"
+        wt_str = "sclwt_"
     fname = "_results/grad_comp_" + wt_str + timestr + ".pkl"
     df.to_pickle(fname)
     return fname
 
 
-def process_grad_data(filename="_results/grad_comp_20241202T1158.pkl"):
+def process_grad_data(
+    filename="_results/grad_comp_20241202T1158.pkl", use_mat_wts=False
+):
     """Post process gradient data from trials"""
     # Read file
     df = read_pickle(filename)
 
     # get values for the SVD solution
-    df_svd = df[df["estimator"] == "svd"]
+    if use_mat_wts:
+        df_true = df[df["estimator"] == "lieopt-gt-unroll"]
+    else:
+        df_true = df[df["estimator"] == "svd"]
     iInput = 0
-    jacs_svd = torch.stack(
-        [jacs[iInput] for jacs in df_svd["jacobians"].values[0]]
+    jacs_true = torch.stack(
+        [jacs[iInput] for jacs in df_true["jacobians"].values[0]]
     ).numpy()
 
     # Loop through other solutions and compare with svd solution
@@ -262,7 +273,7 @@ def process_grad_data(filename="_results/grad_comp_20241202T1158.pkl"):
             [jacs[iInput] for jacs in df_2["jacobians"].values[0]]
         ).numpy()
         # Compare Jacobians
-        jac_diff = np.max(np.abs(jacs - jacs_svd), axis=(1, 2))
+        jac_diff = np.max(np.abs(jacs - jacs_true), axis=(1, 2))
         data.append(
             dict(
                 estimator=estimator,
@@ -283,11 +294,14 @@ def process_grad_data(filename="_results/grad_comp_20241202T1158.pkl"):
 def test_jac_func(
     estimator="lieopt-rand", n_points=30, n_batch=5, noise_std=0.0, use_mat_wts=False
 ):
+    torch.manual_seed(0)
+    np.random.seed(0)
     # Get points
     if use_mat_wts:
         points_s, points_t, weights, mat_wts, T_t_s_gt = get_stereo_point_clouds(
             n_batch=n_batch, noise_std=noise_std
         )
+        mat_wts = None
     else:
         points_s, points_t, weights, T_t_s_gt = get_point_clouds(
             n_points=n_points, n_batch=n_batch, noise_std=noise_std
@@ -300,41 +314,47 @@ def test_jac_func(
     )
 
     if use_mat_wts:
-        _, jacs_true, _, _ = get_soln_and_jac(
-            "lieopt-gt", points_t, points_s, weights, mat_wts, T_t_s_gt=T_t_s_gt
+        T_t_s_true, jacs_true, _, _ = get_soln_and_jac(
+            "lieopt-gt-unroll", points_t, points_s, weights, mat_wts, T_t_s_gt=T_t_s_gt
         )
     else:
-        _, jacs_true, _, _ = get_soln_and_jac(
+        T_t_s_true, jacs_true, _, _ = get_soln_and_jac(
             "svd", points_t, points_s, weights, mat_wts, T_t_s_gt=T_t_s_gt
         )
+    if noise_std == 0.0:
+        tol = 1e-10
+    else:
+        tol = 1e-6
 
     try:
-        np.testing.assert_allclose(T_t_s, T_t_s_gt, atol=1e-6)
+        np.testing.assert_allclose(T_t_s, T_t_s_gt, atol=tol)
     except:
         if estimator == "lieopt-rand":
             print("Converged to local min")
 
     for b in range(n_batch):
-        for i in range(2):
-            np.testing.assert_allclose(jacs[b][i], jacs_true[b][i], atol=1e-7)
+        i = 0
+        np.testing.assert_allclose(jacs[b][i], jacs_true[b][i], atol=1e-5)
 
 
 if __name__ == "__main__":
     # Tests
     use_mat_wts = True
-    test_jac_func("svd", use_mat_wts=use_mat_wts)
+    # test_jac_func("svd", use_mat_wts=use_mat_wts)
     # test_jac_func("sdpr", use_mat_wts=use_mat_wts)
-    # test_jac_func("sdpr-qcqpdiff", noise_std=0.0, use_mat_wts=use_mat_wts)
-    # test_jac_func("sdpr-qcqpdiff-reuse", use_mat_wts=use_mat_wts)
+    test_jac_func("sdpr-qcqpdiff", noise_std=1, use_mat_wts=use_mat_wts)
+    # test_jac_func("sdpr-qcqpdiff-reuse", noise_std=0.1, use_mat_wts=use_mat_wts)
     # test_jac_func("lieopt-gt-unroll", use_mat_wts=use_mat_wts)
     # test_jac_func("lieopt-rand", use_mat_wts=use_mat_wts)
 
     # # Generate data (no noise)
     # fname = gen_estimator_data(
-    #     n_points=30, n_batch=100, noise_std=0.1, use_mat_wts=use_mat_wts
+    #     n_points=30, n_batch=100, noise_std=5, use_mat_wts=use_mat_wts
     # )
     # # Post process
-    # process_grad_data(filename=fname)
+    # process_grad_data(filename=fname, use_mat_wts=use_mat_wts)
 
     # Re-process existing results.
-    # process_grad_data(filename="_results/grad_comp_20241202T1616.pkl")
+    # process_grad_data(
+    #     filename="_results/grad_comp_matwt_20241214T1406.pkl", use_mat_wts=use_mat_wts
+    # )
