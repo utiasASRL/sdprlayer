@@ -1051,7 +1051,7 @@ if __name__ == "__main__":
     # Run these to generate all of the data for comparison. Will
     # populate outputs folder.
 
-    compare_tune_baseline(N_batch=20, N_runs=50, mode="prob_data")
+    # compare_tune_baseline(N_batch=20, N_runs=50, mode="prob_data")
     # compare_tune_baseline(N_batch=20, N_runs=50, mode="spdr")
     # compare_tune_baseline(N_batch=20, N_runs=50, mode="sdpr-dq")
     # compare_tune_baseline(N_batch=20, N_runs=50, mode="theseus_gt")

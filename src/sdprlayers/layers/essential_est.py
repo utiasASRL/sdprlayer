@@ -57,7 +57,13 @@ class EssentialSDPBlock(nn.Module):
         constraints += self.get_tcross_constraints()
 
         # Initialize SDPRLayer
-        self.sdprlayer = SDPRLayer(n_vars=13, use_dual=True, constraints=constraints)
+        self.sdprlayer = SDPRLayer(
+            n_vars=13,
+            diff_qcqp=True,
+            use_dual=True,
+            constraints=constraints,
+            redun_list=[],
+        )
 
         self.tol = tol
         self.mosek_params = {
@@ -112,7 +118,7 @@ class EssentialSDPBlock(nn.Module):
         keypoints_trg,
         weights,
         verbose=False,
-        rescale=False,
+        rescale=True,
     ):
         """
         Compute the optimal fundamental matrix relating source and target frame. This
@@ -158,6 +164,19 @@ class EssentialSDPBlock(nn.Module):
                 info["dual"], var_list=self.var_dict
             ).toarray()
             mults = [y for y in info["mults"]]
+
+            ## DEBUG
+            # C = Q.detach().numpy()
+            # constraints = self.sdprlayer.constr_list + [self.sdprlayer.A_0]
+            # A_bar = []
+            # H2 = C.copy()
+            # for i, A in enumerate(constraints):
+            #     H2 += A * mults[i]
+            #     A_bar.append(A @ Y)
+            # A_bar = np.hstack(A_bar)
+            # ls_sol = np.linalg.lstsq(A_bar, -C @ Y)
+            # mults_2 = ls_sol[0]
+
             # Add solution to list to pass to layer
             if self.sdprlayer.use_dual:
                 ext_vars_list.append(

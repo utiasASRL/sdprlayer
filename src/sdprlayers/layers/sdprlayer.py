@@ -29,7 +29,7 @@ ATOL_KKT = 1e-5
 # (see https://docs.scipy.org/doc/scipy/reference/generated/scipy.sparse.linalg.lsqr.html#lsqr)
 LSQR_TOL = 1e-10
 # Minimum Eigenvalue Ratio for Tightness Check.
-ER_MIN = 1e6
+ER_MIN = 1e5
 
 
 class SDPRLayer(CvxpyLayer):
