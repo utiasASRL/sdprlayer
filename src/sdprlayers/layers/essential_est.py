@@ -15,7 +15,7 @@ from sdprlayers.layers.sdprlayer import SDPRLayer
 from sdprlayers.utils.lie_algebra import so3_wedge
 
 
-class EssentialSDPBlock(nn.Module):
+class SDPEssMatEst(nn.Module):
     """
     Compute the essential matrix relating two images using the
     Semidefinite Programming Relaxation (SDPR)Layer. Inputs to the layer need to be normalized 2D points.
@@ -35,7 +35,7 @@ class EssentialSDPBlock(nn.Module):
 
     """
 
-    def __init__(self, K_source=None, K_target=None, tol=1e-10):
+    def __init__(self, K_source=None, K_target=None, tol=1e-10, **kwargs):
         """
         Initialize the FundMatSDPBlock class.
         Intrinsic matrix inputs are used solely to determine the best essential matrix for the given
@@ -43,8 +43,9 @@ class EssentialSDPBlock(nn.Module):
             tol = tolerance used for the SDP Solver
             K_source = Intrinsic matrix of the source image points
             K_target = Intrinsic matrix of the target image points
+            kwargs = Key word arguments passed to the SDPRLayer class.
         """
-        super(EssentialSDPBlock, self).__init__()
+        super(SDPEssMatEst, self).__init__()
         # Define constraint dict
         self.var_dict = {"h": 1, "e1": 3, "e2": 3, "e3": 3, "t": 3}
         self.size = 13
@@ -58,11 +59,7 @@ class EssentialSDPBlock(nn.Module):
 
         # Initialize SDPRLayer
         self.sdprlayer = SDPRLayer(
-            n_vars=13,
-            diff_qcqp=True,
-            use_dual=True,
-            constraints=constraints,
-            redun_list=[],
+            n_vars=13, use_dual=True, constraints=constraints, redun_list=[], **kwargs
         )
 
         self.tol = tol
@@ -121,7 +118,7 @@ class EssentialSDPBlock(nn.Module):
         rescale=True,
     ):
         """
-        Compute the optimal fundamental matrix relating source and target frame. This
+        Compute the optimal essential matrix relating source and target frame. This
             matrix minimizes the following cost function:
             C(E) = sum( x_trg^T E x_src )
             where x_trg is a target keypoint drawn from keypoints_trg and x_src is a source keypoint drawn from keypoints_src. It is assumed that these keypoints are normalized.
@@ -163,7 +160,7 @@ class EssentialSDPBlock(nn.Module):
             H = self.homQCQP.get_dual_matrix(
                 info["dual"], var_list=self.var_dict
             ).toarray()
-            mults = [y for y in info["mults"]]
+            mults = np.array(info["mults"])
 
             ## DEBUG
             # C = Q.detach().numpy()
@@ -203,8 +200,7 @@ class EssentialSDPBlock(nn.Module):
         rank = np.max(ranks)
 
         # Extract solution
-        # NOTE: Homogenizing variable has been stripped from vector solution
-        E_mats = torch.reshape(x[:, 0:9, :], (-1, 3, 3))
+        E_mats = torch.reshape(x[:, 1:10, :], (-1, 3, 3))
         # There is ambiguity in the solution at this point due to the fact that there are 10 possible essential matrices for a given set of keypoint correspondences.
         # To deal with this we compute the "best" rotation and translation using the kornia library
         if self.K_source is None:
@@ -217,6 +213,7 @@ class EssentialSDPBlock(nn.Module):
         else:
             K_target = self.K_target
         # Choose the rotation and translation that best represent the keypoints
+        # Returns R_ts and t_ts_s
         Rs, ts, points_3d = motion_from_essential_choose_solution(
             E_mats,
             K_source,
@@ -225,9 +222,9 @@ class EssentialSDPBlock(nn.Module):
             keypoints_trg[:, :2, :].mT,
         )
         # reconstruct Essential matrices
-        Es = Rs.bmm(so3_wedge(ts))
+        Es = so3_wedge(ts[:, :, 0]).bmm(Rs)
 
-        return E_mats, ts, X, rank
+        return Es, Rs, ts, X, rank
 
     @staticmethod
     def get_obj_matrix_vec(

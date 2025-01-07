@@ -1,20 +1,20 @@
+import time
 import unittest
 
 import kornia.geometry.epipolar as epi
-import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from cert_tools import HomQCQP
 from cert_tools.sparse_solvers import solve_dsdp
+from pandas import DataFrame
 from poly_matrix import PolyMatrix
+from tqdm import tqdm
 
 import sdprlayers.utils.fund_mat_utils as utils
-from sdprlayers import EssentialSDPBlock
+from sdprlayers import SDPEssMatEst
 from sdprlayers.utils.camera_model import CameraModel
-from sdprlayers.utils.lie_algebra import so3_wedge
-
-# matplotlib.use("TkAgg")
+from sdprlayers.utils.lie_algebra import se3_exp, so3_wedge
 
 
 def set_seed(x):
@@ -24,7 +24,7 @@ def set_seed(x):
 
 class TestEssMat(unittest.TestCase):
 
-    def __init__(self, *args, n_points=50, tol=1e-12, **kwargs):
+    def __init__(self, *args, n_batch=1, n_points=50, tol=1e-12, **kwargs):
         super(TestEssMat, self).__init__(*args, **kwargs)
         # Default dtype
         torch.set_default_dtype(torch.float64)
@@ -32,12 +32,14 @@ class TestEssMat(unittest.TestCase):
         self.device = "cuda:0"
         # Set seed
         set_seed(0)
-        batch_size = 1
         # Set up test problem
         # NOTE ts_ts_s is the vector from the source to the target frame expressed in the source frame
         # NOTE Rs_ts is the rotation that maps vectors in the source frame to vectors in the target frame
         ts_ts_s, Rs_ts, key_ss = utils.get_gt_setup(
-            N_map=n_points, N_batch=batch_size, traj_type="clusters"
+            N_map=n_points,
+            N_batch=n_batch,
+            traj_type="circle",
+            offs=np.array([[0, 0, 2]]).T,
         )
         # Transforms from source to target
         Rs_ts = torch.tensor(Rs_ts)
@@ -47,15 +49,15 @@ class TestEssMat(unittest.TestCase):
         self.Rs_ts = Rs_ts
 
         # Keypoints (3D) defined in source frame
-        key_ss = torch.tensor(key_ss)[None, :, :].expand(batch_size, -1, -1)
+        key_ss = torch.tensor(key_ss)[None, :, :].expand(n_batch, -1, -1)
         # Keypoints in target frame
         key_ts = Rs_ts.bmm(key_ss - ts_ts_s)
         # homogenize coordinates
         trg_coords = torch.concat(
-            [key_ts, torch.ones(batch_size, 1, key_ss.size(2))], dim=1
+            [key_ts, torch.ones(n_batch, 1, key_ss.size(2))], dim=1
         )
         src_coords = torch.concat(
-            [key_ss, torch.ones(batch_size, 1, key_ss.size(2))], dim=1
+            [key_ss, torch.ones(n_batch, 1, key_ss.size(2))], dim=1
         )
 
         # Define Camera
@@ -66,7 +68,7 @@ class TestEssMat(unittest.TestCase):
         trg_img_pts = camera.camera_model(trg_coords)
         # Get inverse intrinsic camera mat
         K_inv = torch.linalg.inv(camera.K)
-        K_invs = K_inv.expand(batch_size, 3, 3)
+        K_invs = K_inv.expand(n_batch, 3, 3)
         # Store normalized image coordinates
         self.keypoints_src = K_invs.bmm(src_img_pts[:, :3, :])
         self.keypoints_trg = K_invs.bmm(trg_img_pts[:, :3, :])
@@ -78,10 +80,10 @@ class TestEssMat(unittest.TestCase):
         self.camera = camera
 
         # Normalize the translations
-        t_norm = torch.norm(ts_st_t)
+        t_norm = torch.norm(ts_st_t, dim=1, keepdim=True)
         self.ts_st_t = ts_st_t / t_norm
         # Construct Essential Matrix
-        self.Es = so3_wedge(self.ts_st_t).bmm(self.Rs_ts)
+        self.Es = so3_wedge(self.ts_st_t[:, :, 0]).bmm(self.Rs_ts)
         check = (
             self.keypoints_trg[0, :3, [0]].mT
             @ self.Es[0]
@@ -92,7 +94,7 @@ class TestEssMat(unittest.TestCase):
         # Construct solution vectors
         self.sol = torch.cat(
             [
-                torch.ones((batch_size, 1, 1)),
+                torch.ones((n_batch, 1, 1)),
                 torch.reshape(self.Es, (-1, 9, 1)),  # row-major vectorization
                 self.ts_st_t,
             ],
@@ -100,7 +102,7 @@ class TestEssMat(unittest.TestCase):
         )
         K_batch = self.camera.K.expand(1, -1, -1)
         # Initialize layer
-        self.layer = EssentialSDPBlock(tol=tol, K_source=K_batch, K_target=K_batch)
+        self.layer = SDPEssMatEst(tol=tol, K_source=K_batch, K_target=K_batch)
 
     def test_constraints(self):
         """Test that the constraints characterize the fundamental matrix and epipole."""
@@ -143,7 +145,7 @@ class TestEssMat(unittest.TestCase):
                 )
 
         # Construct objective matrix
-        Q, _, _ = EssentialSDPBlock.get_obj_matrix_vec(
+        Q, _, _ = SDPEssMatEst.get_obj_matrix_vec(
             srcs, trgs, t.weights, scale_offset=False
         )
         # Check that matrix does the same thing
@@ -185,12 +187,12 @@ class TestEssMat(unittest.TestCase):
         srcs = t.keypoints_src
         srcs[:, :2, :] += sigma * torch.randn(B, 2, N)
 
-        Es_est, ts_est, X, rank = self.layer(
+        Es_est, Rs_est, ts_est, X, rank = self.layer(
             srcs,
             trgs,
             t.weights,
             verbose=True,
-            rescale=False,
+            rescale=True,
         )
         # Check Solution Rank
         if plot:
@@ -212,10 +214,10 @@ class TestEssMat(unittest.TestCase):
             # Check sign ambiguity
             if np.linalg.norm(E_gt - E_est) > np.linalg.norm(E_gt + E_est):
                 E_est = -E_est
-            if np.linalg.norm(t_est - t_est) > np.linalg.norm(t_est + t_est):
+            if np.linalg.norm(t_gt - t_est) > np.linalg.norm(t_gt + t_est):
                 t_est = -t_est
-            np.testing.assert_allclose(t_est, t_gt, atol=1e-4)
-            np.testing.assert_allclose(E_est, E_gt, atol=1e-4)
+            np.testing.assert_allclose(E_est, E_gt, atol=1e-5)
+            np.testing.assert_allclose(t_est, t_gt, atol=1e-5)
         else:
             # Otherwise, check that the cost is better than the ground truth cost
             b = 0
@@ -422,20 +424,22 @@ class TestEssMat(unittest.TestCase):
 
         # Get essential matrix, and extract rotation, translation
         Es, ts, Rs = get_kornia_solution(
-            srcs[:, :2, :].mT,
-            trgs[:, :2, :].mT,
-            self.weights[:, 0, :],
+            srcs,
+            trgs,
+            self.weights,
             self.camera.K.unsqueeze_(0),
-            self.Es,
         )
 
         # Test values
-        np.testing.assert_allclose(
-            Es.numpy(),
-            self.Es.numpy(),
-            atol=1e-10,
-            err_msg="Kornia solution not correct",
-        )
+        for b in range(B):
+            if np.linalg.norm(self.Es[b] - Es[b]) > np.linalg.norm(self.Es[b] + Es[b]):
+                Es[b] = -Es[b]
+            np.testing.assert_allclose(
+                Es[b].numpy(),
+                self.Es[b].numpy(),
+                atol=1e-10,
+                err_msg="Kornia solution not correct",
+            )
 
     def test_kornia_backward(self, sigma_val=0.0):
         # Sizes
@@ -492,29 +496,159 @@ class TestEssMat(unittest.TestCase):
             rtol=rtol,
         )
 
+    def compare_gradients(self, sigma_val=0.0):
+        """Compare gradients between Kornia (local solve) and SDP solver"""
+        # Estimators
+        # estimator_list = ["kornia", "sdpr-sdp", "sdpr-cift", "sdpr-is"]
+        estimator_list = ["kornia", "sdpr-is"]
+        # Sizes
+        B = self.keypoints_src.size(0)
+        N = self.keypoints_src.size(2)
+        # Add Noise
+        sigma = torch.tensor(sigma_val)
+        trgs = self.keypoints_trg
+        trgs[:, :2, :] += sigma * torch.randn(B, 2, N)
+        srcs = self.keypoints_src
+        srcs[:, :2, :] += sigma * torch.randn(B, 2, N)
+        # Batchify Intrinsic matrix
+        K = self.camera.K[None, :, :]
+        # Assess estimators
+        data_dicts = []
+        for estimator in estimator_list:
+            Es_est, jacobians, time_f, time_b = get_soln_and_jac(
+                estimator, trgs, srcs, self.weights, K
+            )
+            # Compute distance from ground truth value
+            est_err_norms = torch.norm(Es_est - self.Es)
 
-def get_kornia_solution(srcs, trgs, wts, K, Es_gt):
-    Es_kornia = epi.find_essential(srcs, trgs, wts)
-    # find the best of the 10 kornia solutions
-    vals = torch.linalg.matrix_norm(Es_gt - Es_kornia)
-    ind = torch.argmin(vals)
-    Es_kornia = Es_kornia[:, ind, :, :]
+            # Store data
+            data_dict = dict(
+                estimator=estimator,
+                Es_est=Es_est,
+                jacobians=jacobians,
+                est_err_norms=est_err_norms,
+                time_f=time_f,
+                time_b=time_b,
+            )
+            data_dicts.append(data_dict)
+        df = DataFrame(data_dicts)
+
+        # Store to file
+        fname = "_results/ess_mat/grad_comp.pkl"
+        df.to_pickle(fname)
+        return fname
+
+
+def get_soln_and_jac(estimator, points_t, points_s, weights, K, tol=1e-12, **kwargs):
+    """Apply estimator to point clouds and obtain solution and solution gradient.
+    NOTE: gradients are computed sequentially using torch's grad function and then assembled into a Jacobian for each input. We also loop over the batch dimension.
+    All computations are done on the CPU sequentially.
+
+    "jacobians" output has dimensions B x (num inputs) x (output dims) x (input dims).
+    """
+    n_batch = points_t.shape[0]  # number of batches
+    n_points = points_t.shape[2]  # number of points in the point cloud
+    precision = points_t.dtype  # precision of the points
+    # Create estimator module
+    if estimator == "sdpr-sdp":
+        forward = SDPEssMatEst(K_source=K, K_target=K, diff_qcqp=False, tol=tol)
+    elif estimator == "sdpr-cift":
+        forward = SDPEssMatEst(
+            K_source=K, K_target=K, diff_qcqp=True, compute_multipliers=True, tol=tol
+        )
+    elif estimator == "sdpr-is":
+        forward = SDPEssMatEst(
+            K_source=K, K_target=K, diff_qcqp=True, compute_multipliers=False, tol=tol
+        )
+    elif estimator == "kornia":
+        forward = get_kornia_solution
+    else:
+        raise ValueError("Estimator not known!")
+
+    # Manually loop through batches
+    n_batch = points_t.shape[0]
+    estimates, jacobians, times_f, times_b = [], [], [], []
+    jacobians = []
+    print(f"Running {n_batch} Tests of {n_points} points with estimator {estimator}")
+    for b in tqdm(range(n_batch)):
+        # Define input variables
+        inputs = [
+            points_s[[b], :, :].requires_grad_(True),
+            points_t[[b], :, :].requires_grad_(True),
+            weights[[b], :, :].requires_grad_(True),
+        ]
+
+        # Apply forward pass of estimator and time the response
+        Tf_0 = time.time()
+        if estimator in "kornia":
+            # Add intrinsic camera matrix for Kornia solution
+            kwargs.update(dict(K=K))
+        # Run Estimator
+        outputs = forward(*inputs, **kwargs)
+        estimates.append(outputs[0])
+        Tf_1 = time.time()
+        times_f.append(Tf_1 - Tf_0)
+        # Compute Jacobian
+        # NOTE: We do this by manually looping to avoid issues with vmap
+        # Output gradient vectors
+        grad_outputs = torch.eye(9).reshape(9, 3, 3)
+        Tb_0 = time.time()
+        input_jacs = [[] for i in range(len(inputs))]
+        # Loop over output gradients
+        for grad_output in grad_outputs:
+            grads = torch.autograd.grad(
+                estimates[-1][0], inputs, grad_output, retain_graph=True
+            )
+            for iInput in range(len(inputs)):
+                input_jacs[iInput].append(grads[iInput].flatten())
+        # Stack gradients into jacobian and store
+        jacobians.append([torch.stack(jac) for jac in input_jacs])
+        Tb_1 = time.time()
+        times_b.append(Tb_1 - Tb_0)
+
+    # Get average times
+    time_f = np.mean(times_f)
+    time_b = np.mean(times_b)
+    # batch estimates
+    estimates = torch.concat(estimates, dim=0).detach()
+
+    return estimates, jacobians, time_f, time_b
+
+
+def get_kornia_solution(srcs, trgs, wts, K=torch.eye(4)):
+    # Reshape to kornia format
+    srcs_krn = srcs[:, :2, :].mT
+    trgs_krn = trgs[:, :2, :].mT
+    wts_krn = wts[:, 0, :]
+    # get essential matrix
+    Es_kornia = epi.find_essential(srcs_krn, trgs_krn, wts_krn)
+    # find the best of the 10 kornia solutions using the sampson distance
+    dists = []
+    for i in range(10):
+        point_dists = epi.sampson_epipolar_distance(
+            srcs_krn, trgs_krn, Es_kornia[:, i, :, :]
+        )
+        dists.append(torch.sum(point_dists, 1))
+    dists = torch.stack(dists, 1)
+    ind = torch.argmin(dists, 1)
+    n_batch = Es_kornia.shape[0]
+    Es_kornia_best = Es_kornia[torch.arange(n_batch), ind, :, :]
     # Decompose solution
     Rs, ts, points = epi.motion_from_essential_choose_solution(
-        Es_kornia,
+        Es_kornia_best,
         K,
         K,
-        srcs,
-        trgs,
+        srcs_krn,
+        trgs_krn,
     )
-    Es = so3_wedge(ts).bmm(Rs)
+    Es = so3_wedge(ts[:, :, 0]).bmm(Rs)
 
     return Es, ts, Rs
 
 
 if __name__ == "__main__":
     # Unity element constraint
-    t = TestEssMat(n_points=20, tol=1e-12)
+    t = TestEssMat(n_points=20, n_batch=2, tol=1e-12)
 
     # t.test_constraints()
     # t.test_cost_matrix_nonoise()
@@ -523,7 +657,10 @@ if __name__ == "__main__":
     # t.test_sdpr_forward_nonoise()
     # t.test_sdpr_forward(sigma_val=10 / 800)
     # t.test_cost_backward()
-    t.test_layer_backward(sigma_val=0 / 800)
+    # t.test_layer_backward(sigma_val=0 / 800)
     # t.test_kornia_solution()
     # t.test_kornia_backward()
     # t.compare_with_kornia(sigma_val=0 / 800)
+
+    # Gradient Comparison
+    t.compare_gradients()

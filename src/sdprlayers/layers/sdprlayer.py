@@ -312,16 +312,16 @@ class SDPRLayer(CvxpyLayer):
             # Get torch tensor from CvxpyLayers
             soln = super().forward(*param_vals_h, **kwargs_new)
             Xs = soln[0]
-            diffcp_soln = soln[1:]
             # Extract solutions
             xs = self.recovery_map(Xs)
-            mults = [-mult for mult in soln[1]]  # Lagrange multipliers
+            # Lagrange multipliers - sign is flipped since cvxpy uses Ax+s=b (Ay+H=Q) conic canonical form
+            mults = [-vals for vals in soln[1]]
             # NOTE: unclear why the slack var (certificate) is always the same output, but may
             # have to do with the way the problem is canonicalized.
             if self.use_dual:
-                hs = diffcp_soln[2]
+                hs = soln[3]
             else:
-                hs = diffcp_soln[2]
+                hs = soln[3]
             # Unvectorize certificate matrices
             Hs = [cones.unvec_symm(h, self.n_vars) for h in hs]
             # Check that the whole batch is tight.

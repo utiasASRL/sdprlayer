@@ -1,4 +1,4 @@
-from sdprlayers.layers.essential_est import EssentialSDPBlock
+from sdprlayers.layers.essential_est import SDPEssMatEst
 from sdprlayers.layers.fundmat_est import FundMatSDPBlock
 from sdprlayers.layers.lieopt_pose_est import LieOptPoseEstimator
 from sdprlayers.layers.polyminlayer import PolyMinLayer, polyval
