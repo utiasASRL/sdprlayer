@@ -161,7 +161,7 @@ def get_soln_and_jac(
             kwargs.update(dict(T_trg_src_init=T_t_s_init[[b], :, :]))
 
         # Adjust tolerances for SDP
-        if estimator in ["sdpr-sdp", "sdpr-cift"]:
+        if estimator in ["sdpr-sdp", "sdpr-cift", "sdpr-is"]:
             tol = 1e-12
             mosek_params = {
                 "MSK_IPAR_INTPNT_MAX_ITERATIONS": 1000,
@@ -228,7 +228,9 @@ def get_experiment_data(n_batch, noise_std, n_points, experiment):
     return points_s, points_t, weights, T_t_s_gt, mat_wts
 
 
-def gen_estimator_data(n_points=30, n_batch=1, noise_std=0.0, experiment="pointcloud"):
+def gen_estimator_data(
+    n_points=30, n_batch=1, noise_std=0.0, experiment="pointcloud", save_data=True
+):
     """Compare Solutions and gradients of different estimators
 
     Args:
@@ -263,21 +265,26 @@ def gen_estimator_data(n_points=30, n_batch=1, noise_std=0.0, experiment="pointc
         data_dicts.append(data_dict)
     df = DataFrame(data_dicts)
 
-    # Store to file
-    import time
+    if save_data:
+        # Store to file
+        import time
 
-    # timestr = time.strftime("%Y%m%dT%H%M")
-    fname = "_results/grad_comp_" + experiment + ".pkl"
-    df.to_pickle(fname)
-    return fname
+        fname = "_results/grad_comp_" + experiment + ".pkl"
+        df.to_pickle(fname)
+        return fname
+    else:
+        return df
 
 
-def process_grad_data(filename=None, experiment="pointcld"):
+def process_grad_data(
+    filename=None, df=None, experiment="pointcld", return_diffs=False
+):
     """Post process gradient data from trials"""
-    if filename is None:
+    if filename is None and df is None:
         filename = f"_results/grad_comp_{experiment}.pkl"
-    # Read file
-    df = read_pickle(filename)
+    if df is None:
+        # Read file
+        df = read_pickle(filename)
 
     # "correct" solution depends on experiment
     if experiment == "stereo-matwt":
@@ -286,6 +293,7 @@ def process_grad_data(filename=None, experiment="pointcld"):
     else:
         # scalar weighted, svd more accurate
         df_true = df[df["estimator"] == "svd"]
+    # Fix the inputs to the source frame keypoints
     iInput = 0
     jacs_true = torch.stack(
         [jacs[iInput] for jacs in df_true["jacobians"].values[0]]
@@ -295,6 +303,7 @@ def process_grad_data(filename=None, experiment="pointcld"):
     # Loop through other solutions and compare with svd solution
     estimators = df.estimator.to_list()
     data = []
+    jac_diffs = {}
     for estimator in estimators:
         df_2 = df[df["estimator"] == estimator]
         T_t_s_est = df_2["T_t_s_est"].values[0]
@@ -328,8 +337,14 @@ def process_grad_data(filename=None, experiment="pointcld"):
                 time_backward=df_2["time_b"].values[0],
             )
         )
+        # Store jacobian differences
+        jac_diffs[estimator] = jac_diff
+
     df_out = DataFrame(data)
-    return df_out
+    if return_diffs:
+        return jac_diffs
+    else:
+        return df_out
 
 
 def test_jac_func(
