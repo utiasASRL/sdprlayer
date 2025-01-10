@@ -171,12 +171,7 @@ def get_soln_and_jac(
                 "MSK_DPAR_INTPNT_CO_TOL_INFEAS": tol,
                 "MSK_DPAR_INTPNT_CO_TOL_DFEAS": tol,
             }
-            solver_args = {
-                "solve_method": "mosek",
-                "mosek_params": mosek_params,
-                "verbose": False,
-            }
-            kwargs.update(dict(solver_args=solver_args))
+            kwargs.update(dict(verbose=False, mosek_params=mosek_params))
 
         estimates.append(forward(*inputs, **kwargs))
         Tf_1 = time.time()
@@ -277,7 +272,7 @@ def gen_estimator_data(
 
 
 def process_grad_data(
-    filename=None, df=None, experiment="pointcld", return_diffs=False
+    filename=None, df=None, experiment="pointcld", return_summary=True
 ):
     """Post process gradient data from trials"""
     if filename is None and df is None:
@@ -304,6 +299,7 @@ def process_grad_data(
     estimators = df.estimator.to_list()
     data = []
     jac_diffs = {}
+    errors = {}
     for estimator in estimators:
         df_2 = df[df["estimator"] == estimator]
         T_t_s_est = df_2["T_t_s_est"].values[0]
@@ -339,12 +335,13 @@ def process_grad_data(
         )
         # Store jacobian differences
         jac_diffs[estimator] = jac_diff
+        errors[estimator] = error
 
     df_out = DataFrame(data)
-    if return_diffs:
-        return jac_diffs
-    else:
+    if return_summary:
         return df_out
+    else:
+        return jac_diffs, errors
 
 
 def test_jac_func(
