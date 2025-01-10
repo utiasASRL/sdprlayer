@@ -5,6 +5,7 @@ import matplotlib.pylab as plt
 import numpy as np
 import scipy.sparse as sp
 import torch
+from diffcp import cones
 
 from sdprlayers.layers.sdprlayer import SDPRLayer, SDPRLayerMosek
 
@@ -64,7 +65,7 @@ class TestSDPRPoly6(unittest.TestCase):
         x_vals = x.detach().numpy()
         np.testing.assert_allclose(x_vals, self.data["x_cand"], rtol=1e-3, atol=1e-3)
 
-    def test_sdp_grad_configs(self):
+    def test_grad_configs(self):
         """Test SDPRLayers with under different configurations"""
 
         for use_mosek in [False, True]:  # Mosek as solver
@@ -74,7 +75,7 @@ class TestSDPRPoly6(unittest.TestCase):
                         print(
                             f"Test Config: dual: {use_dual}, mosek: {use_mosek}, diff qcqp: {diff_qcqp}, recompute mults: {compute_mult}"
                         )
-                        self.run_sdp_grad_test(
+                        self.run_sdprlayers_grad_test(
                             use_mosek=use_mosek,
                             use_dual=use_dual,
                             diff_qcqp=diff_qcqp,
@@ -82,8 +83,27 @@ class TestSDPRPoly6(unittest.TestCase):
                         )
                         print("PASS")
 
-    def run_sdp_grad_test(
-        self, use_mosek=True, use_dual=True, diff_qcqp=True, compute_mult=False
+    def test_grad_remove_constraint(self):
+        """Tests what happens when too many constraints are considered redundant"""
+        for diff_qcqp in [False, True]:  # Differentiate through QCQP
+            for compute_mult in [False, True]:  # Recompute Lagrange Multipliers
+                try:
+                    self.run_sdprlayers_grad_test(
+                        diff_qcqp=diff_qcqp,
+                        compute_mult=compute_mult,
+                        redun_list=[1, 2],
+                    )
+                    raise ValueError("Execution should have failed")
+                except:
+                    pass
+
+    def run_sdprlayers_grad_test(
+        self,
+        use_mosek=True,
+        use_dual=True,
+        diff_qcqp=True,
+        compute_mult=False,
+        redun_list=[2],
     ):
         """Test SDPRLayer with different configurations"""
         # Get data from data function
@@ -99,7 +119,7 @@ class TestSDPRPoly6(unittest.TestCase):
             use_dual=use_dual,
             diff_qcqp=diff_qcqp,
             compute_multipliers=compute_mult,
-            redun_list=[2],
+            redun_list=redun_list,
         )
         if use_mosek:
             sdpr_args["mosek_params"] = {
@@ -121,9 +141,6 @@ class TestSDPRPoly6(unittest.TestCase):
         def gen_loss(p_val, **kwargs):
             p_vals = torch.hstack([p_0, p_val])
             X, x = optlayer(build_data_mat(p_vals), **kwargs)
-            x_target = -1
-            x_val = x[1, 0]
-            loss = 1 / 2 * (x_val - x_target) ** 2
             return x
 
         # Check gradient w.r.t. parameter p
@@ -133,6 +150,66 @@ class TestSDPRPoly6(unittest.TestCase):
         else:
             kwargs = {}
             tols = dict(eps=1e-3, atol=1e-3, rtol=0)
+        torch.autograd.gradcheck(lambda *p: gen_loss(*p, **kwargs), [p[1:]], **tols)
+
+    def test_ext_solution(self):
+        """Test SDPRLayer Using externally computed solution"""
+        # Get data from data function
+        constraints = self.data["constraints"]
+
+        # Set up polynomial parameter tensor
+        p = torch.tensor(self.data["p_vals"], requires_grad=True)
+
+        # Create SDPR Layers
+        mosek_params = {
+            "MSK_IPAR_INTPNT_MAX_ITERATIONS": 500,
+            "MSK_DPAR_INTPNT_CO_TOL_PFEAS": 1e-12,
+            "MSK_DPAR_INTPNT_CO_TOL_REL_GAP": 1e-12,
+            "MSK_DPAR_INTPNT_CO_TOL_MU_RED": 1e-12,
+            "MSK_DPAR_INTPNT_CO_TOL_INFEAS": 1e-12,
+            "MSK_DPAR_INTPNT_CO_TOL_DFEAS": 1e-12,
+        }
+        # First layer just computes solution
+        optlayer1 = SDPRLayerMosek(
+            n_vars=4,
+            constraints=constraints,
+            use_dual=True,
+            diff_qcqp=True,
+            compute_multipliers=False,
+            redun_list=[2],
+            mosek_params=mosek_params,
+        )
+        # Second layer used to diff.
+        optlayer2 = SDPRLayer(
+            n_vars=4,
+            constraints=constraints,
+            use_dual=True,
+            diff_qcqp=True,
+            compute_multipliers=True,
+            redun_list=[2],
+        )
+
+        # Define loss
+        # NOTE: we skip the derivative wrt p_0 since it should be identically zero. Numerical issues cause it to be different.
+        p_0 = p[0]
+
+        def gen_loss(p_val, **kwargs):
+            p_vals = torch.hstack([p_0, p_val])
+            with torch.no_grad():
+                # Compute solution
+                x_vals = optlayer1(build_data_mat(p_vals), **kwargs)[1].numpy()
+
+            # Differentiate the solution that is passed into the second layer
+            vecX = cones.vec_symm(x_vals @ x_vals.T)
+            ext_vars_list = [dict(x=np.zeros(4), s=np.zeros(vecX.shape), y=vecX)]
+            X, x = optlayer2(build_data_mat(p_vals), ext_vars_list=ext_vars_list)
+
+            return x
+
+        # Check gradient w.r.t. parameter p
+
+        kwargs = {}
+        tols = dict(eps=1e-3, atol=1e-3, rtol=0)
         torch.autograd.gradcheck(lambda *p: gen_loss(*p, **kwargs), [p[1:]], **tols)
 
     def test_redundant_constraint(self):
@@ -263,4 +340,6 @@ if __name__ == "__main__":
     # test_prob_sdp(display=True)
     # test_prob_local(display=True)
     # test_redundant_constraint()
-    test.test_sdp_grad_configs()
+    # test.test_grad_configs()
+    # test.test_grad_remove_constraint()
+    test.test_ext_solution()

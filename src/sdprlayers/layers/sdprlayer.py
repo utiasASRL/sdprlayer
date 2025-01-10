@@ -571,13 +571,10 @@ def _QCQPDiffFn(
                         if len(A.shape) > 2:
                             A = A[b]
                         H_list.append(A * all_mults[i])
-                    H_r = sum(H_list).toarray()
-                    assert np.linalg.norm(H_r @ x) < ATOL_KKT, ValueError(
-                        "KKT conditions cannot be satisfied! Try increasing the tolerance for the LICQ condition constraint removal."
-                    )
+                    H = sum(H_list).toarray()
                     mult_list.append([all_mults])
                     # Construct Jacobian Matrix Function
-                    M = make_jac_linop(H=H_r, G=G_r, G_r=G_r)
+                    M = make_jac_linop(H=H, G=G_r, G_r=G_r)
                     # Pad incoming gradient (derivative of loss wrt multipliers is zero)
                     dz_bar = np.vstack([-grad_output[b], np.zeros((G_r.shape[0], 1))])
                 else:
@@ -590,6 +587,13 @@ def _QCQPDiffFn(
                 # Backprop to KKT RHS
                 ls_sol = sp.linalg.lsqr(
                     M.T, dz_bar, atol=ctx.lsqr_tol, btol=ctx.lsqr_tol
+                )
+                # Check that we have actually solved the differential KKT system
+                assert np.linalg.norm(H @ x) < ATOL_KKT, ValueError(
+                    "First-order KKT conditions cannot be satisfied! Check Certificate matrix."
+                )
+                assert np.abs(ls_sol[3]) < ctx.lsqr_tol * 1e2, ValueError(
+                    "Differential KKT system residual is high. Make sure that redundant constraints are actually redundant and that the certificate matrix is correct."
                 )
                 dy_bar = ls_sol[0][:, None]
                 dy_bar_1 = dy_bar[:nvars, :]
