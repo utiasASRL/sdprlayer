@@ -300,21 +300,19 @@ class SDPRLayer(CvxpyLayer):
         # QCQP Backpropagation
         if self.diff_qcqp:
             # Get CvxpyLayers to return diffcp solution
-            kwargs["solver_args"]["ret_diffcp_soln"] = True
-            # Get torch tensor from CvxpyLayers
+            if "solver_args" in kwargs:
+                kwargs["solver_args"]["ret_diffcp_soln"] = True
+            else:
+                kwargs["solver_args"] = dict(ret_diffcp_soln=True)
+            # Get matrix solution from CvxpyLayers
             soln = super().forward(*param_vals_h, **kwargs)
             Xs = soln[0]
             # Extract solutions
             xs = self.recovery_map(Xs)
             # Lagrange multipliers - sign is flipped since cvxpy uses Ax+s=b (Ay+H=Q) conic canonical form
             mults = [-vals for vals in soln[1]]
-            # NOTE: unclear why the slack var (certificate) is always the same output, but may
-            # have to do with the way the problem is canonicalized.
-            if self.use_dual:
-                hs = soln[3]
-            else:
-                hs = soln[3]
-            # Unvectorize certificate matrices
+            # Get slack variable and unvectorize
+            hs = soln[3]
             Hs = [cones.unvec_symm(h, self.n_vars) for h in hs]
             # Check that the whole batch is tight.
             alltight = True
@@ -681,7 +679,6 @@ class SDPRLayerMosek(SDPRLayer):
         param_vals_h, n_batch, n_dims = self.preprocess_input_params(*param_vals)
 
         # Use Mosek to solve the problem
-        assert self.use_dual, "Primal not implemented. Set use_dual=True"
         # TODO this loop should be set up so that we can run in parallel.
         ext_vars_list = []
         for iBatch in range(n_batch):
