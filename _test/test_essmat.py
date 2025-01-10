@@ -499,8 +499,8 @@ class TestEssMat(unittest.TestCase):
     def compare_gradients(self, sigma_val=0.0):
         """Compare gradients between Kornia (local solve) and SDP solver"""
         # Estimators
-        # estimator_list = ["kornia", "sdpr-sdp", "sdpr-cift", "sdpr-is"]
-        estimator_list = ["kornia", "sdpr-is"]
+        estimator_list = ["kornia", "sdpr-sdp", "sdpr-cift", "sdpr-is"]
+        # estimator_list = ["kornia", "sdpr-is"]
         # Sizes
         B = self.keypoints_src.size(0)
         N = self.keypoints_src.size(2)
