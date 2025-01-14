@@ -24,7 +24,7 @@ mosek_params_dflt = {
 # constraint gradient matrix that is treated as non-zero.
 LICQ_TOL = 1e-7
 # Tolerance for norm of residuals of the KKT conditions.
-ATOL_KKT = 1e-5
+KKT_TOL = 1e-5
 # Tolerance for residuals in LSQR solve
 # (see https://docs.scipy.org/doc/scipy/reference/generated/scipy.sparse.linalg.lsqr.html#lsqr)
 LSQR_TOL = 1e-10
@@ -43,7 +43,7 @@ class SDPRLayer(CvxpyLayer):
     def __init__(
         self,
         n_vars,
-        constraints,
+        constraints=[],
         objective=None,
         homogenize=False,
         use_dual=True,
@@ -51,6 +51,7 @@ class SDPRLayer(CvxpyLayer):
         compute_multipliers=False,
         licq_tol=LICQ_TOL,
         lsqr_tol=LSQR_TOL,
+        kkt_tol=KKT_TOL,
         redun_list=[],
     ):
         """Initialize the SDPRLayer class. This functions sets up the SDP relaxation
@@ -90,6 +91,7 @@ class SDPRLayer(CvxpyLayer):
         self.compute_multipliers = compute_multipliers
         self.licq_tol = licq_tol
         self.lsqr_tol = lsqr_tol
+        self.kkt_tol = kkt_tol
         # Add homogenization variable
         if homogenize:
             n_vars = n_vars + 1
@@ -339,6 +341,7 @@ class SDPRLayer(CvxpyLayer):
                     self.licq_tol,
                     self.compute_multipliers,
                     self.lsqr_tol,
+                    self.kkt_tol,
                 )
                 xs = qcqp_func(*param_vals_h)
             else:
@@ -470,6 +473,7 @@ def _QCQPDiffFn(
     licq_tol,
     compute_multipliers,
     lsqr_tol,
+    kkt_tol,
 ):
     class DiffQCQP(torch.autograd.Function):
         @staticmethod
@@ -515,6 +519,7 @@ def _QCQPDiffFn(
             ctx.licq_tol = licq_tol  # Relative tolerance for constraint removal to satisfy LICQ in QCQP differentiation
             ctx.compute_multipliers = compute_multipliers  # Flag to recompute lagrange multipliers of non-redundant constraints.
             ctx.lsqr_tol = lsqr_tol  # Tolerance for LSQR residual
+            ctx.kkt_tol = kkt_tol  # Tolerance for KKT conditions
             return xs
 
         @staticmethod
@@ -584,15 +589,17 @@ def _QCQPDiffFn(
                     M = make_jac_linop(H=H, G=G, G_r=G_r)
                     # Pad incoming gradient (derivative of loss wrt multipliers is zero)
                     dz_bar = np.vstack([-grad_output[b], np.zeros((G.shape[0], 1))])
+
+                # Check that certificate matrix satisfies the first order KKT conditions
+                assert np.linalg.norm(H @ x) < ctx.kkt_tol, ValueError(
+                    "First-order KKT conditions cannot be satisfied! Check Certificate matrix."
+                )
                 # Backprop to KKT RHS
                 ls_sol = sp.linalg.lsqr(
                     M.T, dz_bar, atol=ctx.lsqr_tol, btol=ctx.lsqr_tol
                 )
                 # Check that we have actually solved the differential KKT system
-                assert np.linalg.norm(H @ x) < ATOL_KKT, ValueError(
-                    "First-order KKT conditions cannot be satisfied! Check Certificate matrix."
-                )
-                assert np.abs(ls_sol[3]) < ctx.lsqr_tol * 1e2, ValueError(
+                assert np.abs(ls_sol[3]) < ctx.kkt_tol, ValueError(
                     "Differential KKT system residual is high. Make sure that redundant constraints are actually redundant and that the certificate matrix is correct."
                 )
                 dy_bar = ls_sol[0][:, None]

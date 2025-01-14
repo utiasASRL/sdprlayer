@@ -1,9 +1,25 @@
-.
-../diffcp
-../cvxpylayers
-../poly_matrix
-theseus-ai==0.2.1
-spatialmath-python
-cvxpy
+# Basic repos
+matplotlib>=3.3.2
+numpy==1.26.3
+Pillow>=7.0.0
+scikit-image>=0.15.0
+scikit-learn>=0.23.2
+scipy>=1.5.2
+tqdm
+
+# Vision and Geometry
+opencv-python-headless
+kornia
 asrl-pylgmath
-numpy>=1.2
+
+# Local repositories
+./src/submodules/diffcp
+./src/submodules/cvxpylayers
+./src/submodules/poly_matrix
+./src/submodules/cert_tools
+
+# Learning modules
+--extra-index-url https://download.pytorch.org/whl/cu118
+torch==2.5.1+cu118 
+torchvision==0.20.1+cu118
+theseus-ai==0.2.1

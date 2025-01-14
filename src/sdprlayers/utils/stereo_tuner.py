@@ -5,10 +5,10 @@ from time import time
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import spatialmath.base as sm
 import theseus as th
 import torch
 from poly_matrix import PolyMatrix
+from pylgmath.so3.operations import vec2rot
 
 from sdprlayers import SDPPoseEstimator
 
@@ -125,7 +125,9 @@ def get_gt_setup(
         # Ground Truth Poses
         for i in range(N_batch):
             r_p0s += [0.2 * np.random.randn(3, 1)]
-            C_p0s += [sm.roty(0.5 * np.random.randn(1)[0])]
+            aaxis = np.zeros((3, 1))
+            aaxis[2, 1] = 0.5 * np.random.randn(1)[0]
+            C_p0s += vec2rot(aaxis_ba=aaxis)
         # Offset from the origin
         r_l = r_l + offs
     elif traj_type == "circle":
