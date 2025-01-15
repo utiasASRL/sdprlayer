@@ -79,12 +79,14 @@ class SDPEssMatEst(nn.Module):
         Q, _, _ = self.get_obj_matrix_vec(vec, vec, wt)
         self.homQCQP.C = PolyMatrix.init_from_sparse(
             Q[0].numpy(), var_dict=self.var_dict, symmetric=True
-        )
+        )[0]
         # Get Constraints
         self.homQCQP.As = []
         for A in constraints:
             self.homQCQP.As.append(
-                PolyMatrix.init_from_sparse(A, var_dict=self.var_dict, symmetric=True)
+                PolyMatrix.init_from_sparse(A, var_dict=self.var_dict, symmetric=True)[
+                    0
+                ]
             )
         # Perform clique decomposition
         self.homQCQP.clique_decomposition()
@@ -116,6 +118,7 @@ class SDPEssMatEst(nn.Module):
         weights,
         verbose=False,
         rescale=True,
+        choose_soln=True,
     ):
         """
         Compute the optimal essential matrix relating source and target frame. This
@@ -146,14 +149,14 @@ class SDPEssMatEst(nn.Module):
             # Overwrite stored cost
             self.homQCQP.C = PolyMatrix.init_from_sparse(
                 Q.detach().numpy(), var_dict=self.var_dict, symmetric=True
-            )
+            )[0]
             # Run solve
             cliques, info = solve_dsdp(
                 self.homQCQP, form="dual", tol=self.tol, verbose=verbose
             )
             # Recover primal solution
             Y, ranks, factor_dict = self.homQCQP.get_mr_completion(
-                cliques, var_list=list(self.var_dict.keys())
+                cliques, var_list=list(self.var_dict.keys()), rank_tol=1e4
             )
             S = Y @ Y.T
             # Recover dual solution
@@ -175,22 +178,14 @@ class SDPEssMatEst(nn.Module):
             # mults_2 = ls_sol[0]
 
             # Add solution to list to pass to layer
-            if self.sdprlayer.use_dual:
-                ext_vars_list.append(
-                    dict(
-                        x=mults,
-                        y=cones.vec_symm(S),
-                        s=cones.vec_symm(H),
-                    )
+            ext_vars_list.append(
+                dict(
+                    x=mults,
+                    y=cones.vec_symm(S),
+                    s=cones.vec_symm(H),
                 )
-            else:
-                ext_vars_list.append(
-                    dict(
-                        x=mults,
-                        y=cones.vec_symm(H),
-                        s=cones.vec_symm(S),
-                    )
-                )
+            )
+
         # Solver set to external to bypass cvxpy forward solve
         solver_args = dict(solve_method="external", ext_vars_list=ext_vars_list)
         # call sdprlayer
@@ -201,28 +196,42 @@ class SDPEssMatEst(nn.Module):
 
         # Extract solution
         E_mats = torch.reshape(x[:, 1:10, :], (-1, 3, 3))
-        # There is ambiguity in the solution at this point due to the fact that there are 10 possible essential matrices for a given set of keypoint correspondences.
-        # To deal with this we compute the "best" rotation and translation using the kornia library
-        if self.K_source is None:
-            K_source = torch.eye(3).expand(E_mats.shape[0], -1, -1)
-        else:
-            K_source = self.K_source
 
-        if self.K_target is None:
-            K_target = torch.eye(3).expand(E_mats.shape[0], -1, -1)
+        if choose_soln:
+            # There is ambiguity in the solution at this point due to the fact that there are 10 possible essential matrices for a given set of keypoint correspondences.
+            # To deal with this we compute the "best" rotation and translation using the kornia library
+            if self.K_source is None:
+                K_source = torch.eye(3).expand(E_mats.shape[0], -1, -1)
+            else:
+                K_source = self.K_source
+
+            if self.K_target is None:
+                K_target = torch.eye(3).expand(E_mats.shape[0], -1, -1)
+            else:
+                K_target = self.K_target
+            # Choose the rotation and translation that best represent the keypoints
+            # Returns R_ts and t_ts_s
+            Rs, ts, points_3d = motion_from_essential_choose_solution(
+                E_mats,
+                K_target,
+                K_source,
+                keypoints_trg[:, :2, :].mT,
+                keypoints_src[:, :2, :].mT,
+            )
+            # reconstruct Essential matrices
+            Es = so3_wedge(ts[:, :, 0]).bmm(Rs)
         else:
-            K_target = self.K_target
-        # Choose the rotation and translation that best represent the keypoints
-        # Returns R_ts and t_ts_s
-        Rs, ts, points_3d = motion_from_essential_choose_solution(
-            E_mats,
-            K_source,
-            K_target,
-            keypoints_src[:, :2, :].mT,
-            keypoints_trg[:, :2, :].mT,
-        )
-        # reconstruct Essential matrices
-        Es = so3_wedge(ts[:, :, 0]).bmm(Rs)
+            # NOTE this does not necessarily get the solution with the most points in
+            # front of the camera.
+            # Get the solution from the optimization
+            ts = x[:, 10:]
+            Es = E_mats
+            # Get a valid Rotation matrix
+            U, Sigma, V = torch.linalg.svd(Es)
+            W = torch.tensor([[0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+            Rs = U @ W @ V
+            # Make sure the frame is right handed
+            Rs = Rs * torch.linalg.det(Rs)
 
         return Es, Rs, ts, X, rank
 

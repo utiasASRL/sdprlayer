@@ -205,7 +205,7 @@ def plot_poses(R_cw, t_cw_w, ax=None, **kwargs):
                 )
 
 
-def plot_pixel_meas(pixel_meas, ax=None, **kwargs):
+def plot_pixel_meas(pixel_meas, cam=cam_gt, ax=None, **kwargs):
     if ax is None:
         fig = plt.figure()
         ax = fig.add_subplot(111)
@@ -216,8 +216,8 @@ def plot_pixel_meas(pixel_meas, ax=None, **kwargs):
         u, v = pixel_meas[2:]
         ax.plot(u, v, "o", color="b")
     plt.axis("equal")
-    plt.xlim(-cam_gt.f_u, cam_gt.f_u)
-    plt.ylim(-cam_gt.f_v, cam_gt.f_v)
+    plt.xlim(-cam.f_u, cam.f_u)
+    plt.ylim(-cam.f_v, cam.f_v)
 
 
 def plot_map(r_l, ax=None, **kwargs):

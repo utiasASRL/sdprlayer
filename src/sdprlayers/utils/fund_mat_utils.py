@@ -27,7 +27,7 @@ def get_gt_setup(
 
     # Ground Truth Map Points
     # Cluster at the origin
-    r_l = lm_bound * (np.random.rand(3, N_map) - 0.5)
+    r_l = lm_bound * 2 * (np.random.rand(3, N_map) - 0.5)
     # Ground Truth Poses
     r_p0s = []
     C_p0s = []
@@ -36,8 +36,8 @@ def get_gt_setup(
         for i in range(N_batch):
             r_p0s += [0.2 * np.random.randn(3, 1)]
             aaxis = np.zeros((3, 1))
-            aaxis[2, 1] = 0.5 * np.random.randn(1)[0]
-            C_p0s += vec2rot(aaxis_ba=aaxis)
+            aaxis[1, 0] = 0.5 * np.random.randn(1)[0]
+            C_p0s.append(vec2rot(aaxis_ba=aaxis))
         # Offset from the origin
         r_l = r_l + offs
     elif traj_type == "circle":

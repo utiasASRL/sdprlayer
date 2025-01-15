@@ -5,16 +5,14 @@ import kornia.geometry.epipolar as epi
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from cert_tools import HomQCQP
-from cert_tools.sparse_solvers import solve_dsdp
 from pandas import DataFrame
-from poly_matrix import PolyMatrix
 from tqdm import tqdm
 
 import sdprlayers.utils.fund_mat_utils as utils
 from sdprlayers import SDPEssMatEst
 from sdprlayers.utils.camera_model import CameraModel
 from sdprlayers.utils.lie_algebra import se3_exp, so3_wedge
+from sdprlayers.utils.plot_tools import plot_map, plot_poses
 
 
 def set_seed(x):
@@ -38,8 +36,8 @@ class TestEssMat(unittest.TestCase):
         ts_ts_s, Rs_ts, key_ss = utils.get_gt_setup(
             N_map=n_points,
             N_batch=n_batch,
-            traj_type="circle",
-            offs=np.array([[0, 0, 2]]).T,
+            traj_type="clusters",
+            offs=np.array([[0, 0, 3]]).T,
         )
         # Transforms from source to target
         Rs_ts = torch.tensor(Rs_ts)
@@ -61,7 +59,7 @@ class TestEssMat(unittest.TestCase):
         )
 
         # Define Camera
-        camera = CameraModel(400, 600, 10.0, 0.0, 0.0)
+        camera = CameraModel(400, 600, 0.0, 0.0, 0.0)
 
         # Apply camera to get image points
         src_img_pts = camera.camera_model(src_coords)
@@ -110,7 +108,7 @@ class TestEssMat(unittest.TestCase):
         # Get constraints and test
         constraints = self.layer.sdprlayer.constr_list
         viol = np.zeros((len(constraints)))
-        sol = np.array(t.sol[0])
+        sol = np.array(self.sol[0])
         for i, A in enumerate(constraints):
             viol[i] = (sol.T @ A @ sol)[0, 0]
             np.testing.assert_allclose(
@@ -124,13 +122,13 @@ class TestEssMat(unittest.TestCase):
     def test_cost_matrix(self, sigma_val=5.0):
         """Test the objective matrix with no noise"""
         # Sizes
-        B = t.keypoints_src.size(0)
-        N = t.keypoints_src.size(2)
+        B = self.keypoints_src.size(0)
+        N = self.keypoints_src.size(2)
         # Add Noise
         sigma = torch.tensor(sigma_val)
-        trgs = t.keypoints_trg
+        trgs = self.keypoints_trg
         trgs[:, :2, :] += sigma * torch.randn(B, 2, N)
-        srcs = t.keypoints_src
+        srcs = self.keypoints_src
         srcs[:, :2, :] += sigma * torch.randn(B, 2, N)
 
         # Compute actual cost at ground truth solution
@@ -138,18 +136,18 @@ class TestEssMat(unittest.TestCase):
         for b in range(B):
             src = srcs[b].cpu().numpy()
             trg = trgs[b].cpu().numpy()
-            E = t.Es[b].cpu().numpy()
+            E = self.Es[b].cpu().numpy()
             for i in range(N):
                 cost_true[b] += (
-                    t.weights[b, :, i] * (trg[:, [i]].T @ E @ src[:, [i]]) ** 2
+                    self.weights[b, :, i] * (trg[:, [i]].T @ E @ src[:, [i]]) ** 2
                 )
 
         # Construct objective matrix
         Q, _, _ = SDPEssMatEst.get_obj_matrix_vec(
-            srcs, trgs, t.weights, scale_offset=False
+            srcs, trgs, self.weights, scale_offset=False
         )
         # Check that matrix does the same thing
-        cost_mat = t.sol.mT.bmm(Q.bmm(t.sol))[:, 0, 0]
+        cost_mat = self.sol.mT.bmm(Q.bmm(self.sol))[:, 0, 0]
         np.testing.assert_allclose(
             cost_mat,
             cost_true,
@@ -162,9 +160,9 @@ class TestEssMat(unittest.TestCase):
         transformation under no noise condition"""
 
         # zero the weights and run the problem
-        wts = t.weights * torch.tensor(0.0)
+        wts = self.weights * torch.tensor(0.0)
         E_mats, t_vecs, X, rank = self.layer(
-            t.keypoints_src, t.keypoints_trg, wts, rescale=False, verbose=True
+            self.keypoints_src, self.keypoints_trg, wts, rescale=False, verbose=True
         )
 
     def test_sdpr_forward_nonoise(self, plot=False):
@@ -178,19 +176,19 @@ class TestEssMat(unittest.TestCase):
         transformation"""
 
         # Sizes
-        B = t.keypoints_src.size(0)
-        N = t.keypoints_src.size(2)
+        B = self.keypoints_src.size(0)
+        N = self.keypoints_src.size(2)
         # Add Noise
         sigma = torch.tensor(sigma_val)
-        trgs = t.keypoints_trg
+        trgs = self.keypoints_trg
         trgs[:, :2, :] += sigma * torch.randn(B, 2, N)
-        srcs = t.keypoints_src
+        srcs = self.keypoints_src
         srcs[:, :2, :] += sigma * torch.randn(B, 2, N)
 
         Es_est, Rs_est, ts_est, X, rank = self.layer(
             srcs,
             trgs,
-            t.weights,
+            self.weights,
             verbose=True,
             rescale=True,
         )
@@ -211,7 +209,7 @@ class TestEssMat(unittest.TestCase):
 
         # If no noise, check that we are close to solution
         if sigma_val == 0.0:
-            # Check sign ambiguity
+            # Check sign ambiguity (only required when no noise)
             if np.linalg.norm(E_gt - E_est) > np.linalg.norm(E_gt + E_est):
                 E_est = -E_est
             if np.linalg.norm(t_gt - t_est) > np.linalg.norm(t_gt + t_est):
@@ -223,7 +221,7 @@ class TestEssMat(unittest.TestCase):
             b = 0
             src = srcs[b].cpu().numpy()
             trg = trgs[b].cpu().numpy()
-            E = t.Es[b].cpu().numpy()
+            E_gt = self.Es[b].cpu().numpy()
             cost_gt = 0.0
             cost_est = 0.0
             for i in range(N):
@@ -244,13 +242,13 @@ class TestEssMat(unittest.TestCase):
             sigma_val (float, optional): _description_. Defaults to 5.0.
         """
         # Sizes
-        B = t.keypoints_src.size(0)
-        N = t.keypoints_src.size(2)
+        B = self.keypoints_src.size(0)
+        N = self.keypoints_src.size(2)
         # Add Noise
         sigma = torch.tensor(sigma_val)
-        trgs = t.keypoints_trg
+        trgs = self.keypoints_trg
         trgs[:, :2, :] += sigma * torch.randn(B, 2, N)
-        srcs = t.keypoints_src
+        srcs = self.keypoints_src
         srcs[:, :2, :] += sigma * torch.randn(B, 2, N)
 
         def layer_wrapper(new_src, new_trg, new_wt, out="E"):
@@ -262,7 +260,7 @@ class TestEssMat(unittest.TestCase):
             # Stack with other measurements + weights
             new_srcs = torch.cat([srcs[:, :, :-1], new_src_h], dim=2)
             new_trgs = torch.cat([trgs[:, :, :-1], new_trg_h], dim=2)
-            new_weights = torch.cat([t.weights[:, :, :-1], new_wt], dim=2)
+            new_weights = torch.cat([self.weights[:, :, :-1], new_wt], dim=2)
             Es_est, ts_est, X, rank = self.layer(
                 new_srcs,
                 new_trgs,
@@ -283,7 +281,7 @@ class TestEssMat(unittest.TestCase):
         inputs = (
             srcs[:, :2, -1].clone().detach().requires_grad_(False),
             trgs[:, :2, -1].clone().detach().requires_grad_(False),
-            t.weights[:, :2, -1].clone().detach().requires_grad_(False),
+            self.weights[:, :2, -1].clone().detach().requires_grad_(False),
         )
 
         # source-essential gradient
@@ -368,13 +366,13 @@ class TestEssMat(unittest.TestCase):
             sigma_val (float, optional): _description_. Defaults to 5.0.
         """
         # Sizes
-        B = t.keypoints_src.size(0)
-        N = t.keypoints_src.size(2)
+        B = self.keypoints_src.size(0)
+        N = self.keypoints_src.size(2)
         # Add Noise
         sigma = torch.tensor(sigma_val)
-        trgs = t.keypoints_trg
+        trgs = self.keypoints_trg
         trgs[:, :2, :] += sigma * torch.randn(B, 2, N)
-        srcs = t.keypoints_src
+        srcs = self.keypoints_src
         srcs[:, :2, :] += sigma * torch.randn(B, 2, N)
 
         def cost_wrapper(new_src, new_trg, new_wt):
@@ -385,7 +383,7 @@ class TestEssMat(unittest.TestCase):
             # Stack with other measurements + weights
             new_srcs = torch.cat([srcs, new_src_h], dim=2)
             new_trgs = torch.cat([trgs, new_trg_h], dim=2)
-            new_weights = torch.cat([t.weights, new_wt], dim=2)
+            new_weights = torch.cat([self.weights, new_wt], dim=2)
             Q, _, _ = self.layer.get_obj_matrix_vec(
                 new_srcs,
                 new_trgs,
@@ -431,15 +429,39 @@ class TestEssMat(unittest.TestCase):
         )
 
         # Test values
-        for b in range(B):
-            if np.linalg.norm(self.Es[b] - Es[b]) > np.linalg.norm(self.Es[b] + Es[b]):
-                Es[b] = -Es[b]
-            np.testing.assert_allclose(
-                Es[b].numpy(),
-                self.Es[b].numpy(),
-                atol=1e-10,
-                err_msg="Kornia solution not correct",
-            )
+        if sigma_val == 0.0:
+            for b in range(B):
+                if np.linalg.norm(self.Es[b] - Es[b]) > np.linalg.norm(
+                    self.Es[b] + Es[b]
+                ):
+                    Es[b] = -Es[b]
+                np.testing.assert_allclose(
+                    Es[b].numpy(),
+                    self.Es[b].numpy(),
+                    atol=1e-10,
+                    err_msg="Kornia solution not correct",
+                )
+        else:
+            # Otherwise, check that the cost is better than the ground truth cost
+            for b in range(B):
+                src = srcs[b].cpu().numpy()
+                trg = trgs[b].cpu().numpy()
+                E_gt = self.Es[b].cpu().numpy()
+                E_est = Es[b].detach().numpy()
+                cost_gt = 0.0
+                cost_est = 0.0
+                for i in range(N):
+                    cost_gt += (
+                        self.weights[b, :, i]
+                        * (trg[:, [i]].T @ E_gt @ src[:, [i]]) ** 2
+                    )
+                    cost_est += (
+                        self.weights[b, :, i]
+                        * (trg[:, [i]].T @ E_est @ src[:, [i]]) ** 2
+                    )
+                assert cost_est < cost_gt, ValueError(
+                    "Estimate cost not lower than ground truth cost"
+                )
 
     def test_kornia_backward(self, sigma_val=0.0):
         # Sizes
@@ -459,7 +481,7 @@ class TestEssMat(unittest.TestCase):
             new_trg = new_trg.unsqueeze(2)
             new_srcs = torch.cat([srcs[:, :2, :-1], new_src], dim=2).mT
             new_trgs = torch.cat([trgs[:, :2, :-1], new_trg], dim=2).mT
-            new_weights = torch.cat([t.weights[:, 0, :-1], new_wt], dim=1)
+            new_weights = torch.cat([self.weights[:, 0, :-1], new_wt], dim=1)
 
             Es, ts, Rs = get_kornia_solution(
                 new_srcs,
@@ -480,7 +502,7 @@ class TestEssMat(unittest.TestCase):
         inputs = (
             srcs[:, :2, -1].clone().detach().requires_grad_(False),
             trgs[:, :2, -1].clone().detach().requires_grad_(False),
-            t.weights[:, :2, -1].clone().detach().requires_grad_(False),
+            self.weights[:, :2, -1].clone().detach().requires_grad_(False),
         )
 
         # source-essential gradient
@@ -496,11 +518,10 @@ class TestEssMat(unittest.TestCase):
             rtol=rtol,
         )
 
-    def compare_gradients(self, sigma_val=0.0):
+    def compare_with_kornia(self, sigma_val=0.0):
         """Compare gradients between Kornia (local solve) and SDP solver"""
         # Estimators
-        estimator_list = ["kornia", "sdpr-sdp", "sdpr-cift", "sdpr-is"]
-        # estimator_list = ["kornia", "sdpr-is"]
+        estimator_list = ["sdpr-sdp", "sdpr-is", "sdpr-cift", "kornia"]
         # Sizes
         B = self.keypoints_src.size(0)
         N = self.keypoints_src.size(2)
@@ -521,10 +542,25 @@ class TestEssMat(unittest.TestCase):
             # Compute distance from ground truth value
             est_err_norms = torch.norm(Es_est - self.Es)
 
+            # Compute cost
+            costs = []
+            for b in range(B):
+                src = srcs[b].cpu().numpy()
+                trg = trgs[b].cpu().numpy()
+                E_est = Es_est[b].detach().numpy()
+                cost = 0.0
+                for i in range(N):
+                    cost += (
+                        self.weights[b, :, i]
+                        * (trg[:, [i]].T @ E_est @ src[:, [i]]) ** 2
+                    )
+                costs.append(cost)
+
             # Store data
             data_dict = dict(
                 estimator=estimator,
                 Es_est=Es_est,
+                costs=costs,
                 jacobians=jacobians,
                 est_err_norms=est_err_norms,
                 time_f=time_f,
@@ -616,6 +652,8 @@ def get_soln_and_jac(estimator, points_t, points_s, weights, K, tol=1e-12, **kwa
 
 
 def get_kornia_solution(srcs, trgs, wts, K=torch.eye(4)):
+    """Get the essential matrix using the kornia library.
+    This uses Nister's 5 point algorithm."""
     # Reshape to kornia format
     srcs_krn = srcs[:, :2, :].mT
     trgs_krn = trgs[:, :2, :].mT
@@ -648,19 +686,19 @@ def get_kornia_solution(srcs, trgs, wts, K=torch.eye(4)):
 
 if __name__ == "__main__":
     # Unity element constraint
-    t = TestEssMat(n_points=20, n_batch=2, tol=1e-12)
+    t = TestEssMat(n_points=50, n_batch=1, tol=1e-12)
 
     # t.test_constraints()
     # t.test_cost_matrix_nonoise()
     # t.test_cost_matrix()
     # t.test_feasibility()
     # t.test_sdpr_forward_nonoise()
-    # t.test_sdpr_forward(sigma_val=10 / 800)
+    t.test_sdpr_forward(sigma_val=10 / 800)
     # t.test_cost_backward()
     # t.test_layer_backward(sigma_val=0 / 800)
     # t.test_kornia_solution()
+    t.test_kornia_solution(sigma_val=10 / 800)
     # t.test_kornia_backward()
-    # t.compare_with_kornia(sigma_val=0 / 800)
 
     # Gradient Comparison
-    t.compare_gradients()
+    t.compare_with_kornia(sigma_val=100 / 800)

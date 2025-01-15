@@ -35,6 +35,7 @@ The following test functions can be used to verify the installation:
 
 ```
 pytest _test/test_sdpr_poly6.py
+pytest _test/test_sdpr_poly4.py
 pytest _test/test_pose_est.py
 ```
 

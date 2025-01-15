@@ -594,15 +594,24 @@ def _QCQPDiffFn(
                 assert np.linalg.norm(H @ x) < ctx.kkt_tol, ValueError(
                     "First-order KKT conditions cannot be satisfied! Check Certificate matrix."
                 )
-                # Backprop to KKT RHS
-                ls_sol = sp.linalg.lsqr(
-                    M.T, dz_bar, atol=ctx.lsqr_tol, btol=ctx.lsqr_tol
-                )
+                # Solve Differential KKT System
+                if M.shape[0] == M.shape[1]:
+                    # Symmetric case, use Conjugate Gradient
+                    sol, _ = sp.linalg.cg(M.T, dz_bar, rtol=ctx.lsqr_tol)
+                    sol = sol[:, None]
+                    res = np.linalg.norm(M.T @ sol - dz_bar)
+                else:
+                    # Assymmetric case, use LSQR
+                    ls_sol = sp.linalg.lsqr(
+                        M.T, dz_bar, atol=ctx.lsqr_tol, btol=ctx.lsqr_tol
+                    )
+                    sol = ls_sol[0][:, None]
+                    res = ls_sol[3]
                 # Check that we have actually solved the differential KKT system
-                assert np.abs(ls_sol[3]) < ctx.kkt_tol, ValueError(
+                assert res < ctx.kkt_tol, ValueError(
                     "Differential KKT system residual is high. Make sure that redundant constraints are actually redundant and that the certificate matrix is correct."
                 )
-                dy_bar = ls_sol[0][:, None]
+                dy_bar = sol
                 dy_bar_1 = dy_bar[:nvars, :]
                 # Fill with zeros at redundant entries
                 dy_bar_2 = []
