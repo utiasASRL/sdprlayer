@@ -138,10 +138,10 @@ class SDPEssMatEst(nn.Module):
         """
 
         # Construct objective function
-        with record_function("SDPR: Build Cost Matrix"):
-            Qs, scale, offset = self.get_obj_matrix_vec(
-                keypoints_src, keypoints_trg, weights, scale_offset=rescale
-            )
+        # with record_function("SDPR: Build Cost Matrix"):
+        Qs, scale, offset = self.get_obj_matrix_vec(
+            keypoints_src, keypoints_trg, weights, scale_offset=rescale
+        )
 
         # Solve decomposed SDP
         ext_vars_list = []
@@ -156,7 +156,7 @@ class SDPEssMatEst(nn.Module):
             )
             # Recover primal solution
             Y, ranks, factor_dict = self.homQCQP.get_mr_completion(
-                cliques, var_list=list(self.var_dict.keys()), rank_tol=1e4
+                cliques, var_list=list(self.var_dict.keys()), rank_tol=1e5
             )
             S = Y @ Y.T
             # Recover dual solution
@@ -165,7 +165,7 @@ class SDPEssMatEst(nn.Module):
             ).toarray()
             mults = np.array(info["mults"])
 
-            ## DEBUG
+            # DEBUG
             # C = Q.detach().numpy()
             # constraints = self.sdprlayer.constr_list + [self.sdprlayer.A_0]
             # A_bar = []
@@ -219,7 +219,7 @@ class SDPEssMatEst(nn.Module):
                 keypoints_src[:, :2, :].mT,
             )
             # reconstruct Essential matrices
-            Es = so3_wedge(ts[:, :, 0]).bmm(Rs)
+            Es = E_mats
         else:
             # NOTE this does not necessarily get the solution with the most points in
             # front of the camera.

@@ -1,6 +1,4 @@
----
-output: html_document
----
+
 # SDPRLayers
 
 
@@ -55,9 +53,10 @@ use_dual | True | Specifies whether the internal disciplined convex program (DCP
 diff_qcqp | True | Specifies whether to differentiate via the QCQP KKT conditions or the SDP KKT conditions. This option can also be used to differentiate a local solution to the QCQP, without certifying global optimality.
 compute_multipliers | False | Only used if `diff_qcqp` is set to True. Specifies whether to recompute the Lagrange multipliers and certificate for original QCQP system. If used with This option can be used to compute multipliers for an existing local solution (if certification not required).
 licq_tol| 1e-7 | Tolerance used when computing the Lagrange multipliers via least-squares 
-lsqr_tol| 1e-10 | Tolerance used when computing the solution to the (adjoint) differential KKT equation via LSQR. 
+lsqr_tol| 1e-10 | Tolerance used when computing the solution to the (adjoint) differential KKT equation via LSQR (or using `minres` when the system is symmetric). 
 kkt_tol | 1e-5 |  Tolerance used when checking that the KKT conditions are satisfied. Violation of this check usually indicates that the certificate matrix is incorrect or too many redundant constraints have been removed
-redun_list| [] | List of indicies corresponding to constraints that should be labelled as 'redundant' when computing Lagrange multipliers or solving the differential KKT system. 
+redun_list| [] | List of indicies corresponding to constraints that should be labelled as 'redundant' when computing Lagrange multipliers or solving the differential KKT system. **Note: Failure to properly identify the redundant constraints can lead to incorrect gradients!**
+
 
 In the [paper](https://arxiv.org/abs/2405.19309), we discuss three different modes of usage for SDPRLayers: *SDPR-IS*, *SDPR-CIFT*, and *SDPR-SDP*. These modes correspond to the following options:
 
@@ -98,7 +97,7 @@ Note that in this case, the solution and its gradients are not certified to be o
 
 ## Examples
 
-The test scripts mentioned above are a good source of example usages. The `_scripts` directory also has the experiments used in the paper. An example of how to use the *tightening* tools is given [here](_scripts/tighten_example.ipynb).
+The test scripts in [[Testing Functionality]] are a good source of example usages. The `_scripts` directory also has the experiments used in the paper. An example of how to use the *tightening* tools is given [here](_scripts/tighten_example.ipynb).
 
 To see an example usage of the SDPRLayer in a full robotics pipeline, see [our robot localization example](https://github.com/utiasASRL/deep_learned_visual_features/tree/mat-weight-sdp-version) (note that this is not on the main branch of the repo).
 
@@ -109,7 +108,7 @@ We have set up a conda environment to
 The SDPRLayer relies on our `PolyMatrix` and `certifiable tools` repos as well as modified versions of `CVXPYLayers` and `diffcp` libraries. These custom repositories have been set up as submodules in the `sdprlayers` repo. Prior to setting up the conda environment, initialize the submodules with
 
 ```
-git submodule --init --recursive
+git submodule update --init --recursive
 ```
 
 Once the submodules are set up, the environment can be created.
@@ -131,6 +130,11 @@ The following test functions can be used to verify the installation:
 pytest _test/test_sdpr_poly6.py
 pytest _test/test_sdpr_poly4.py
 pytest _test/test_pose_est.py
+```
+
+Make sure to source the `.env` file in the root directory prior to running tests:
+```
+source .env
 ```
 
 ## Multithread Library Issue

@@ -596,8 +596,8 @@ def _QCQPDiffFn(
                 )
                 # Solve Differential KKT System
                 if M.shape[0] == M.shape[1]:
-                    # Symmetric case, use Conjugate Gradient
-                    sol, _ = sp.linalg.cg(M.T, dz_bar, rtol=ctx.lsqr_tol)
+                    # Symmetric case, use Minimum Residual Solver (since matrix is symmetric but may be indefinite)
+                    sol, info = sp.linalg.minres(M.T, dz_bar,rtol=ctx.lsqr_tol)
                     sol = sol[:, None]
                     res = np.linalg.norm(M.T @ sol - dz_bar)
                 else:

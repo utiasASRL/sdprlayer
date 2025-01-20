@@ -34,7 +34,7 @@ class SDPPoseEstimator(nn.Module):
             + self.gen_row_col_constraints()
         )
         # Redundant constraints
-        redun_list = list(range(9, len(constraints)))
+        redun_list = list(range(6, len(constraints)))
 
         # Mosek Parameters
         tol = 1e-12
