@@ -4,15 +4,8 @@ from time import time
 
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
-import theseus as th
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from poly_matrix import PolyMatrix
 from pylgmath.so3.operations import vec2rot
-
-from sdprlayers.layers.sdprlayer import SDPRLayer
 
 
 def get_gt_setup(
