@@ -8,47 +8,6 @@ The SDPRLayer is an PyTorch-based optimization layer for semidefinite program re
 
 Please see our [paper](https://arxiv.org/abs/2405.19309) for more details.
 
-# Installation
-
-We have set up a conda environment to 
-
-The SDPRLayer relies on our `PolyMatrix` and `certifiable tools` repos as well as modified versions of `CVXPYLayers` and `diffcp` libraries. These custom repositories have been set up as submodules in the `sdprlayers` repo. Prior to setting up the conda environment, initialize the submodules with
-
-```
-git submodule --init --recursive
-```
-
-Once the submodules are set up, the environment can be created.
-
-```
-conda env create -f environment.yml
-```
-Note that the environment is set up for our local version of CUDA and may need to be modified depending on your CUDA driver. You may need to reinstall a specific version of torch:
-```
-pip uninstall torch torchaudio torchvision
-pip install torch==2.5.0 torchvision==0.20.0 torchaudio==2.5.0 --index-url https://download.pytorch.org/whl/cu118
-```
-
-## Testing Functionality
-
-The following test functions can be used to verify the installation:
-
-```
-pytest _test/test_sdpr_poly6.py
-pytest _test/test_sdpr_poly4.py
-pytest _test/test_pose_est.py
-```
-
-## Multithread Library Issue
-
-We have noticed that there are sometimes issues with the Conda environment due to collisions between the Intel OpenMP ('libiomp') and LLVM OpenMP ('libomp'). This can cause crashing or deadlock. If observed, defining the following environment variable can fix the issue:
-```
-export MKL_THREADING_LAYER=GNU
-```
-
-The issue is well known and other workarounds are given [here](https://github.com/joblib/threadpoolctl/blob/master/multiple_openmp.md).
-
-
 # Usage
 
 The user is responsible for converting a given polynomial problem to a *Quadratically Constrained Quadratic Problem* (QCQP) of the following form:
@@ -122,6 +81,7 @@ Key | Value
 `y` | Primal solution in half-vectorized form.
 `s` | Dual solution (certificate matrix) in half-vectorized form.
 
+The half-vectorized form can be computed using the `diffcp.cones` module.
 Note that the naming convention follows the standard form conic optimization problem given in [this paper](https://web.stanford.edu/~boyd/papers/pdf/diff_cone_prog.pdf). In our framework the dual/certificate matrix is formulated as:
 $$
 \mathbf{H} = \mathbf{Q} + \sum\limits_{i=0}^{m}\lambda_i \mathbf{A}_i,
@@ -132,15 +92,55 @@ All additional keyword arguments are passed directly to CvxpyLayers, internally.
 
 ## Differentiating Local Solutions
 
-The external variable list also provides a means to **differentiate a local solution**, $\hat{\mathbf{x}}$, to the QCQP above. To do this, one can simply define the primal solution as the outer product of the local solution with itself ($\hat{\mathbf{x}}\hat{\mathbf{x}}^{\top}$). Note that in this case, the solution and its gradients are not certified to be optimal.
+The external variable list also provides a means to **differentiate a local solution**, $\hat{\mathbf{x}}$, to the QCQP above. To do this, one can simply define the primal solution as the outer product of the local solution with itself ($\hat{\mathbf{x}}\hat{\mathbf{x}}^{\top}$). By setting the `compute_multipliers` flag to `True`, the dual solution and Lagrange multipliers can be left as empty lists, since they will be recomputed. 
+
+Note that in this case, the solution and its gradients are not certified to be optimal.
 
 ## Examples
 
+The test scripts mentioned above are a good source of example usages. The `_scripts` directory also has the experiments used in the paper. An example of how to use the *tightening* tools is given [here](_scripts/tighten_example.ipynb).
 
-Please see `_scripts` directory for example usages. An example of how to use the *tightening* tools is given [here](_scripts/tighten_example.ipynb).
+To see an example usage of the SDPRLayer in a full robotics pipeline, see [our robot localization example](https://github.com/utiasASRL/deep_learned_visual_features/tree/mat-weight-sdp-version) (note that this is not on the main branch of the repo).
 
-To see an example usage of the SDPRLayer in a full robotics pipeline, see [our robot localization example](https://github.com/utiasASRL/deep_learned_visual_features/tree/mat-weight-sdp-version) (note that this is not on the main branch).
+# Installation
 
+We have set up a conda environment to 
+
+The SDPRLayer relies on our `PolyMatrix` and `certifiable tools` repos as well as modified versions of `CVXPYLayers` and `diffcp` libraries. These custom repositories have been set up as submodules in the `sdprlayers` repo. Prior to setting up the conda environment, initialize the submodules with
+
+```
+git submodule --init --recursive
+```
+
+Once the submodules are set up, the environment can be created.
+
+```
+conda env create -f environment.yml
+```
+Note that the environment is set up for our local version of CUDA and may need to be modified depending on your CUDA driver. You may need to reinstall a specific version of torch:
+```
+pip uninstall torch torchaudio torchvision
+pip install torch==2.5.0 torchvision==0.20.0 torchaudio==2.5.0 --index-url https://download.pytorch.org/whl/cu118
+```
+
+## Testing Functionality
+
+The following test functions can be used to verify the installation:
+
+```
+pytest _test/test_sdpr_poly6.py
+pytest _test/test_sdpr_poly4.py
+pytest _test/test_pose_est.py
+```
+
+## Multithread Library Issue
+
+We have noticed that there are sometimes issues with the Conda environment due to collisions between the Intel OpenMP ('libiomp') and LLVM OpenMP ('libomp'). This can cause crashing or deadlock. If observed, defining the following environment variable can fix the issue:
+```
+export MKL_THREADING_LAYER=GNU
+```
+
+The issue is well known and other workarounds are given [here](https://github.com/joblib/threadpoolctl/blob/master/multiple_openmp.md).
 
 # Citation
 
