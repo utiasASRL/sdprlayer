@@ -1,0 +1,12 @@
+[submodule "src/submodules/poly_matrix"]
+	path = src/submodules/poly_matrix
+	url = git@github.com:utiasASRL/poly_matrix.git
+[submodule "src/submodules/cert_tools"]
+	path = src/submodules/cert_tools
+	url = git@github.com:utiasASRL/certifiable-tools.git
+[submodule "src/submodules/diffcp"]
+	path = src/submodules/diffcp
+	url = git@github.com:holmesco/diffcp.git
+[submodule "src/submodules/cvxpylayers"]
+	path = src/submodules/cvxpylayers
+	url = git@github.com:holmesco/cvxpylayers.git

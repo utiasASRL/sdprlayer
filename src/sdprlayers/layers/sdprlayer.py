@@ -24,7 +24,7 @@ mosek_params_dflt = {
 # constraint gradient matrix that is treated as non-zero.
 LICQ_TOL = 1e-7
 # Tolerance for norm of residuals of the KKT conditions.
-ATOL_KKT = 1e-5
+KKT_TOL = 1e-5
 # Tolerance for residuals in LSQR solve
 # (see https://docs.scipy.org/doc/scipy/reference/generated/scipy.sparse.linalg.lsqr.html#lsqr)
 LSQR_TOL = 1e-10
@@ -43,7 +43,7 @@ class SDPRLayer(CvxpyLayer):
     def __init__(
         self,
         n_vars,
-        constraints,
+        constraints=[],
         objective=None,
         homogenize=False,
         use_dual=True,
@@ -51,6 +51,7 @@ class SDPRLayer(CvxpyLayer):
         compute_multipliers=False,
         licq_tol=LICQ_TOL,
         lsqr_tol=LSQR_TOL,
+        kkt_tol=KKT_TOL,
         redun_list=[],
     ):
         """Initialize the SDPRLayer class. This functions sets up the SDP relaxation
@@ -90,6 +91,7 @@ class SDPRLayer(CvxpyLayer):
         self.compute_multipliers = compute_multipliers
         self.licq_tol = licq_tol
         self.lsqr_tol = lsqr_tol
+        self.kkt_tol = kkt_tol
         # Add homogenization variable
         if homogenize:
             n_vars = n_vars + 1
@@ -174,7 +176,72 @@ class SDPRLayer(CvxpyLayer):
             parameters=params,
         )
 
-    def forward(self, *param_vals, **kwargs):
+    def preprocess_input_params(self, *param_vals):
+        """Preprocesses the input parameters. Homogenize and symmetrize
+
+        Args:
+            param_vals: a sequence of torch Tensors representing the parameters.
+
+        Returns:
+            A list of preprocessed and homogenized (if required) parameters.
+        """
+
+        # homogenize if required
+        if self.homogenize:
+            assert len(self.param_ids) * 3 == len(
+                param_vals
+            ), "Expected 3 inputs per parameter to homogenize constraints"
+            param_vals_h = []
+            ind = 0
+            while ind < len(param_vals):
+                # Unpack
+                mat, vec, const = param_vals[ind : ind + 3]
+                # check dimensions
+                n_dims = mat.ndim
+                assert (
+                    n_dims == vec.ndim and n_dims == const.ndim
+                ), "Inputs must be 2 or 3 dimensional"
+                # check batch dimension
+                if n_dims > 2:
+                    if ind == 0:  # get batch dimension
+                        n_batch = mat.shape[0]
+                    assert (
+                        mat.shape[0] == n_batch
+                        and vec.shape[0] == n_batch
+                        and const.shape[0] == n_batch
+                    ), "Inconsistent batch dimesion"
+                    # Homogenize
+                    param_vals_h += [torch.vmap(self.homog_matrix)(mat, vec, const)]
+                else:
+                    param_vals_h += [self.homog_matrix(mat, vec, const)]
+                # Increment index
+                ind += 3
+        else:  # problem already homogenized
+            param_vals_h = list(param_vals)
+            if len(param_vals_h) > 0:
+                # Check dimensions and ensure consistency
+                n_dims = param_vals_h[0].ndim
+                if n_dims > 2:
+                    n_batch = param_vals_h[0].shape[0]
+                else:
+                    n_batch = 1
+                for i in range(len(param_vals_h)):
+                    assert (
+                        param_vals_h[i].ndim == n_dims
+                    ), "Parameter dimensions inconsistent"
+                    if n_dims > 2:
+                        assert (
+                            param_vals_h[i].shape[0] == n_batch
+                        ), "Inconsistent batch dimension"
+                    else:
+                        param_vals_h[i] = param_vals_h[i].unsqueeze(0)
+
+        # Make input parameters symmetric
+        param_vals_h = [make_symmetric(param_val) for param_val in param_vals_h]
+
+        return param_vals_h, n_batch, n_dims
+
+    def forward(self, *param_vals, ext_vars_list=None, **kwargs):
         """Solve problem (or a batch of problems) corresponding to param_vals
         Args:
           param_vals: a sequence of torch Tensors. If the "homogenize" flag was
@@ -190,139 +257,64 @@ class SDPRLayer(CvxpyLayer):
                   Tensor has 3 dimensions, then its first dimension is
                   interpreted as the batch size. These Tensors must all have
                   the same dtype and device.
-          kwargs: key word arguments to be passed into the cvxpylayer. For
-                  example, `solver_args'
+         ext_vars_list: User-provided primal-dual batch solution to the optimization problem.
+                  This solution will override the solver and is directly injected for gradient
+                  computation. Should be a list of length corresponding to the batch size. Each
+                  element of the list should be dictionary containing keys {x, y, s}, corresponding
+                  to the primal, dual, and slack (certificate) solutions.
+          kwargs: key word arguments to be passed into the cvxpylayer. Entries will be overwritten
+                  if ext_vars_list is not empty
 
         Returns:
           a list of optimal variable values, one for each CVXPY Variable
           supplied to the constructor.
 
         """
-        # homogenize if required
-        if self.homogenize:
-            assert len(self.param_ids) * 3 == len(
-                param_vals
-            ), "Expected 3 inputs per parameter to homogenize constraints"
-            param_vals_h = []
-            ind = 0
-            while ind < len(param_vals):
-                # Unpack
-                mat, vec, const = param_vals[ind : ind + 3]
-                # check dimensions
-                ndims = mat.ndim
-                assert (
-                    ndims == vec.ndim and ndims == const.ndim
-                ), "Inputs must be 2 or 3 dimensional"
-                # check batch dimension
-                if ndims > 2:
-                    if ind == 0:  # get batch dimension
-                        N_batch = mat.shape[0]
-                    assert (
-                        mat.shape[0] == N_batch
-                        and vec.shape[0] == N_batch
-                        and const.shape[0] == N_batch
-                    ), "Inconsistent batch dimesion"
-                    # Homogenize
-                    param_vals_h += [torch.vmap(self.homog_matrix)(mat, vec, const)]
-                else:
-                    param_vals_h += [self.homog_matrix(mat, vec, const)]
-                # Increment index
-                ind += 3
-        else:  # problem already homogenized
-            param_vals_h = list(param_vals)
-            if len(param_vals_h) > 0:
-                # Check dimensions and ensure consistency
-                ndims = param_vals_h[0].ndim
-                if ndims > 2:
-                    N_batch = param_vals_h[0].shape[0]
-                else:
-                    N_batch = 1
-                for i in range(len(param_vals_h)):
-                    assert (
-                        param_vals_h[i].ndim == ndims
-                    ), "Parameter dimensions inconsistent"
-                    if ndims > 2:
-                        assert (
-                            param_vals_h[i].shape[0] == N_batch
-                        ), "Inconsistent batch dimension"
-                    else:
-                        param_vals_h[i] = param_vals_h[i].unsqueeze(0)
+        # Process the input parameters
+        param_vals_h, n_batch, n_dims = self.preprocess_input_params(*param_vals)
 
-        # Make input parameters symmetric
-        param_vals_h = [make_symmetric(param_val) for param_val in param_vals_h]
+        # Check if user has provided the solution
+        if ext_vars_list is not None:
+            assert isinstance(ext_vars_list, list), ValueError(
+                "ext_vars_list must be a list of dictionaries"
+            )
+            assert isinstance(ext_vars_list[0], dict), ValueError(
+                "ext_vars_list must be a list of dictionaries"
+            )
+            assert "x" in ext_vars_list[0], ValueError(
+                "ext_vars_list dictionaries must contain keys: x, y, s"
+            )
+            assert "y" in ext_vars_list[0], ValueError(
+                "ext_vars_list dictionaries must contain keys: x, y, s"
+            )
+            assert "s" in ext_vars_list[0], ValueError(
+                "ext_vars_list dictionaries must contain keys: x, y, s"
+            )
 
-        # Define new kwargs to not affect original
-        kwargs_new = deepcopy(kwargs)
-
-        # This section constructs a solution using an 'external' solver (MOSEK or
-        # user-provided local solver). The solution is then injected into diffcp to
-        # compute the gradients.
-        if "solver_args" in kwargs and "solve_method" in kwargs["solver_args"]:
-            method = kwargs["solver_args"]["solve_method"]
-            # Check if we are injecting a solution
-            if method == "mosek":
-                assert self.use_dual, "Primal not implemented. Set use_dual=True"
-                # TODO this loop should be set up so that we can run in parallel.
-                ext_vars_list = []
-                for iBatch in range(N_batch):
-                    # Populate CVXPY Parameters with batch values
-                    parameters = self.problem.parameters()
-                    for iParam in range(len(parameters)):
-                        parameters[iParam].value = (
-                            param_vals_h[i][iBatch].cpu().detach().numpy()
-                        )
-                    # Solve the problem
-                    assert "MOSEK" in cp.installed_solvers(), "MOSEK not installed"
-                    # Get parameters for mosek
-                    verbose = kwargs["solver_args"].get("verbose", False)
-                    mosek_params = kwargs["solver_args"].get(
-                        "mosek_params", mosek_params_dflt
-                    )
-                    self.problem.solve(
-                        solver=cp.MOSEK, verbose=verbose, mosek_params=mosek_params
-                    )
-                    # Solver check
-                    if not self.problem.status == "optimal":
-                        raise ValueError("MOSEK did not converge")
-                    # Extract primal and dual variables
-                    X = np.array(self.problem.constraints[0].dual_value)
-                    H = np.array(self.H.value)
-                    mults = self.problem.variables()[0].value
-
-                    # Add to list of solutions
-                    ext_vars_list += [
-                        dict(
-                            x=mults,
-                            y=cones.vec_symm(X),
-                            s=cones.vec_symm(H),
-                        )
-                    ]
-
-                # Update solver arguments (copy required here)
-                solver_args = dict(solve_method="external", ext_vars_list=ext_vars_list)
-                if "solver_args" in kwargs_new:
-                    kwargs_new["solver_args"].update(solver_args)
-                else:
-                    kwargs_new["solver_args"] = solver_args
+            # Modify solver_args dictionary in keywords passed to CvxpyLayers
+            # NOTE: This dictionary determines the behaviour of diffcp
+            solver_args = dict(solve_method="external", ext_vars_list=ext_vars_list)
+            if "solver_args" in kwargs:
+                kwargs["solver_args"].update(solver_args)
+            else:
+                kwargs["solver_args"] = solver_args
 
         # QCQP Backpropagation
         if self.diff_qcqp:
             # Get CvxpyLayers to return diffcp solution
-            kwargs_new["solver_args"]["ret_diffcp_soln"] = True
-            # Get torch tensor from CvxpyLayers
-            soln = super().forward(*param_vals_h, **kwargs_new)
+            if "solver_args" in kwargs:
+                kwargs["solver_args"]["ret_diffcp_soln"] = True
+            else:
+                kwargs["solver_args"] = dict(ret_diffcp_soln=True)
+            # Get matrix solution from CvxpyLayers
+            soln = super().forward(*param_vals_h, **kwargs)
             Xs = soln[0]
-            diffcp_soln = soln[1:]
             # Extract solutions
             xs = self.recovery_map(Xs)
-            mults = [-mult for mult in soln[1]]  # Lagrange multipliers
-            # NOTE: unclear why the slack var (certificate) is always the same output, but may
-            # have to do with the way the problem is canonicalized.
-            if self.use_dual:
-                hs = diffcp_soln[2]
-            else:
-                hs = diffcp_soln[2]
-            # Unvectorize certificate matrices
+            # Lagrange multipliers - sign is flipped since cvxpy uses Ax+s=b (Ay+H=Q) conic canonical form
+            mults = [-vals for vals in soln[1]]
+            # Get slack variable and unvectorize
+            hs = soln[3]
             Hs = [cones.unvec_symm(h, self.n_vars) for h in hs]
             # Check that the whole batch is tight.
             alltight = True
@@ -349,13 +341,14 @@ class SDPRLayer(CvxpyLayer):
                     self.licq_tol,
                     self.compute_multipliers,
                     self.lsqr_tol,
+                    self.kkt_tol,
                 )
                 xs = qcqp_func(*param_vals_h)
             else:
                 xs = None
         else:
-            # Get torch tensor from CvxpyLayers
-            soln = super().forward(*param_vals_h, **kwargs_new)
+            # Compute the solution using CvxpyLayers.
+            soln = super().forward(*param_vals_h, **kwargs)
             Xs = soln[0]
             # Check that the whole batch is tight.
             alltight = True
@@ -371,7 +364,7 @@ class SDPRLayer(CvxpyLayer):
                 xs = None
 
         # Adjust dimensions
-        if ndims < 3:
+        if n_dims < 3:
             if xs is not None:
                 xs = xs.squeeze(0)
             Xs = Xs.squeeze(0)
@@ -480,6 +473,7 @@ def _QCQPDiffFn(
     licq_tol,
     compute_multipliers,
     lsqr_tol,
+    kkt_tol,
 ):
     class DiffQCQP(torch.autograd.Function):
         @staticmethod
@@ -525,6 +519,7 @@ def _QCQPDiffFn(
             ctx.licq_tol = licq_tol  # Relative tolerance for constraint removal to satisfy LICQ in QCQP differentiation
             ctx.compute_multipliers = compute_multipliers  # Flag to recompute lagrange multipliers of non-redundant constraints.
             ctx.lsqr_tol = lsqr_tol  # Tolerance for LSQR residual
+            ctx.kkt_tol = kkt_tol  # Tolerance for KKT conditions
             return xs
 
         @staticmethod
@@ -581,13 +576,10 @@ def _QCQPDiffFn(
                         if len(A.shape) > 2:
                             A = A[b]
                         H_list.append(A * all_mults[i])
-                    H_r = sum(H_list).toarray()
-                    assert np.linalg.norm(H_r @ x) < ATOL_KKT, ValueError(
-                        "KKT conditions cannot be satisfied! Try increasing the tolerance for the LICQ condition constraint removal."
-                    )
+                    H = sum(H_list).toarray()
                     mult_list.append([all_mults])
                     # Construct Jacobian Matrix Function
-                    M = make_jac_linop(H=H_r, G=G_r, G_r=G_r)
+                    M = make_jac_linop(H=H, G=G_r, G_r=G_r)
                     # Pad incoming gradient (derivative of loss wrt multipliers is zero)
                     dz_bar = np.vstack([-grad_output[b], np.zeros((G_r.shape[0], 1))])
                 else:
@@ -597,11 +589,29 @@ def _QCQPDiffFn(
                     M = make_jac_linop(H=H, G=G, G_r=G_r)
                     # Pad incoming gradient (derivative of loss wrt multipliers is zero)
                     dz_bar = np.vstack([-grad_output[b], np.zeros((G.shape[0], 1))])
-                # Backprop to KKT RHS
-                ls_sol = sp.linalg.lsqr(
-                    M.T, dz_bar, atol=ctx.lsqr_tol, btol=ctx.lsqr_tol
+
+                # Check that certificate matrix satisfies the first order KKT conditions
+                assert np.linalg.norm(H @ x) < ctx.kkt_tol, ValueError(
+                    "First-order KKT conditions cannot be satisfied! Check Certificate matrix."
                 )
-                dy_bar = ls_sol[0][:, None]
+                # Solve Differential KKT System
+                if M.shape[0] == M.shape[1]:
+                    # Symmetric case, use Minimum Residual Solver (since matrix is symmetric but may be indefinite)
+                    sol, info = sp.linalg.minres(M.T, dz_bar,rtol=ctx.lsqr_tol)
+                    sol = sol[:, None]
+                    res = np.linalg.norm(M.T @ sol - dz_bar)
+                else:
+                    # Assymmetric case, use LSQR
+                    ls_sol = sp.linalg.lsqr(
+                        M.T, dz_bar, atol=ctx.lsqr_tol, btol=ctx.lsqr_tol
+                    )
+                    sol = ls_sol[0][:, None]
+                    res = ls_sol[3]
+                # Check that we have actually solved the differential KKT system
+                assert res < ctx.kkt_tol, ValueError(
+                    "Differential KKT system residual is high. Make sure that redundant constraints are actually redundant and that the certificate matrix is correct."
+                )
+                dy_bar = sol
                 dy_bar_1 = dy_bar[:nvars, :]
                 # Fill with zeros at redundant entries
                 dy_bar_2 = []
@@ -673,6 +683,59 @@ def make_jac_linop(H, G, G_r):
     return linop
 
 
+class SDPRLayerMosek(SDPRLayer):
+    def __init__(self, mosek_params=mosek_params_dflt, **kwargs):
+
+        # Make sure that Mosek is installed
+        assert "MOSEK" in cp.installed_solvers(), "MOSEK not installed"
+        # Store Mosek parameters for solve
+        self.mosek_params = mosek_params
+        # Call SDPRLayer init
+        super().__init__(**kwargs)
+
+    def forward(self, *param_vals, verbose=False, mosek_params=None, **kwargs):
+
+        # Process the input parameters
+        param_vals_h, n_batch, n_dims = self.preprocess_input_params(*param_vals)
+
+        # Use Mosek to solve the problem
+        # TODO this loop should be set up so that we can run in parallel.
+        ext_vars_list = []
+        for iBatch in range(n_batch):
+            # Populate CVXPY Parameters with batch values
+            parameters = self.problem.parameters()
+            for iParam in range(len(parameters)):
+                parameters[iParam].value = (
+                    param_vals_h[iParam][iBatch].cpu().detach().numpy()
+                )
+            # Get parameters for mosek
+            if mosek_params is None:
+                mosek_params = self.mosek_params
+            # Solve the problem
+            self.problem.solve(
+                solver=cp.MOSEK, verbose=verbose, mosek_params=mosek_params
+            )
+            # Solver check
+            if not self.problem.status == "optimal":
+                raise ValueError("MOSEK did not converge")
+            # Extract primal and dual variables
+            X = np.array(self.problem.constraints[0].dual_value)
+            H = np.array(self.H.value)
+            mults = self.problem.variables()[0].value
+
+            # Add to list of solutions
+            ext_vars_list += [
+                dict(
+                    x=mults,
+                    y=cones.vec_symm(X),
+                    s=cones.vec_symm(H),
+                )
+            ]
+        # Call SDPRLayer forward function with external solution vars
+        return super().forward(*param_vals, ext_vars_list=ext_vars_list, **kwargs)
+
+
+# TODO Replace below with the library function.
 def get_nullspace(A_dense, method="qrp", tolerance=1e-5):
     """Function for finding the sparse nullspace basis of a given matrix"""
     info = {}

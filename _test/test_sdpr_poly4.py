@@ -7,7 +7,7 @@ import scipy.sparse as sp
 import torch
 from scipy.optimize import lsq_linear
 
-from sdprlayers import SDPRLayer
+from sdprlayers import SDPRLayer, SDPRLayerMosek
 
 root_dir = os.path.abspath(os.path.dirname(__file__) + "/../")
 
@@ -209,79 +209,6 @@ def test_grad_num(autograd_test=True, use_dual=True):
     np.testing.assert_allclose(grad_computed, grad_num, atol=1e-6, rtol=0)
 
 
-def test_grad_local(autograd_test=True):
-    """This test function compares the local version of SDPRLayer with the
-    SDP version. Local refers to the fact that the forward pass uses a local
-    solver and the reverse pass uses the certificate."""
-    # Get data from data function
-    data = get_prob_data()
-    constraints = data["constraints"]
-
-    # Set up polynomial parameter tensor
-    p = torch.tensor(data["p_vals"], requires_grad=True)
-
-    # Create SDPR Layer (SDP version)
-    sdpr_args = dict(n_vars=3, constraints=constraints, use_dual=True)
-    optlayer_sdp = SDPRLayer(**sdpr_args)
-    # Create SDPR Layer (Local version)
-    sdpr_args["local_solver"] = local_solver
-    sdpr_args["certifier"] = certifier
-    sdpr_args["local_args"] = dict(p=p, x_init=-1.5)
-    optlayer_local = SDPRLayer(**sdpr_args)
-
-    # Define loss
-    x_target = -0.5
-
-    def gen_loss_sdp(p_val, **kwargs):
-        sol, x = optlayer_sdp(build_data_mat(p_val), **kwargs)
-        x_val = (sol[1, 0] + sol[0, 1]) / 2
-        loss = 1 / 2 * (x_val - x_target) ** 2
-        return loss, sol
-
-    def gen_loss_local(p_val, **kwargs):
-        kwargs.update(dict(solver_args=dict(solve_method="local")))
-        sol, x = optlayer_local(build_data_mat(p_val), **kwargs)
-        x_val = (sol[1, 0] + sol[0, 1]) / 2
-        loss = 1 / 2 * (x_val - x_target) ** 2
-        return loss, sol
-
-    # arguments for sdp solver
-    sdp_solver_args = {"eps": 1e-9}
-
-    # get optimizer to zero to zero the gradients
-    opt = torch.optim.SGD(params=[p], lr=1e-2)
-
-    # SDP VERSION
-    # Compute Loss
-    opt.zero_grad()
-    loss, sol = gen_loss_sdp(p, solver_args=sdp_solver_args)
-    loss_sdp = loss.detach().numpy().copy()
-    # Compute gradient
-    loss.backward()
-    grad_sdp = p.grad.numpy().copy()
-    # LOCAL SOLVER VERSION
-    opt.zero_grad()
-    loss, sol = gen_loss_local(p, solver_args=sdp_solver_args)
-    loss_local = loss.detach().numpy().copy()
-    # Compute gradient
-    loss.backward()
-    grad_local = p.grad.numpy().copy()
-
-    # Check gradient w.r.t. parameter p
-    if autograd_test:
-        res = torch.autograd.gradcheck(
-            lambda *x: gen_loss_local(*x, solver_args=sdp_solver_args)[0],
-            [p],
-            eps=1e-5,
-            atol=1e-5,
-            rtol=1e-5,
-        )
-        assert res is True
-    # Compare with SDP version.
-    np.testing.assert_allclose(loss_local, loss_sdp, atol=1e-6, rtol=0)
-    np.testing.assert_allclose(grad_local, grad_sdp, atol=1e-6, rtol=0)
-
-
 def test_grad_qcqp_cost(use_dual=True):
     """Test SDPRLayer with MOSEK as the solver"""
     # Get data from data function
@@ -291,13 +218,24 @@ def test_grad_qcqp_cost(use_dual=True):
     # TEST COST GRADIENTS
     # Set up polynomial parameter tensor
     p = torch.tensor(data["p_vals"], requires_grad=True)
+    # Mosek Parameters
+    tol = 1e-12
+    mosek_params = {
+        "MSK_IPAR_INTPNT_MAX_ITERATIONS": 500,
+        "MSK_DPAR_INTPNT_CO_TOL_PFEAS": tol,
+        "MSK_DPAR_INTPNT_CO_TOL_REL_GAP": tol,
+        "MSK_DPAR_INTPNT_CO_TOL_MU_RED": tol,
+        "MSK_DPAR_INTPNT_CO_TOL_INFEAS": tol,
+        "MSK_DPAR_INTPNT_CO_TOL_DFEAS": tol,
+    }
     # Create SDPR Layer
-    optlayer = SDPRLayer(
+    optlayer = SDPRLayerMosek(
         n_vars=3,
         constraints=constraints,
         use_dual=use_dual,
         diff_qcqp=True,
         compute_multipliers=False,
+        mosek_params=mosek_params,
     )
 
     # Define loss
@@ -312,25 +250,9 @@ def test_grad_qcqp_cost(use_dual=True):
         loss = 1 / 2 * (x_val - x_target) ** 2
         return x[1:]
 
-    # arguments for sdp solver
-    tol = 1e-12
-    mosek_params = {
-        "MSK_IPAR_INTPNT_MAX_ITERATIONS": 500,
-        "MSK_DPAR_INTPNT_CO_TOL_PFEAS": tol,
-        "MSK_DPAR_INTPNT_CO_TOL_REL_GAP": tol,
-        "MSK_DPAR_INTPNT_CO_TOL_MU_RED": tol,
-        "MSK_DPAR_INTPNT_CO_TOL_INFEAS": tol,
-        "MSK_DPAR_INTPNT_CO_TOL_DFEAS": tol,
-    }
-    sdp_solver_args = {
-        "solve_method": "mosek",
-        "mosek_params": mosek_params,
-        "verbose": True,
-    }
-
     # Check gradient w.r.t. parameter p
     torch.autograd.gradcheck(
-        lambda *x: gen_loss(*x, solver_args=sdp_solver_args),
+        lambda *x: gen_loss(*x),
         [p[1:]],
         eps=1e-4,
         atol=1e-10,
@@ -351,24 +273,7 @@ def test_grad_qcqp_constraints(use_dual=True, n_batch=3):
     # Fix the cost
     p = torch.tensor(data["p_vals"], requires_grad=False)
     Q = build_data_mat(p)
-    # Create SDPR Layer
-    optlayer = SDPRLayer(
-        n_vars=3,
-        objective=Q,
-        constraints=constraints,
-        use_dual=use_dual,
-        diff_qcqp=True,
-        compute_multipliers=False,
-    )
-
-    def gen_loss_constraint(constraint, **kwargs):
-        x_target = -1
-        X, x = optlayer(constraint, **kwargs)
-        x_val = x[:, 1, 0]
-        loss = 1 / 2 * (x_val - x_target) ** 2
-        return x[:, 1:]
-
-    # arguments for sdp solver
+    # Mosek params
     tol = 1e-12
     mosek_params = {
         "MSK_IPAR_INTPNT_MAX_ITERATIONS": 500,
@@ -378,18 +283,30 @@ def test_grad_qcqp_constraints(use_dual=True, n_batch=3):
         "MSK_DPAR_INTPNT_CO_TOL_INFEAS": tol,
         "MSK_DPAR_INTPNT_CO_TOL_DFEAS": tol,
     }
-    sdp_solver_args = {
-        "solve_method": "mosek",
-        "mosek_params": mosek_params,
-        "verbose": True,
-    }
+    # Create SDPR Layer
+    optlayer = SDPRLayerMosek(
+        n_vars=3,
+        objective=Q,
+        constraints=constraints,
+        use_dual=use_dual,
+        diff_qcqp=True,
+        compute_multipliers=False,
+        mosek_params=mosek_params,
+    )
+
+    def gen_loss_constraint(constraint, **kwargs):
+        x_target = -1
+        X, x = optlayer(constraint, **kwargs)
+        x_val = x[:, 1, 0]
+        loss = 1 / 2 * (x_val - x_target) ** 2
+        return x[:, 1:]
 
     c_val = torch.tensor(constraint_val.toarray(), requires_grad=True)
     # add batch dimension
     c_val = c_val.repeat(n_batch, 1, 1)
 
     torch.autograd.gradcheck(
-        lambda *x: gen_loss_constraint(*x, solver_args=sdp_solver_args),
+        lambda *x: gen_loss_constraint(*x),
         [c_val],
         eps=1e-3,
         atol=1e-10,

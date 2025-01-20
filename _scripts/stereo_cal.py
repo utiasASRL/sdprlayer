@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from pandas import DataFrame
-from spatialmath import SO3
+from pylgmath.so3.operations import vec2rot
 
 import sdprlayers.utils.stereo_tuner as st
 from sdprlayers.utils.plot_tools import make_axes_transparent, make_dirs_safe, savefig
@@ -38,16 +38,14 @@ def get_points_in_cone(radius, beta, N_batch):
     # Generate N random polar angles between 0 and beta
     azimuth = beta * (2 * np.random.rand(N_batch) - 1)
 
-    # Z axis rotation
-    Cz = SO3.Rz(azimuth)
-    Cx = SO3.Rx(polar)
-    C = Cx * Cz
-    # get x axes
-    Cs = C.A
-    if isinstance(Cs, list):
-        points = [c[:, [0]] * radius for c in Cs]
-    else:
-        points = [Cs[:, [0]] * radius]
+    points = []
+    for b in range(N_batch):
+        aaxis_z = np.array([[0.0, 0.0, azimuth[b]]]).T
+        Cz = vec2rot(aaxis_ba=aaxis_z)
+        aaxis_x = np.array([[polar[b], 0.0, 0.0]]).T
+        Cx = vec2rot(aaxis_ba=aaxis_x)
+        C = Cx @ Cz
+        points.append(C[:, [0]] * radius)
 
     return points
 
@@ -113,8 +111,9 @@ def get_cal_data(
             x = -skew(z) @ y
             C = np.hstack([x, y, z]).T
             # Perturb orientation
-            C = SO3.Rx((2 * np.random.random() - 1) * alpha) @ SO3(C)
-            C_p0s += [C.A]
+            aaxis_x = (2 * np.random.random() - 1) * alpha * np.array([[1, 0.0, 0.0]]).T
+            Cx = vec2rot(aaxis_ba=aaxis_x)
+            C_p0s += [Cx @ C]
 
     if plot:
         # Plot data
@@ -206,7 +205,7 @@ def plot_poses(R_cw, t_cw_w, ax=None, **kwargs):
                 )
 
 
-def plot_pixel_meas(pixel_meas, ax=None, **kwargs):
+def plot_pixel_meas(pixel_meas, cam=cam_gt, ax=None, **kwargs):
     if ax is None:
         fig = plt.figure()
         ax = fig.add_subplot(111)
@@ -217,8 +216,8 @@ def plot_pixel_meas(pixel_meas, ax=None, **kwargs):
         u, v = pixel_meas[2:]
         ax.plot(u, v, "o", color="b")
     plt.axis("equal")
-    plt.xlim(-cam_gt.f_u, cam_gt.f_u)
-    plt.ylim(-cam_gt.f_v, cam_gt.f_v)
+    plt.xlim(-cam.f_u, cam.f_u)
+    plt.ylim(-cam.f_v, cam.f_v)
 
 
 def plot_map(r_l, ax=None, **kwargs):
@@ -437,7 +436,8 @@ def intialization_plots():
     ax.set_xlim(-r, r)
     ax.set_ylim(-r, r)
     ax.set_zlim(-r, r)
-    ax.axis("equal")
+    # ax.axis("equal")
+    ax.axis("auto")
     make_axes_transparent(ax)
 
     fig_setup = plt.figure(figsize=(10, 10))
@@ -1044,8 +1044,8 @@ if __name__ == "__main__":
     # )
 
     # Local minimum search and setup plots
-    # find_local_minima(store_data=True)
-    # intialization_plots()
+    find_local_minima(store_data=True)
+    intialization_plots()
 
     # Comparison over multiple instances (batch):
     # Run these to generate all of the data for comparison. Will
@@ -1059,9 +1059,9 @@ if __name__ == "__main__":
 
     # Post Processing scripts:
     # compare_tune_baseline_pp(ind=0)
-    get_statistics()
-    baseline_param_plots()
-    plot_grad_innerloss()
+    # get_statistics()
+    # baseline_param_plots()
+    # plot_grad_innerloss()
 
     # Noise analysis (This was not really used)
     # baseline_noise_analysis(N_batch=20, N_runs=10)

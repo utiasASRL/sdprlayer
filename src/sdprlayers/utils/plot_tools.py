@@ -62,6 +62,34 @@ def make_axes_transparent(ax):
     ax.set_axis_off()
 
 
+def plot_poses(R_cw, t_cw_w, ax=None, **kwargs):
+    if ax is None:
+        fig = plt.figure()
+        ax = fig.add_subplot(111, projection="3d")
+    for i in range(len(R_cw)):
+        origin = t_cw_w[i]
+        directions = R_cw[i].T
+
+        for j in range(3):
+            if "color" in kwargs:
+                ax.quiver(*origin, *directions[:, j], **kwargs)
+            else:
+                ax.quiver(
+                    *origin, *directions[:, j], color=["r", "g", "b"][j], **kwargs
+                )
+
+
+def plot_map(r_l, ax=None, **kwargs):
+    if ax is None:
+        fig = plt.figure()
+        ax = fig.add_subplot(111, projection="3d")
+
+    ax.plot(*r_l, "*", color="k", markersize=2, **kwargs)
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    ax.set_zlabel("z")
+
+
 def savefig(fig, name, dpi=200, verbose=True):
     name = os.path.join(fig_dir, name)
     make_dirs_safe(name)

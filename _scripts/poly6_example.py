@@ -7,7 +7,7 @@ import scipy.sparse as sp
 import torch
 from pandas import DataFrame, read_pickle
 
-from sdprlayers import PolyMinLayer, SDPRLayer, polyval
+from sdprlayers import PolyMinLayer, SDPRLayer, SDPRLayerMosek, polyval
 from sdprlayers.utils.plot_tools import savefig
 
 torch.set_default_dtype(torch.float64)
@@ -204,12 +204,6 @@ def test_rank_maximization():
     constraints = data["constraints"]
 
     # Create SDPR Layer
-    optlayer = SDPRLayer(n_vars=4, constraints=constraints[:-1])
-
-    # Set up polynomial parameter tensor
-    p = torch.tensor(data["p_vals"], requires_grad=True)
-
-    # arguments for sdp solver
     mosek_params = {
         "MSK_IPAR_INTPNT_MAX_ITERATIONS": 500,
         "MSK_DPAR_INTPNT_CO_TOL_PFEAS": 1e-12,
@@ -218,17 +212,20 @@ def test_rank_maximization():
         "MSK_DPAR_INTPNT_CO_TOL_INFEAS": 1e-12,
         "MSK_DPAR_INTPNT_CO_TOL_DFEAS": 1e-12,
     }
-    sdp_solver_args = {
-        "solve_method": "mosek",
-        "mosek_params": mosek_params,
-        "verbose": False,
-    }
+    optlayer = SDPRLayerMosek(
+        n_vars=4, constraints=constraints[:-1], mosek_params=mosek_params
+    )
+
+    # Set up polynomial parameter tensor
+    p = torch.tensor(data["p_vals"], requires_grad=True)
+
+    # arguments for sdp solver
 
     # Define loss to tighten the problem
     def gen_loss(p, tighten=True):
         Q = build_data_mat(p)
         Q.retain_grad()
-        X, x = optlayer(Q, solver_args=sdp_solver_args)
+        X, x = optlayer(Q)
         # loss = -torch.trace(X)
         if tighten:
             # loss = torch.norm(S[1:])
@@ -316,26 +313,26 @@ def run_analysis(n_iters=5000, x_targ=1.7, p_targ=7.3, lr=1e-2):
         x_min_targ=x_targ, p_val_targ=p_targ, max_iter=n_iters, lr=lr, verbose=True
     )
     plot_polynomial(p_opt_sdpr)
-    # # tune polynomial - torch - Global min
-    # p_opt_th, info_th1 = prob.tune_poly_torch(
-    #     x_min_targ=x_targ,
-    #     p_val_targ=p_targ,
-    #     max_iter=n_iters,
-    #     x_init=-2.0,
-    #     lr=lr,
-    #     verbose=True,
-    # )
-    # plot_polynomial(p_opt_th)
-    # # tune polynomial - torch - local min
-    # p_opt_th_loc, info_th2 = prob.tune_poly_torch(
-    #     x_min_targ=x_targ,
-    #     p_val_targ=p_targ,
-    #     max_iter=n_iters,
-    #     x_init=2.0,
-    #     lr=lr,
-    #     verbose=True,
-    # )
-    # plot_polynomial(p_opt_th_loc)
+    # tune polynomial - torch - Global min
+    p_opt_th, info_th1 = prob.tune_poly_torch(
+        x_min_targ=x_targ,
+        p_val_targ=p_targ,
+        max_iter=n_iters,
+        x_init=-2.0,
+        lr=lr,
+        verbose=True,
+    )
+    plot_polynomial(p_opt_th)
+    # tune polynomial - torch - local min
+    p_opt_th_loc, info_th2 = prob.tune_poly_torch(
+        x_min_targ=x_targ,
+        p_val_targ=p_targ,
+        max_iter=n_iters,
+        x_init=2.0,
+        lr=lr,
+        verbose=True,
+    )
+    plot_polynomial(p_opt_th_loc)
     plt.plot(x_targ, p_targ, "k+")
     plt.legend(
         ["Init", "SDPR", "Torch (init=-2)", "Torch (init=-2)", "Target Glob Min"]
@@ -346,8 +343,8 @@ def run_analysis(n_iters=5000, x_targ=1.7, p_targ=7.3, lr=1e-2):
     # save data
     folder = "_results"
     info_sdpr.to_pickle(os.path.join(folder, "poly6_sdpr.pkl"))
-    # info_th1.to_pickle(os.path.join(folder, "poly6_th1.pkl"))
-    # info_th2.to_pickle(os.path.join(folder, "poly6_th2.pkl"))
+    info_th1.to_pickle(os.path.join(folder, "poly6_th1.pkl"))
+    info_th2.to_pickle(os.path.join(folder, "poly6_th2.pkl"))
 
 
 # POST PROCESSING

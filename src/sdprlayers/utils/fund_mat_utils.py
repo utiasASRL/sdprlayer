@@ -4,15 +4,8 @@ from time import time
 
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
-import spatialmath.base as sm
-import theseus as th
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from poly_matrix import PolyMatrix
-
-from sdprlayers.layers.sdprlayer import SDPRLayer
+from pylgmath.so3.operations import vec2rot
 
 
 def get_gt_setup(
@@ -27,7 +20,7 @@ def get_gt_setup(
 
     # Ground Truth Map Points
     # Cluster at the origin
-    r_l = lm_bound * (np.random.rand(3, N_map) - 0.5)
+    r_l = lm_bound * 2 * (np.random.rand(3, N_map) - 0.5)
     # Ground Truth Poses
     r_p0s = []
     C_p0s = []
@@ -35,7 +28,9 @@ def get_gt_setup(
         # Ground Truth Poses
         for i in range(N_batch):
             r_p0s += [0.2 * np.random.randn(3, 1)]
-            C_p0s += [sm.roty(0.5 * np.random.randn(1)[0])]
+            aaxis = np.zeros((3, 1))
+            aaxis[1, 0] = 0.5 * np.random.randn(1)[0]
+            C_p0s.append(vec2rot(aaxis_ba=aaxis))
         # Offset from the origin
         r_l = r_l + offs
     elif traj_type == "circle":

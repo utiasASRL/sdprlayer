@@ -1,5 +1,7 @@
 name: sdprlayers
 channels:
+    - nvidia
+    - pytorch
     - defaults
     - conda-forge
     - anaconda
@@ -8,21 +10,26 @@ channels:
 dependencies:
     - python>=3.10
     - pip>=22.3
-    - pip:
-        - -r requirements.txt
     # Packages
     - matplotlib>=3.6
     - jupyterlab>=3.5
     - ipynbname=2021.3
     - scipy>=1.9.1
-    - pytorch=2.1.2
     - mosek
     - cvxopt
     - pandas
     - pyvis
+    # Torch
+    - pytorch
+    - torchvision
+    - torchaudio
+    - pytorch-cuda=11.8
     # Testing & linting
     - pytest>=7.1
     - pytest-cov=4.0
     - flake8=6.0
+    - pip:
+        - -r requirements.txt
+        - -e .
     
     

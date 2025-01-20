@@ -6,12 +6,11 @@ from datetime import datetime
 
 import matplotlib.pyplot as plt
 import numpy as np
-import spatialmath.base as sm
 
 # from solvers.common import solve_sdp_cvxpy
 from lifters.state_lifter import StateLifter
 from poly_matrix import PolyMatrix
-from pylgmath.so3.operations import hat
+from pylgmath.so3.operations import hat, vec2rot
 
 from sdprlayers.layers.fundmat_est import FundMatSDPBlock
 
@@ -47,7 +46,7 @@ class FundMatLifter(StateLifter):
         axis = np.random.rand(3, 1)
         axis /= np.linalg.norm(axis)
         angle = 2 * np.pi * np.random.rand()
-        R_ts = sm.angvec2r(angle, axis)
+        R_ts = vec2rot(aaxis_ba=angle * axis)
         # Get essential matrix
         E = R_ts @ hat(t_ts)
         # Generate random instrinsic matrix

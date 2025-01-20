@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from poly_matrix import PolyMatrix
 from torch.profiler import record_function
 
-from sdprlayers.layers.sdprlayer import SDPRLayer
+from sdprlayers.layers.sdprlayer import SDPRLayerMosek
 from sdprlayers.utils.lie_algebra import se3_inv, se3_log
 
 
@@ -15,7 +15,9 @@ class SDPPoseEstimator(nn.Module):
     Semidefinite Programming Relaxation (SDPR)Layer.
     """
 
-    def __init__(self, T_s_v, diff_qcqp=False, compute_multipliers=False):
+    def __init__(
+        self, T_s_v, use_dual=True, diff_qcqp=False, compute_multipliers=False
+    ):
         """
         Initialize the PoseSDPBlock class.
 
@@ -32,21 +34,11 @@ class SDPPoseEstimator(nn.Module):
             + self.gen_row_col_constraints()
         )
         # Redundant constraints
-        redun_list = list(range(9, len(constraints)))
+        redun_list = list(range(6, len(constraints)))
 
-        # Initialize SDPRLayer
-        self.sdprlayer = SDPRLayer(
-            n_vars=13,
-            constraints=constraints,
-            diff_qcqp=diff_qcqp,
-            redun_list=redun_list,
-            compute_multipliers=compute_multipliers,
-            use_dual=True,
-        )
-
-        self.register_buffer("T_s_v", T_s_v)
+        # Mosek Parameters
         tol = 1e-12
-        self.mosek_params = {
+        mosek_params = {
             "MSK_IPAR_INTPNT_MAX_ITERATIONS": 1000,
             "MSK_DPAR_INTPNT_CO_TOL_PFEAS": tol,
             "MSK_DPAR_INTPNT_CO_TOL_REL_GAP": tol,
@@ -55,6 +47,19 @@ class SDPPoseEstimator(nn.Module):
             "MSK_DPAR_INTPNT_CO_TOL_DFEAS": tol,
         }
 
+        # Initialize SDPRLayer
+        self.sdprlayer = SDPRLayerMosek(
+            n_vars=13,
+            constraints=constraints,
+            diff_qcqp=diff_qcqp,
+            redun_list=redun_list,
+            compute_multipliers=compute_multipliers,
+            use_dual=use_dual,
+            mosek_params=mosek_params,
+        )
+
+        self.register_buffer("T_s_v", T_s_v)
+
     def forward(
         self,
         keypoints_3D_src,
@@ -62,7 +67,7 @@ class SDPPoseEstimator(nn.Module):
         weights,
         inv_cov_weights=None,
         verbose=False,
-        solver_args=None,
+        mosek_params=None,
         return_loss=False,
     ):
         """
@@ -86,23 +91,10 @@ class SDPPoseEstimator(nn.Module):
             Qs, scales, offsets = self.get_obj_matrix_vec(
                 keypoints_3D_src, keypoints_3D_trg, weights, inv_cov_weights
             )
-        # Set up solver parameters
-        # solver_args = {
-        #     "solve_method": "SCS",
-        #     "eps": 1e-7,
-        #     "normalize": True,
-        #     "max_iters": 100000,
-        #     "verbose": False,
-        # }
-        if solver_args is None:
-            solver_args = {
-                "solve_method": "mosek",
-                "mosek_params": self.mosek_params,
-                "verbose": verbose,
-            }
+
         # Run layer
         with record_function("SDPR: Run Optimization"):
-            Xs, xs = self.sdprlayer(Qs, solver_args=solver_args)
+            Xs, xs = self.sdprlayer(Qs, verbose=verbose, mosek_params=mosek_params)
 
         # Extract solution
         t_trg_src_intrg = xs[:, 10:]

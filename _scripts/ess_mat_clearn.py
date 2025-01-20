@@ -6,14 +6,13 @@ from datetime import datetime
 
 import matplotlib.pyplot as plt
 import numpy as np
-import spatialmath.base as sm
 
 # from solvers.common import solve_sdp_cvxpy
 from lifters.state_lifter import StateLifter
 from poly_matrix import PolyMatrix
-from pylgmath.so3.operations import hat
+from pylgmath.so3.operations import hat, vec2rot
 
-from sdprlayers.layers.essential_est import EssentialSDPBlock
+from sdprlayers.layers.essential_est import SDPEssMatEst
 
 root_dir = os.path.abspath(os.path.dirname(__file__) + "/../")
 sys.path.insert(0, root_dir)
@@ -47,7 +46,8 @@ class EssentialLifter(StateLifter):
         axis = np.random.rand(3, 1)
         axis /= np.linalg.norm(axis)
         angle = 2 * np.pi * np.random.rand()
-        R_ts = sm.angvec2r(angle, axis)
+        R_ts = vec2rot(aaxis_ba=angle * axis)
+
         # Get essential matrix
         t_ts = t_ts / np.linalg.norm(t_ts)
         E = hat(t_ts) @ R_ts.T
@@ -67,7 +67,7 @@ def gen_learned_constraints(plot=False):
     lifter = EssentialLifter()
     # Define list of known constraints
     A_known = []
-    layer = EssentialSDPBlock()
+    layer = SDPEssMatEst()
     A_known += layer.get_t_norm_constraint()
     A_known += layer.get_tcross_constraints()
 

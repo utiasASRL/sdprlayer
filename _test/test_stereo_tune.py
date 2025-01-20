@@ -4,8 +4,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from sdprlayer import SDPRLayer
-from sdprlayer import stereo_tuner as st
+from sdprlayers import SDPRLayer, SDPRLayerMosek
+from sdprlayers import stereo_tuner as st
 
 
 def set_seed(x):
@@ -54,7 +54,7 @@ class TestStereoTune(unittest.TestCase):
     def run_forward_sdpr(t, solver="SCS", N_batch=3):
         # Generate problem
         set_seed(0)
-        r_ps, C_p0s, r_ls, pixel_meass = st.get_stereo_prob_data(
+        r_ps, C_p0s, r_ls, pixel_meass = st.get_prob_data(
             camera=t.cam_gt, N_map=50, N_batch=3
         )
 
@@ -71,16 +71,18 @@ class TestStereoTune(unittest.TestCase):
 
         # get the constraints
         constraints_list = st.get_constraints()
-        # Build Layer
-        sdpr_layer = SDPRLayer(13, constraints=constraints_list, use_dual=True)
+
         # Run Forward pass
         Q, scales, offsets = st.get_data_mat(cam_torch, r_ls, pixel_meass)
         # select solver
         if solver == "mosek":
-            solver_args = {"solve_method": "mosek", "verbose": True}
+            # Build Layer
+            sdpr_layer = SDPRLayerMosek(13, constraints=constraints_list, use_dual=True)
+            X = sdpr_layer(Q)[0]
         elif solver == "SCS":
+            sdpr_layer = SDPRLayer(13, constraints=constraints_list, use_dual=True)
             solver_args = {"solve_method": "SCS", "eps": 1e-9, "verbose": True}
-        X = sdpr_layer(Q, solver_args=solver_args)[0]
+            X = sdpr_layer(Q, solver_args=solver_args)[0]
         # Check solutions
         r_ps = r_ps.detach().numpy()
         C_p0s = C_p0s.detach().numpy()
@@ -105,7 +107,7 @@ class TestStereoTune(unittest.TestCase):
         """Test forward pass of theseus layer"""
         set_seed(0)
         # Generate problem
-        r_p0s, C_p0s, r_ls, pixel_meass = st.get_stereo_prob_data(
+        r_p0s, C_p0s, r_ls, pixel_meass = st.get_prob_data(
             camera=t.cam_gt, N_map=N_map, N_batch=N_batch
         )
 
@@ -173,7 +175,7 @@ class TestStereoTune(unittest.TestCase):
         """Test backward pass of theseus layer"""
         set_seed(0)
         # Generate problem
-        r_p0s, C_p0s, r_ls, pixel_meass = st.get_stereo_prob_data(
+        r_p0s, C_p0s, r_ls, pixel_meass = st.get_prob_data(
             camera=t.cam_gt, N_map=N_map, N_batch=N_batch
         )
         r_p0s = r_p0s.squeeze(2)
@@ -247,7 +249,7 @@ class TestStereoTune(unittest.TestCase):
         """
         set_seed(0)
         # Generate problem
-        r_ps, C_p0s, r_ls, pixel_meass = st.get_stereo_prob_data(
+        r_ps, C_p0s, r_ls, pixel_meass = st.get_prob_data(
             camera=t.cam_gt, N_map=7, N_batch=N_batch
         )
         # Camera parameters
@@ -291,7 +293,7 @@ class TestStereoTune(unittest.TestCase):
     def test_grads_data_mat(t, N_batch=2):
         set_seed(0)
         # Generate problem
-        r_ps, C_p0s, r_ls, pixel_meass = st.get_stereo_prob_data(
+        r_ps, C_p0s, r_ls, pixel_meass = st.get_prob_data(
             camera=t.cam_gt, N_map=7, N_batch=N_batch
         )
         # Camera parameters
@@ -326,7 +328,7 @@ class TestStereoTune(unittest.TestCase):
     def check_grads_optlayer(t, solver="SCS", N_batch=1):
         set_seed(0)
         # Generate problem
-        r_ps, C_p0s, r_ls, pixel_meass = st.get_stereo_prob_data(
+        r_ps, C_p0s, r_ls, pixel_meass = st.get_prob_data(
             camera=t.cam_gt, N_map=7, N_batch=N_batch
         )
 
@@ -404,7 +406,7 @@ class TestStereoTune(unittest.TestCase):
     def test_compare_grads(t, N_batch=1):
         set_seed(0)
         # Generate problem
-        r_ps, C_p0s, r_ls, pixel_meass = st.get_stereo_prob_data(
+        r_ps, C_p0s, r_ls, pixel_meass = st.get_prob_data(
             camera=t.cam_gt, N_map=7, N_batch=N_batch
         )
 
@@ -509,7 +511,7 @@ class TestStereoTune(unittest.TestCase):
         the loss on landmark locations is used to tune the camera parameters."""
         set_seed(0)
         # Generate problems
-        r_ps, C_p0s, r_ls, pixel_meass = st.get_stereo_prob_data(
+        r_ps, C_p0s, r_ls, pixel_meass = st.get_prob_data(
             camera=t.cam_gt, N_map=N_map, N_batch=N_batch
         )
         # dictionary of paramter test values
@@ -600,7 +602,7 @@ class TestStereoTune(unittest.TestCase):
         """Test tuning offsets on each parameter using theseus."""
         set_seed(0)
         # Generate problem
-        r_p0s, C_p0s, r_ls, pixel_meass = st.get_stereo_prob_data(
+        r_p0s, C_p0s, r_ls, pixel_meass = st.get_prob_data(
             camera=t.cam_gt, N_map=20, N_batch=10
         )
         # Convert to tensor
@@ -727,7 +729,7 @@ class TestStereoTune(unittest.TestCase):
         """Test offsets for all parameters simultaneously. Use default noise level"""
         set_seed(1)
         # Generate problems
-        r_ps, C_p0s, r_ls, pixel_meass = st.get_stereo_prob_data(
+        r_ps, C_p0s, r_ls, pixel_meass = st.get_prob_data(
             camera=t.cam_gt, N_map=N_map, N_batch=N_batch
         )
 
