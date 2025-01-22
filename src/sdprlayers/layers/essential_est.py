@@ -67,7 +67,7 @@ class SDPEssMatEst(nn.Module):
             "MSK_IPAR_INTPNT_MAX_ITERATIONS": 1000,
             "MSK_DPAR_INTPNT_CO_TOL_PFEAS": tol,
             "MSK_DPAR_INTPNT_CO_TOL_REL_GAP": tol,
-            "MSK_DPAR_INTPNT_CO_TOL_MU_RED": tol * 1e-2,
+            "MSK_DPAR_INTPNT_CO_TOL_MU_RED": tol / 1e2,
             "MSK_DPAR_INTPNT_CO_TOL_INFEAS": tol,
             "MSK_DPAR_INTPNT_CO_TOL_DFEAS": tol,
         }
@@ -119,6 +119,7 @@ class SDPEssMatEst(nn.Module):
         verbose=False,
         rescale=True,
         choose_soln=True,
+        ext_vars_list=[],
     ):
         """
         Compute the optimal essential matrix relating source and target frame. This
@@ -144,53 +145,41 @@ class SDPEssMatEst(nn.Module):
         )
 
         # Solve decomposed SDP
-        ext_vars_list = []
-        for Q in Qs:
-            # Overwrite stored cost
-            self.homQCQP.C = PolyMatrix.init_from_sparse(
-                Q.detach().numpy(), var_dict=self.var_dict, symmetric=True
-            )[0]
-            # Run solve
-            cliques, info = solve_dsdp(
-                self.homQCQP, form="dual", tol=self.tol, verbose=verbose
-            )
-            # Recover primal solution
-            Y, ranks, factor_dict = self.homQCQP.get_mr_completion(
-                cliques, var_list=list(self.var_dict.keys()), rank_tol=1e5
-            )
-            S = Y @ Y.T
-            # Recover dual solution
-            H = self.homQCQP.get_dual_matrix(
-                info["dual"], var_list=self.var_dict
-            ).toarray()
-            mults = np.array(info["mults"])
-
-            # DEBUG
-            # C = Q.detach().numpy()
-            # constraints = self.sdprlayer.constr_list + [self.sdprlayer.A_0]
-            # A_bar = []
-            # H2 = C.copy()
-            # for i, A in enumerate(constraints):
-            #     H2 += A * mults[i]
-            #     A_bar.append(A @ Y)
-            # A_bar = np.hstack(A_bar)
-            # ls_sol = np.linalg.lstsq(A_bar, -C @ Y)
-            # mults_2 = ls_sol[0]
-
-            # Add solution to list to pass to layer
-            ext_vars_list.append(
-                dict(
-                    x=mults,
-                    y=cones.vec_symm(S),
-                    s=cones.vec_symm(H),
+        if len(ext_vars_list) == 0:
+            for Q in Qs:
+                # Overwrite stored cost
+                self.homQCQP.C = PolyMatrix.init_from_sparse(
+                    Q.detach().numpy(), var_dict=self.var_dict, symmetric=True
+                )[0]
+                # Run solve
+                cliques, info = solve_dsdp(
+                    self.homQCQP, form="dual", tol=self.tol, verbose=verbose
                 )
-            )
+                # Recover primal solution
+                Y, ranks, factor_dict = self.homQCQP.get_mr_completion(
+                    cliques, var_list=list(self.var_dict.keys()), rank_tol=1e5
+                )
+                S = Y @ Y.T
+                # Recover dual solution
+                H = self.homQCQP.get_dual_matrix(
+                    info["dual"], var_list=self.var_dict
+                ).toarray()
+                mults = np.array(info["mults"])
 
-        # Solver set to external to bypass cvxpy forward solve
-        solver_args = dict(solve_method="external", ext_vars_list=ext_vars_list)
+                # Add solution to list to pass to layer
+                ext_vars_list.append(
+                    dict(
+                        x=mults,
+                        y=cones.vec_symm(S),
+                        s=cones.vec_symm(H),
+                    )
+                )
+        else:
+            ranks = np.array([1, 1, 1])
+
         # call sdprlayer
         with record_function("SDPR: Run Optimization"):
-            X, x = self.sdprlayer(Qs, solver_args=solver_args)
+            X, x = self.sdprlayer(Qs, ext_vars_list=ext_vars_list)
         # Solution rank
         rank = np.max(ranks)
 
@@ -241,6 +230,7 @@ class SDPEssMatEst(nn.Module):
         keypoints_trg,
         weights,
         scale_offset=True,
+        regularize=True,
     ):
         """Compute the QCQP (Quadratically Constrained Quadratic Program) objective matrix based on the given 2D keypoints from source and target frames, and their corresponding weights.
 
@@ -279,6 +269,13 @@ class SDPEssMatEst(nn.Module):
             Q = Q / torch.norm(Q, p="fro")
         else:
             scales, offsets = None, None
+        # Add Regularization (Should not affect solution)
+        if regularize:
+            h = 0
+            t = slice(10, 13)
+            Q[:, h, h] = 1.0
+            Q[:, t, t] = torch.eye(3)[None, :, :].expand(B, 3, 3)
+
         return Q, scales, offsets
 
     def get_t_norm_constraint(self):

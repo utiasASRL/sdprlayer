@@ -4,6 +4,7 @@ import kornia.geometry.epipolar as epi
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from diffcp.cones import vec_symm
 from pylgmath.so3.operations import vec2rot
 from tqdm import tqdm
 
@@ -111,9 +112,6 @@ def skew(vec):
     )
 
 
-# def get_cv2_solution(srcs, trgs, wts, K=torch.eye(4)):
-
-
 def get_kornia_solution(srcs, trgs, wts, K=torch.eye(3)):
     """Get the essential matrix using the kornia library.
     This uses Nister's 5 point algorithm."""
@@ -158,8 +156,10 @@ def get_kornia_solution(srcs, trgs, wts, K=torch.eye(3)):
     return Es, ts, Rs
 
 
-def get_soln_and_jac(estimator, points_t, points_s, weights, K, tol=1e-12, **kwargs):
-    """Apply estimator to point clouds and obtain solution and solution gradient.
+def get_soln_and_jac(
+    estimator, points_t, points_s, weights, K, jac_vars=None, tol=1e-12, **kwargs
+):
+    """Apply estimator to point clouds and obtain solution. Compute solution Jacobian with respect to jac_vars.
     NOTE: gradients are computed sequentially using torch's grad function and then assembled into a Jacobian for each input. We also loop over the batch dimension.
     All computations are done on the CPU sequentially.
 
@@ -186,15 +186,22 @@ def get_soln_and_jac(estimator, points_t, points_s, weights, K, tol=1e-12, **kwa
 
     # Manually loop through batches
     n_batch = points_t.shape[0]
+    n_points = points_t.shape[-1]
     estimates, jacobians, times_f, times_b = [], [], [], []
     jacobians = []
     print(f"Running {n_batch} Tests of {n_points} points with estimator {estimator}")
     for b in tqdm(range(n_batch)):
         # Define input variables
         inputs = [
-            points_s[[b], :, :].requires_grad_(True),
-            points_t[[b], :, :].requires_grad_(True),
-            weights[[b], :, :].requires_grad_(True),
+            points_s[[b], :2, :].requires_grad_(True),
+            points_t[[b], :2, :].requires_grad_(True),
+            weights[[b], :2, :].requires_grad_(True),
+        ]
+        # Homogenized
+        inputs_h = [
+            torch.cat([inputs[0], torch.ones(1, 1, n_points)], dim=1),
+            torch.cat([inputs[1], torch.ones(1, 1, n_points)], dim=1),
+            inputs[2],
         ]
 
         # Apply forward pass of estimator and time the response
@@ -203,25 +210,27 @@ def get_soln_and_jac(estimator, points_t, points_s, weights, K, tol=1e-12, **kwa
             # Add intrinsic camera matrix for Kornia solution
             kwargs.update(dict(K=K))
         # Run Estimator
-        outputs = forward(*inputs, **kwargs)
+        outputs = forward(*inputs_h, **kwargs)
         estimates.append(outputs[0])
         Tf_1 = time.time()
         times_f.append(Tf_1 - Tf_0)
         # Compute Jacobian
+        if jac_vars is None:
+            jac_vars = inputs
         # NOTE: We do this by manually looping to avoid issues with vmap
         # Output gradient vectors
         grad_outputs = torch.eye(9).reshape(9, 3, 3)
         Tb_0 = time.time()
-        input_jacs = [[] for i in range(len(inputs))]
+        jacs = [[] for i in range(len(jac_vars))]
         # Loop over output gradients
         for grad_output in grad_outputs:
             grads = torch.autograd.grad(
-                estimates[-1][0], inputs, grad_output, retain_graph=True
+                estimates[-1][0], jac_vars, grad_output, retain_graph=True
             )
-            for iInput in range(len(inputs)):
-                input_jacs[iInput].append(grads[iInput].flatten())
+            for iInput in range(len(jac_vars)):
+                jacs[iInput].append(grads[iInput].flatten())
         # Stack gradients into jacobian and store
-        jacobians.append([torch.stack(jac) for jac in input_jacs])
+        jacobians.append([torch.stack(jac) for jac in jacs])
         Tb_1 = time.time()
         times_b.append(Tb_1 - Tb_0)
 
@@ -238,8 +247,8 @@ def compute_cost(srcs, trgs, weights, Es_est):
     costs = []
     B, _, N = srcs.shape
     for b in range(B):
-        src = srcs[b].cpu().numpy()
-        trg = trgs[b].cpu().numpy()
+        src = srcs[b].detach().numpy()
+        trg = trgs[b].detach().numpy()
         E_est = Es_est[b].detach().numpy()
         cost = 0.0
         for i in range(N):

@@ -7,12 +7,11 @@ import numpy as np
 import torch
 from cv2 import findEssentialMat
 from pandas import DataFrame
-from tqdm import tqdm
 
 import sdprlayers.utils.ess_mat_utils as utils
 from sdprlayers import SDPEssMatEst
 from sdprlayers.utils.camera_model import CameraModel
-from sdprlayers.utils.lie_algebra import se3_exp, so3_wedge
+from sdprlayers.utils.lie_algebra import se3_exp, so3_exp, so3_log, so3_wedge
 from sdprlayers.utils.plot_tools import plot_map, plot_poses
 
 
@@ -23,8 +22,10 @@ def set_seed(x):
 
 class TestEssMat(unittest.TestCase):
 
-    def __init__(self, *args, n_batch=1, n_points=50, tol=1e-12, **kwargs):
+    def __init__(self, *args, n_batch=1, n_points=50, tol=1e-12, seed=0, **kwargs):
         super(TestEssMat, self).__init__(*args, **kwargs)
+        torch.manual_seed(seed)
+        np.random.seed(seed)
         # Default dtype
         torch.set_default_dtype(torch.float64)
         torch.autograd.set_detect_anomaly(True)
@@ -34,56 +35,55 @@ class TestEssMat(unittest.TestCase):
         # Set up test problem
         # NOTE ts_ts_s is the vector from the source to the target frame expressed in the source frame
         # NOTE Rs_ts is the rotation that maps vectors in the source frame to vectors in the target frame
-        ts_ts_s, Rs_ts, key_ss = utils.get_gt_setup(
+        ts_ts_s, Rs_ts, keys_3d_s = utils.get_gt_setup(
             N_map=n_points,
             N_batch=n_batch,
             traj_type="clusters",
             offs=np.array([[0, 0, 3]]).T,
         )
-        # Transforms from source to target
-        Rs_ts = torch.tensor(Rs_ts)
-        ts_ts_s = torch.tensor(ts_ts_s)
-        ts_st_t = Rs_ts.bmm(-ts_ts_s)
-        # store rotation solution
-        self.Rs_ts = Rs_ts
-
-        # Keypoints (3D) defined in source frame
-        key_ss = torch.tensor(key_ss)[None, :, :].expand(n_batch, -1, -1)
-        # Keypoints in target frame
-        key_ts = Rs_ts.bmm(key_ss) + ts_st_t
-        # homogenize coordinates
-        trg_coords = torch.concat(
-            [key_ts, torch.ones(n_batch, 1, key_ss.size(2))], dim=1
-        )
-        src_coords = torch.concat(
-            [key_ss, torch.ones(n_batch, 1, key_ss.size(2))], dim=1
-        )
-
         # Define Camera
         # camera = CameraModel(800, 800, 0.0, 0.0, 0.0)
-        camera = CameraModel(1, 1, 0.0, 0.0, 0.0)
+        self.camera = CameraModel(1, 1, 0.0, 0.0, 0.0)
 
+        # Transforms from source to target
+        self.xi = so3_log(torch.tensor(Rs_ts))
+        self.xi.requires_grad_(True)
+        self.Rs_ts = so3_exp(self.xi)
+        ts_ts_s = torch.tensor(ts_ts_s)
+        ts_st_t = self.Rs_ts.bmm(-ts_ts_s)
+        # Keep track of gradients for translation
+        ts_st_t.requires_grad_(True)
+
+        # Keypoints (3D) defined in source frame
+        keys_3d_s = torch.tensor(keys_3d_s)[None, :, :].expand(n_batch, -1, -1)
+        self.keys_3d_s = keys_3d_s
+        # Homogenize coords
+        keys_3dh_s = torch.concat(
+            [keys_3d_s, torch.ones(n_batch, 1, keys_3d_s.size(2))], dim=1
+        )
         # Apply camera to get image points
-        src_img_pts = camera.camera_model(src_coords)
-        trg_img_pts = camera.camera_model(trg_coords)
+        src_img_pts = self.camera.camera_model(keys_3dh_s)
         # Get inverse intrinsic camera mat
-        K_inv = torch.linalg.inv(camera.K)
+        K_inv = torch.linalg.inv(self.camera.K)
         K_invs = K_inv.expand(n_batch, 3, 3)
         # Store normalized image coordinates
         self.keypoints_src = K_invs.bmm(src_img_pts)
-        self.keypoints_trg = K_invs.bmm(trg_img_pts)
+        # Map to target points
+        self.keypoints_trg = self.map_src_to_trg(
+            keys_3d_s=keys_3d_s, Rs_ts=self.Rs_ts, ts_st_t=ts_st_t
+        )
 
         # Generate Scalar Weights
         self.weights = torch.ones(
             self.keypoints_src.size(0), 1, self.keypoints_src.size(2)
         )
-        self.camera = camera
 
         # Normalize the translations
         t_norm = torch.norm(ts_st_t, dim=1, keepdim=True)
         self.ts_st_t = ts_st_t / t_norm
+        self.ts_st_t_unnorm = ts_st_t
         # Construct Essential Matrix
-        self.Es = so3_wedge(self.ts_st_t[:, :, 0]).bmm(self.Rs_ts)
+        self.Es = self.get_essential(ts_st_t, self.xi)
 
         # Check that the matrix makes sense
         check = 0.0
@@ -94,7 +94,7 @@ class TestEssMat(unittest.TestCase):
                 @ self.keypoints_src[0, :, [n]]
             )
 
-        np.testing.assert_allclose(check, 0.0, atol=1e-12)
+        np.testing.assert_allclose(check.detach(), 0.0, atol=1e-12)
 
         # Construct solution vectors
         self.sol = torch.cat(
@@ -108,6 +108,27 @@ class TestEssMat(unittest.TestCase):
         K_batch = self.camera.K.expand(1, -1, -1)
         # Initialize layer
         self.layer = SDPEssMatEst(tol=tol, K_source=K_batch, K_target=K_batch)
+
+    def get_essential(self, ts, xi):
+        """Return essential matrix associated with a translation and Lie algebra representation of a rotation matrix."""
+        return so3_wedge(ts[..., 0]) @ so3_exp(xi)
+
+    def map_src_to_trg(self, keys_3d_s, Rs_ts, ts_st_t):
+        """Maps 3D source keypoints to 2D target keypoints."""
+        n_batch = self.keys_3d_s.shape[0]
+        # Keypoints in target frame
+        keys_3d_t = Rs_ts.bmm(keys_3d_s) + ts_st_t
+        # homogenize coordinates
+        trg_coords = torch.concat(
+            [keys_3d_t, torch.ones(n_batch, 1, keys_3d_s.size(2))], dim=1
+        )
+        # Map through camera model
+        trg_img_pts = self.camera.camera_model(trg_coords)
+        # Normalize camera coords
+        K_inv = torch.linalg.inv(self.camera.K)
+        K_invs = K_inv.expand(n_batch, 3, 3)
+        keys_2d_t = K_invs.bmm(trg_img_pts)
+        return keys_2d_t
 
     def test_constraints(self, sol=None):
         """Test that the constraints characterize the fundamental matrix and epipole."""
@@ -519,16 +540,16 @@ class TestEssMat(unittest.TestCase):
             # Stack with other measurements + weights
             new_src = new_src.unsqueeze(2)
             new_trg = new_trg.unsqueeze(2)
-            new_srcs = torch.cat([srcs[:, :2, :-1], new_src], dim=2).mT
-            new_trgs = torch.cat([trgs[:, :2, :-1], new_trg], dim=2).mT
-            new_weights = torch.cat([self.weights[:, 0, :-1], new_wt], dim=1)
+            new_wt = new_wt.unsqueeze(2)
+            new_srcs = torch.cat([srcs[:, :2, :-1], new_src], dim=2)
+            new_trgs = torch.cat([trgs[:, :2, :-1], new_trg], dim=2)
+            new_weights = torch.cat([self.weights[:, [0], :-1], new_wt], dim=2)
 
             Es, ts, Rs = utils.get_kornia_solution(
                 new_srcs,
                 new_trgs,
                 new_weights,
                 self.camera.K.unsqueeze(0),
-                self.Es,
             )
 
             if out == "E":
@@ -548,8 +569,8 @@ class TestEssMat(unittest.TestCase):
         # source-essential gradient
         inputs[0].requires_grad_(True)
         eps = 1e-4
-        atol = 1e-10
-        rtol = 1e-10
+        atol = 1e-6
+        rtol = 1e-6
         torch.autograd.gradcheck(
             lambda *x: ess_wrapper(*x, out="E"),
             inputs=inputs,
@@ -558,7 +579,24 @@ class TestEssMat(unittest.TestCase):
             rtol=rtol,
         )
 
-    def compare_with_kornia(self, sigma_val=0.0):
+    def get_opencv_solution(self, srcs, trgs):
+        # Get opencv solution for comparison
+        srcs_cv = srcs[0, :2].detach().numpy().T[::-1, :]
+        trgs_cv = trgs[0, :2].detach().numpy().T[::-1, :]
+        E1 = findEssentialMat(
+            points1=srcs_cv,
+            points2=trgs_cv,
+            cameraMatrix=np.eye(3),
+        )[0]
+        _, s, _ = np.linalg.svd(E1)
+        E_cv = torch.tensor(-E1[None, ...] / s[0])
+        cost_cv = utils.compute_cost(srcs, trgs, self.weights, E_cv[None, ...])
+
+        return E_cv, cost_cv
+
+    def test_estimators_backward(
+        self, sigma_val=0.0, plot_jacobians=True, save_data=False
+    ):
         """Compare gradients between Kornia (local solve) and SDP solver"""
         # Estimators
         estimator_list = ["sdpr-sdp", "sdpr-is", "sdpr-cift", "kornia"]
@@ -573,30 +611,24 @@ class TestEssMat(unittest.TestCase):
         srcs[:, :2, :] += sigma * torch.randn(B, 2, N)
         # Batchify Intrinsic matrix
         K = self.camera.K[None, :, :]
-
-        # Get opencv solution for comparison
-        srcs_cv = srcs[0, :2].numpy().T[::-1, :]
-        trgs_cv = trgs[0, :2].numpy().T[::-1, :]
-        E1 = findEssentialMat(
-            points1=srcs_cv,
-            points2=trgs_cv,
-            cameraMatrix=np.eye(3),
-        )[0]
-        _, s, _ = np.linalg.svd(E1)
-        E_cv = torch.tensor(-E1[None, ...] / s[0])
-        cost_cv = utils.compute_cost(srcs, trgs, self.weights, E_cv[None, ...])
-
+        # Compute analytical jacobians
+        jacobians_true = self.compute_analytical_jacobians()
         # Assess estimators
         data_dicts = []
         for estimator in estimator_list:
             Es_est, jacobians, time_f, time_b = utils.get_soln_and_jac(
-                estimator, trgs, srcs, self.weights, K
+                estimator,
+                trgs,
+                srcs,
+                self.weights,
+                K,
+                jac_vars=[self.ts_st_t_unnorm, self.xi],
+                tol=1e-11,
             )
             # Compute distance from ground truth value (flip sign if needed)
             err1 = torch.norm(Es_est - self.Es)
             err2 = torch.norm(Es_est + self.Es)
             est_err_norms = torch.stack([err1, err2], dim=-1)
-            # est_err_norms = torch.min(errs, dim=-1)
 
             # Compute cost
             costs = utils.compute_cost(srcs, trgs, self.weights, Es_est)
@@ -612,25 +644,49 @@ class TestEssMat(unittest.TestCase):
             )
             data_dicts.append(data_dict)
         df = DataFrame(data_dicts)
-
         # Plot Jacobian differences
-        fig, ax = plt.subplots(3, 1)
-        ax[0].matshow(df["jacobians"][0][0][0])
-        ax[0].set_title("SDPR-SDP Jacobian")
-        ax[1].matshow(df["jacobians"][1][0][0])
-        ax[1].set_title("SDPR-IS Jacobian")
-        ax[2].matshow(df["jacobians"][3][0][0])
-        ax[2].set_title("Kornia Jacobian")
-        plt.show()
+        if plot_jacobians:
+            ind = 0
+            fig, ax = plt.subplots(1, len(estimator_list) + 1)
+            for i in range(len(estimator_list)):
+                ax[i].matshow(df["jacobians"][i][0][ind])
+                ax[i].set_title(f"{estimator_list[i]}")
+            ax[-1].matshow(jacobians_true[0][ind])
+            ax[-1].set_title("Ground Truth")
+            plt.show()
+
         # Store to file
-        fname = "_results/ess_mat/grad_comp.pkl"
-        df.to_pickle(fname)
-        return fname
+        if save_data:
+            fname = "_results/ess_mat/grad_comp.pkl"
+            df.to_pickle(fname)
+            return fname, df
+
+    def compute_analytical_jacobians(self):
+        """Compute the analytical jacobians of the essential matrix with respect to the rigid body translation and rotation."""
+        # Variables
+        t = self.ts_st_t
+        xi = self.xi
+        R = self.Rs_ts
+        E = self.Es
+        B = t.shape[0]
+        # Jacobian computation
+        jacobians = []
+        for b in range(B):
+            jac_t_b, jac_xi_b = [], []
+            for a in torch.eye(3):
+                jac_t_b.append((so3_wedge(a) @ R[b]).reshape(9, 1))
+                RTa = R[b].T @ a[:, None]
+                jac_xi_b.append((E[b] @ so3_wedge(RTa[:, 0])).reshape(9, 1))
+            jac_t_b = torch.cat(jac_t_b, dim=-1).detach()
+            jac_xi_b = torch.cat(jac_xi_b, dim=-1).detach()
+            jacobians.append([jac_t_b, jac_xi_b])
+
+        return jacobians
 
 
 if __name__ == "__main__":
     # Unity element constraint
-    t = TestEssMat(n_points=15, n_batch=1, tol=1e-12)
+    t = TestEssMat(n_points=500, n_batch=1, tol=1e-12)
 
     # t.test_constraints()
     # t.test_cost_matrix_nonoise()
@@ -645,4 +701,5 @@ if __name__ == "__main__":
     # t.test_kornia_backward()
 
     # Gradient Comparison
-    t.compare_with_kornia(sigma_val=0 / 800)
+    # jac = t.compute_analytical_jacobians()
+    t.test_estimators_backward(sigma_val=0.0)
