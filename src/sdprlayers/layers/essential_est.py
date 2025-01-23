@@ -70,6 +70,7 @@ class SDPEssMatEst(nn.Module):
             "MSK_DPAR_INTPNT_CO_TOL_MU_RED": tol / 1e2,
             "MSK_DPAR_INTPNT_CO_TOL_INFEAS": tol,
             "MSK_DPAR_INTPNT_CO_TOL_DFEAS": tol,
+            "MSK_IPAR_LOG": 10,
         }
         # Initialize HomQCQP class for sparse decomposition
         self.homQCQP = HomQCQP(homog_var="h")
@@ -117,14 +118,14 @@ class SDPEssMatEst(nn.Module):
         keypoints_trg,
         weights,
         verbose=False,
-        rescale=False,
+        rescale=True,
         compute_rotation=False,
         ext_vars_list=[],
     ):
         """
         Compute the optimal essential matrix relating source and target frame. This
             matrix minimizes the following cost function:
-            C(E) = sum( x_trg^T E x_src )
+            C(E) = sum( x_trg^T E x_src )^2
             where x_trg is a target keypoint drawn from keypoints_trg and x_src is a source keypoint drawn from keypoints_src. It is assumed that these keypoints are normalized.
 
         Args:
@@ -132,11 +133,18 @@ class SDPEssMatEst(nn.Module):
             keypoints_trg (torch,tensor, Bx3xN): 2D (homogenized) point coordinates of keypoints from target frame.
             weights (torch.tensor, Bx1xN): weights in range (0, 1) associated with the matched source and target
                                            points.
+            verbose (bool): A flag to indicate whether to print out the optimization progress.
+            rescale (bool): A flag to indicate whether to scale the cost matrix to improve optimization conditioning.
+            compute_rotation (bool): A flag to indicate whether to compute the rotation matrix from the essential matrix.
+            ext_vars_list (list): A list of dictionaries containing the primal-dual solution for the SDP relaxation.
 
         Returns:
-            F_trg_src (torch.tensor, Bx3x3): Fundamental matrix relating source and target frame.
-            e_src (torch.tensor, Bx3x1): Epipole corresponding to the fundamental matrix.
-        """
+            Es (torch.tensor, Bx3x3): Essential matrix relating source and target frame.
+            Rs (torch.tensor, Bx3x3): Rotation matrix relating source and target frame.
+            ts (torch.tensor, Bx3x1): Translation vector relating source and target frame.
+            X (torch.tensor, Bx13x13): Solution matrix from the SDP relaxation.
+            rank (int): Rank of the solution matrix.
+            """
 
         # Construct objective function
         # with record_function("SDPR: Build Cost Matrix"):
@@ -188,8 +196,7 @@ class SDPEssMatEst(nn.Module):
         ts = x[:, 10:, :]
 
         if compute_rotation:
-            # There is ambiguity in the solution at this point due to the fact that there are 10 possible essential matrices for a given set of keypoint correspondences.
-            # To deal with this we compute the "best" rotation and translation using the kornia library
+            # Compute the rotation matrix from the essential matrix
             if self.K_source is None:
                 K_source = torch.eye(3).expand(Es.shape[0], -1, -1)
             else:
@@ -227,6 +234,8 @@ class SDPEssMatEst(nn.Module):
             keypoints_src (torch.Tensor): A tensor of shape (N_batch, 3, N) representing the 2D normalized coordinates of keypoints in the source frame. N_batch is the batch size and N is the number of keypoints.
             keypoints_trg (torch.Tensor): A tensor of shape (N_batch, 3, N) representing the 2D normalized coordinates of keypoints in the target frame. N_batch is the batch size and N is the number of keypoints.
             weights (torch.Tensor): A tensor of shape (N_batch, 1, N) representing the weights corresponding to each keypoint.
+            scale_offset (bool): A boolean flag to indicate whether to scale the cost matrix to improve optimization conditioning.
+            regularize (bool): A boolean flag to indicate whether to add regularization to the translation and homogenization parts of the cost matrix.
         Returns:
             _type_: _description_
         """
@@ -254,10 +263,10 @@ class SDPEssMatEst(nn.Module):
             offsets = Q[:, 0, 0].clone()
             Q[:, 0, 0] = torch.zeros(B).cuda()
             # rescale
-            scales = torch.norm(Q, p="fro")
-            Q = Q / torch.norm(Q, p="fro")
+            scales = torch.linalg.norm(Q, ord="fro", dim=(1, 2))
+            Q = Q / scales[:, None, None]
         else:
-            scales, offsets = None, None
+            scales, offsets = torch.ones(B), torch.zeros(B)
         # Add Regularization (Should not affect solution)
         if regularize:
             h = 0

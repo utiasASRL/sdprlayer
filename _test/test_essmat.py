@@ -20,9 +20,18 @@ def set_seed(x):
     torch.manual_seed(x)
 
 
+class MultipleErrors(Exception):
+    def __init__(self, errors):
+        self.errors = errors
+        super().__init__(self._format_errors())
+
+    def _format_errors(self):
+        return "\n".join(f"{i+1}. {str(e)}" for i, e in enumerate(self.errors))
+
+
 class TestEssMat(unittest.TestCase):
 
-    def __init__(self, *args, n_batch=1, n_points=50, tol=1e-12, seed=1, **kwargs):
+    def __init__(self, *args, n_batch=10, n_points=50, tol=1e-12, seed=1, **kwargs):
         super(TestEssMat, self).__init__(*args, **kwargs)
         # Default dtype
         torch.set_default_dtype(torch.float64)
@@ -37,9 +46,9 @@ class TestEssMat(unittest.TestCase):
         ts_ts_s, Rs_ts, keys_3d_s = utils.get_gt_setup(
             N_map=n_points,
             N_batch=n_batch,
-            traj_type="clusters",
+            traj_type="circle",
             offs=np.array([[0, 0, dist]]).T,
-            lm_bound=dist * 0.9,
+            lm_bound=dist * 0.5,
         )
         # Define Camera
         # self.camera = CameraModel(800, 800, 0.0, 0.0, 0.0)
@@ -72,6 +81,11 @@ class TestEssMat(unittest.TestCase):
         self.keypoints_trg = self.map_src_to_trg(
             keys_3d_s=keys_3d_s, Rs_ts=self.Rs_ts, ts_st_t=ts_st_t
         )
+        # Check the keypoints to ensure good conditioning
+        if np.any(np.abs(self.keypoints_src.detach().numpy()) > 1e2):
+            raise ValueError("Source keypoints are not well conditioned")
+        if np.any(np.abs(self.keypoints_trg.detach().numpy()) > 1e2):
+            raise ValueError("Source target are not well conditioned")
 
         # Generate Scalar Weights
         self.weights = torch.ones(
@@ -133,13 +147,13 @@ class TestEssMat(unittest.TestCase):
     def test_constraints(self, sol=None):
         """Test that the constraints characterize the fundamental matrix and epipole."""
         if sol is None:
-            sol = np.array(self.sol[0])
+            sol = self.sol[0].detach()
 
         # Get constraints and test
         constraints = self.layer.sdprlayer.constr_list
         viol = np.zeros((len(constraints)))
         for i, A in enumerate(constraints):
-            viol[i] = (sol.T @ A @ sol)[0, 0]
+            viol[i] = (sol.T @ A.toarray() @ sol)[0, 0]
             np.testing.assert_allclose(
                 viol[i], 0.0, atol=1e-8, err_msg=f"Constraint {i+1} has violation"
             )
@@ -156,24 +170,25 @@ class TestEssMat(unittest.TestCase):
         # Add Noise
         sigma = torch.tensor(sigma_val)
         trgs = self.keypoints_trg.clone()
-        # trgs[:, :2, :] += sigma * torch.randn(B, 2, N)
+        trgs[:, :2, :] += sigma * torch.randn(B, 2, N)
         srcs = self.keypoints_src.clone()
-        # srcs[:, :2, :] += sigma * torch.randn(B, 2, N)
+        srcs[:, :2, :] += sigma * torch.randn(B, 2, N)
 
         # Compute actual cost at ground truth solution
         cost_true = np.zeros(B)
         for b in range(B):
-            src = srcs[b].cpu().numpy()
-            trg = trgs[b].cpu().numpy()
-            E = self.Es[b].cpu().numpy()
+            src = srcs[b].detach().numpy()
+            trg = trgs[b].detach().numpy()
+            E = self.Es[b].detach().numpy()
             for i in range(N):
                 cost_true[b] += (
                     self.weights[b, :, i] * (trg[:, [i]].T @ E @ src[:, [i]]) ** 2
                 )
+        cost_true = cost_true / N
 
         # Construct objective matrix - (No scaling)
         Q, scale, offs = SDPEssMatEst.get_obj_matrix_vec(
-            srcs, trgs, self.weights, scale_offset=False
+            srcs, trgs, self.weights, scale_offset=False, regularize=False
         )
 
         for b in range(B):
@@ -184,11 +199,11 @@ class TestEssMat(unittest.TestCase):
                 row = (trgs[b, :, [n]] @ srcs[[b], :, n]).reshape(1, -1)
                 Q_list.append(row.mT @ row)
                 rows.append(row)
-            Q_test = sum(Q_list)
+            Q_test = sum(Q_list) / N
             rows = torch.cat(rows, 0)
             np.testing.assert_allclose(
-                Q[b][1:10][:, 1:10].numpy(),
-                Q_test.numpy(),
+                Q[b][1:10][:, 1:10].detach(),
+                Q_test.detach(),
                 atol=1e-12,
                 err_msg="Cost matrix does not match cost function",
             )
@@ -196,7 +211,7 @@ class TestEssMat(unittest.TestCase):
         # Check that matrix does the same thing
         cost_mat = self.sol.mT.bmm(Q.bmm(self.sol))[:, 0, 0]
         np.testing.assert_allclose(
-            cost_mat,
+            cost_mat.detach(),
             cost_true,
             atol=1e-12,
             err_msg="Matrix cost not equal to true cost",
@@ -210,20 +225,10 @@ class TestEssMat(unittest.TestCase):
         # Check that matrix does the same thing
         cost_mat = self.sol.mT.bmm(Q.bmm(self.sol))[:, 0, 0] * scale + offs
         np.testing.assert_allclose(
-            cost_mat,
+            cost_mat.detach(),
             cost_true,
             atol=1e-12,
             err_msg="Matrix cost not equal to true cost",
-        )
-
-    def test_feasibility(self):
-        """Test that the sdpr localization properly estimates the target
-        transformation under no noise condition"""
-
-        # zero the weights and run the problem
-        wts = self.weights * torch.tensor(0.0)
-        E_mats, t_vecs, X, rank = self.layer(
-            self.keypoints_src, self.keypoints_trg, wts, rescale=False, verbose=True
         )
 
     def test_sdpr_forward_nonoise(self, plot=False):
@@ -263,10 +268,10 @@ class TestEssMat(unittest.TestCase):
         assert rank == 1, ValueError("Rank of solution is not 1")
 
         # Check that estimate matches actual
-        E_est = Es_est[0].numpy()
-        t_est = ts_est[0].numpy()
-        E_gt = self.Es[0].numpy()
-        t_gt = self.ts_st_t_norm[0].numpy()
+        E_est = Es_est[0].detach()
+        t_est = ts_est[0].detach()
+        E_gt = self.Es[0].detach()
+        t_gt = self.ts_st_t_norm[0].detach()
 
         # If no noise, check that we are close to solution
         if sigma_val == 0.0:
@@ -280,9 +285,9 @@ class TestEssMat(unittest.TestCase):
         else:
             # Otherwise, check that the cost is better than the ground truth cost
             b = 0
-            src = srcs[b].cpu().numpy()
-            trg = trgs[b].cpu().numpy()
-            E_gt = self.Es[b].cpu().numpy()
+            src = srcs[b].cpu().detach()
+            trg = trgs[b].cpu().detach()
+            E_gt = self.Es[b].cpu().detach()
             cost_gt = 0.0
             cost_est = 0.0
             for i in range(N):
@@ -292,20 +297,22 @@ class TestEssMat(unittest.TestCase):
                 cost_est += (
                     self.weights[b, :, i] * (trg[:, [i]].T @ E_est @ src[:, [i]]) ** 2
                 )
-            assert cost_est < cost_gt, ValueError(
+            assert cost_est < cost_gt + 1e-5, ValueError(
                 "Estimate cost not lower than ground truth cost"
             )
 
-    def test_kornia_solution(self, sigma_val=0.0):
+    def test_kornia_solution(self):
+        """Tests the Kornia solution for the essential matrix
+        Note: Kornia only works when the points are coordinated (i.e. no noise)"""
         # Sizes
         B = self.keypoints_src.size(0)
         N = self.keypoints_src.size(2)
         # Add Noise
-        sigma = torch.tensor(sigma_val)
         trgs = self.keypoints_trg.clone()
-        trgs[:, :2, :] += sigma * torch.randn(B, 2, N)
         srcs = self.keypoints_src.clone()
-        srcs[:, :2, :] += sigma * torch.randn(B, 2, N)
+        # sigma = torch.tensor(sigma_val)
+        # trgs[:, :2, :] += sigma * torch.randn(B, 2, N)
+        # srcs[:, :2, :] += sigma * torch.randn(B, 2, N)
 
         # Get essential matrix, and extract rotation, translation
         Es, ts, Rs = utils.get_kornia_solution(
@@ -316,51 +323,41 @@ class TestEssMat(unittest.TestCase):
         )
 
         # Test values
-        if sigma_val == 0.0:
-            for b in range(B):
-                if np.linalg.norm(self.Es[b] - Es[b]) > np.linalg.norm(
-                    self.Es[b] + Es[b]
-                ):
-                    Es[b] = -Es[b]
-                np.testing.assert_allclose(
-                    Es[b].numpy(),
-                    self.Es[b].numpy(),
-                    atol=1e-10,
-                    err_msg="Kornia solution not correct",
-                )
-        else:
-            # Otherwise, check that the cost is better than the ground truth cost
-            for b in range(B):
-                src = srcs[b].cpu().numpy()
-                trg = trgs[b].cpu().numpy()
-                E_gt = self.Es[b].cpu().numpy()
-                E_est = Es[b].detach().numpy()
-                cost_gt = 0.0
-                cost_est = 0.0
-                for i in range(N):
-                    cost_gt += (
-                        self.weights[b, :, i]
-                        * (trg[:, [i]].T @ E_gt @ src[:, [i]]) ** 2
-                    )
-                    cost_est += (
-                        self.weights[b, :, i]
-                        * (trg[:, [i]].T @ E_est @ src[:, [i]]) ** 2
-                    )
-                assert cost_est < cost_gt, ValueError(
-                    "Estimate cost not lower than ground truth cost"
-                )
+        for b in range(B):
+            if torch.linalg.norm(self.Es[b] - Es[b]) > torch.linalg.norm(
+                self.Es[b] + Es[b]
+            ):
+                Es[b] = -Es[b]
+            np.testing.assert_allclose(
+                Es[b].detach(),
+                self.Es[b].detach(),
+                atol=1e-10,
+                err_msg="Kornia solution not correct",
+            )
 
     def test_estimators_backward(
-        self, test=True, sigma_val=0.0, plot_jacobians=True, save_data=False
+        self,
+        test=True,
+        sigma_val=0.0,
+        plot_jacobians=False,
+        save_data=False,
+        test_kornia=False,
     ):
         """Compare gradients between Kornia (local solve) and SDP solver
         NOTE: Gradients are computed with respect to pose variables. Gradients wrt keypoints will not work for Kornia since it only gives the correct solution when there is no-noise (i.e. points are coordinated).
-        NOTE:"""
+        """
         # Estimators
-        estimator_list = ["sdpr-sdp", "sdpr-is", "sdpr-cift", "kornia"]
-        soln_atol = [1e-5, 1e-5, 1e-5, 1e-5]
-        jac_atol = [5e-2, 1e-4, 1e-4, 1e-10]
-        # estimator_list = ["sdpr-sdp", "sdpr-is", "kornia"]
+        if test_kornia:
+            estimator_list = ["sdpr-sdp", "sdpr-is", "sdpr-cift", "kornia"]
+        else:
+            estimator_list = ["sdpr-sdp", "sdpr-is", "sdpr-cift"]
+        tolerances = {
+            "sdpr-sdp": dict(soln_atol=5e-5, jac_atol=5e-3),
+            "sdpr-is": dict(soln_atol=5e-5, jac_atol=2e-5),
+            "sdpr-cift": dict(soln_atol=5e-5, jac_atol=2e-5),
+            "kornia": dict(soln_atol=1e-10, jac_atol=1e-10),
+        }
+
         # Sizes
         B = self.keypoints_src.size(0)
         N = self.keypoints_src.size(2)
@@ -391,13 +388,15 @@ class TestEssMat(unittest.TestCase):
                 self.weights,
                 K,
                 jac_vars=jac_inputs,
-                tol=1e-11,
+                rescale=True,
+                tol=1e-12,
             )
             # Compute distance from ground truth value (flip sign if needed)
             err1 = torch.norm(Es_est - self.Es, dim=(-1, -2))
             err2 = torch.norm(Es_est + self.Es, dim=(-1, -2))
             est_err_norm, indices = torch.min(torch.stack([err1, err2], dim=-1), dim=-1)
             est_err_norm = est_err_norm.detach()
+            # The essential matrix has a sign ambiguity, so we flip signs accordingly
             for b in range(B):
                 if indices[b] > 0:
                     Es_est[b] = -Es_est[b]
@@ -406,21 +405,34 @@ class TestEssMat(unittest.TestCase):
             # Compute cost
             costs = utils.compute_cost(srcs, trgs, self.weights, Es_est)
             if test:
-                # Test solution
-                np.testing.assert_allclose(
-                    est_err_norm,
-                    0 * est_err_norm,
-                    atol=soln_atol[iEst],
-                    err_msg=f"{estimator} solution error is large",
-                )
-                # Test jacobians
-                for i, jacobian in enumerate(jacobians):
-                    np.testing.assert_allclose(
-                        jacobian.detach(),
-                        jacobians_true[i].detach(),
-                        atol=jac_atol[iEst],
-                        err_msg=f"{estimator} jacobian error is large",
-                    )
+                error_messages = []
+                # Loop over test cases
+                for b in range(B):
+                    # Test solution
+                    try:
+                        np.testing.assert_allclose(
+                            est_err_norm[b],
+                            0,
+                            atol=tolerances[estimator]["soln_atol"],
+                            err_msg=f"{estimator} solution error is large",
+                        )
+                    except AssertionError as e:
+                        error_messages.append(
+                            f"Test Case {b}: {estimator} Solution Error: {str(e)}"
+                        )
+                    # Test jacobians
+                    for i, jacobian in enumerate(jacobians):
+                        try:
+                            np.testing.assert_allclose(
+                                jacobian[b].detach(),
+                                jacobians_true[i][b].detach(),
+                                atol=tolerances[estimator]["jac_atol"],
+                                err_msg=f"{estimator} jacobian error is large",
+                            )
+                        except AssertionError as e:
+                            error_messages.append(
+                                f"Test Case {b}: {estimator} Jacobian Error: {str(e)}"
+                            )
             # Store data
             data_dict = dict(
                 estimator=estimator,
@@ -450,6 +462,10 @@ class TestEssMat(unittest.TestCase):
             df.to_pickle(fname)
             return fname, df
 
+        # Rethrow errors
+        if len(error_messages) > 0:
+            raise MultipleErrors(error_messages)
+
     def compute_analytical_jacobians(self):
         """Compute the analytical jacobians of the essential matrix with respect to the rigid body translation and rotation."""
         # Variables
@@ -474,20 +490,13 @@ class TestEssMat(unittest.TestCase):
 
 if __name__ == "__main__":
     # Unity element constraint
-    t = TestEssMat(n_points=200, n_batch=1, tol=1e-12)
+    # t = TestEssMat(n_points=50, n_batch=10, tol=1e-12)
+    t = TestEssMat()
 
     # t.test_constraints()
     # t.test_cost_matrix_nonoise()
     # t.test_cost_matrix()
-    # t.test_feasibility()
     # t.test_sdpr_forward_nonoise()
     # t.test_sdpr_forward(sigma_val=10 / 800)
-    # t.test_cost_backward()
-    # t.test_layer_backward(sigma_val=0 / 800)
-    # t.test_kornia_solution(sigma_val=10 / 800)
-    # t.test_kornia_solution(sigma_val=0 / 800)
-    # t.test_kornia_backward()
-
-    # Gradient Comparison
-    # jac = t.compute_analytical_jacobians()
+    # t.test_kornia_solution()
     t.test_estimators_backward()

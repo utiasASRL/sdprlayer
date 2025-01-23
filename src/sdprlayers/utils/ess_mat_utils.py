@@ -117,6 +117,7 @@ def get_kornia_solution(srcs, trgs, wts, K=torch.eye(3)):
     """Get the essential matrix using the kornia library.
     This uses Nister's 5 point algorithm."""
     # Reshape to kornia format
+    n_batch = srcs.shape[0]
     srcs_krn = srcs[:, :2, :].mT
     trgs_krn = trgs[:, :2, :].mT
     wts_krn = wts[:, 0, :]
@@ -135,7 +136,7 @@ def get_kornia_solution(srcs, trgs, wts, K=torch.eye(3)):
     # Get singular values
     _, sv, _ = torch.linalg.svd(Es_kornia)
     # Normalize Essential Matrix
-    Es_kornia = Es_kornia / sv[..., [0], None].expand(1, 10, 3, 3)
+    Es_kornia = Es_kornia / sv[..., [0], None].expand(n_batch, 10, 3, 3)
     # Null space check
     dists_chkd = torch.where(sv[..., 2] < 1e-9, dists, 1000)
     # Get index of best solution.

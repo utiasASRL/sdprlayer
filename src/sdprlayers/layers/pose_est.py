@@ -183,10 +183,10 @@ class SDPPoseEstimator(nn.Module):
             offsets = Q[:, 0, 0].clone()
             Q[:, 0, 0] = torch.zeros(B).to(device)
             # rescale
-            scales = torch.norm(Q, p="fro")
-            Q = Q / torch.norm(Q, p="fro")
+            scales = torch.linalg.norm(Q, ord="fro", dim=(1, 2))
+            Q = Q / scales[:, None, None]
         else:
-            scales, offsets = None, None
+            scales, offsets = torch.ones(B), torch.zeros(B)
         return Q, scales, offsets
 
     def get_obj_matrix(
