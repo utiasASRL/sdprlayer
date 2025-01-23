@@ -201,7 +201,7 @@ class TestSDPRPoly6(unittest.TestCase):
 
             # Differentiate the solution that is passed into the second layer
             vecX = cones.vec_symm(x_vals @ x_vals.T)
-            ext_vars_list = [dict(x=np.zeros(4), s=np.zeros(vecX.shape), y=vecX)]
+            ext_vars_list = [dict(y=vecX)]
             X, x = optlayer2(build_data_mat(p_vals), ext_vars_list=ext_vars_list)
 
             return x

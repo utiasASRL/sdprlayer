@@ -117,8 +117,8 @@ class SDPEssMatEst(nn.Module):
         keypoints_trg,
         weights,
         verbose=False,
-        rescale=True,
-        choose_soln=True,
+        rescale=False,
+        compute_rotation=False,
         ext_vars_list=[],
     ):
         """
@@ -184,43 +184,32 @@ class SDPEssMatEst(nn.Module):
         rank = np.max(ranks)
 
         # Extract solution
-        E_mats = torch.reshape(x[:, 1:10, :], (-1, 3, 3))
+        Es = torch.reshape(x[:, 1:10, :], (-1, 3, 3))
+        ts = x[:, 10:, :]
 
-        if choose_soln:
+        if compute_rotation:
             # There is ambiguity in the solution at this point due to the fact that there are 10 possible essential matrices for a given set of keypoint correspondences.
             # To deal with this we compute the "best" rotation and translation using the kornia library
             if self.K_source is None:
-                K_source = torch.eye(3).expand(E_mats.shape[0], -1, -1)
+                K_source = torch.eye(3).expand(Es.shape[0], -1, -1)
             else:
                 K_source = self.K_source
 
             if self.K_target is None:
-                K_target = torch.eye(3).expand(E_mats.shape[0], -1, -1)
+                K_target = torch.eye(3).expand(Es.shape[0], -1, -1)
             else:
                 K_target = self.K_target
             # Choose the rotation and translation that best represent the keypoints
             # Returns R_ts and t_ts_s
             Rs, ts, points_3d = motion_from_essential_choose_solution(
-                E_mats,
+                Es,
                 K_target,
                 K_source,
                 keypoints_trg[:, :2, :].mT,
                 keypoints_src[:, :2, :].mT,
             )
-            # reconstruct Essential matrices
-            Es = E_mats
         else:
-            # NOTE this does not necessarily get the solution with the most points in
-            # front of the camera.
-            # Get the solution from the optimization
-            ts = x[:, 10:]
-            Es = E_mats
-            # Get a valid Rotation matrix
-            U, Sigma, V = torch.linalg.svd(Es)
-            W = torch.tensor([[0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
-            Rs = U @ W @ V
-            # Make sure the frame is right handed
-            Rs = Rs * torch.linalg.det(Rs)
+            Rs = None
 
         return Es, Rs, ts, X, rank
 
@@ -257,7 +246,7 @@ class SDPEssMatEst(nn.Module):
 
         # Form cost matrix
         Q = torch.zeros(B, 13, 13, device=keypoints_src.device)
-        Q[:, e, e] = Q_ff
+        Q[:, e, e] = Q_ff / N
 
         # NOTE: operations below are to improve optimization conditioning for solver
         # remove constant offset

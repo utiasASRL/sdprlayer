@@ -6,6 +6,7 @@ import numpy as np
 import torch
 from diffcp.cones import vec_symm
 from pylgmath.so3.operations import vec2rot
+from torch.func import jacrev, vmap
 from tqdm import tqdm
 
 import sdprlayers.utils.fund_mat_utils as utils
@@ -187,60 +188,63 @@ def get_soln_and_jac(
     # Manually loop through batches
     n_batch = points_t.shape[0]
     n_points = points_t.shape[-1]
-    estimates, jacobians, times_f, times_b = [], [], [], []
-    jacobians = []
     print(f"Running {n_batch} Tests of {n_points} points with estimator {estimator}")
-    for b in tqdm(range(n_batch)):
-        # Define input variables
-        inputs = [
-            points_s[[b], :2, :].requires_grad_(True),
-            points_t[[b], :2, :].requires_grad_(True),
-            weights[[b], :2, :].requires_grad_(True),
-        ]
-        # Homogenized
-        inputs_h = [
-            torch.cat([inputs[0], torch.ones(1, 1, n_points)], dim=1),
-            torch.cat([inputs[1], torch.ones(1, 1, n_points)], dim=1),
-            inputs[2],
-        ]
+    # Define input variables
+    inputs = [
+        points_s[:, :2, :].requires_grad_(True),
+        points_t[:, :2, :].requires_grad_(True),
+        weights[:, :2, :].requires_grad_(True),
+    ]
+    # Homogenized
+    inputs_h = [
+        torch.cat([inputs[0], torch.ones(n_batch, 1, n_points)], dim=1),
+        torch.cat([inputs[1], torch.ones(n_batch, 1, n_points)], dim=1),
+        inputs[2],
+    ]
 
-        # Apply forward pass of estimator and time the response
-        Tf_0 = time.time()
-        if estimator in "kornia":
-            # Add intrinsic camera matrix for Kornia solution
-            kwargs.update(dict(K=K))
-        # Run Estimator
-        outputs = forward(*inputs_h, **kwargs)
-        estimates.append(outputs[0])
-        Tf_1 = time.time()
-        times_f.append(Tf_1 - Tf_0)
-        # Compute Jacobian
-        if jac_vars is None:
-            jac_vars = inputs
-        # NOTE: We do this by manually looping to avoid issues with vmap
-        # Output gradient vectors
-        grad_outputs = torch.eye(9).reshape(9, 3, 3)
-        Tb_0 = time.time()
-        jacs = [[] for i in range(len(jac_vars))]
-        # Loop over output gradients
-        for grad_output in grad_outputs:
-            grads = torch.autograd.grad(
-                estimates[-1][0], jac_vars, grad_output, retain_graph=True
-            )
-            for iInput in range(len(jac_vars)):
-                jacs[iInput].append(grads[iInput].flatten())
-        # Stack gradients into jacobian and store
-        jacobians.append([torch.stack(jac) for jac in jacs])
-        Tb_1 = time.time()
-        times_b.append(Tb_1 - Tb_0)
+    # Add intrinsic camera matrix for Kornia solution
+    if estimator in "kornia":
+        kwargs.update(dict(K=K))
 
-    # Get average times
-    time_f = np.mean(times_f)
-    time_b = np.mean(times_b)
-    # batch estimates
-    estimates = torch.concat(estimates, dim=0).detach()
+    # Call the estimator
+    estimates = forward(*inputs_h, **kwargs)[0]
+    estimates_vec = estimates.flatten(start_dim=1)
 
-    return estimates, jacobians, time_f, time_b
+    # Compute Jacobian
+    if jac_vars is None:
+        jac_vars = inputs
+
+    # Compute the Jacobian for each input variable
+    jacobians = []
+    for jac_var in jac_vars:
+        jacobians.append(tensor_jacobian(estimates_vec, jac_var))
+
+    return estimates, jacobians
+
+
+def tensor_jacobian(output, input):
+    """Compute Jacobian between batched input and output tensors. """
+    # Compute Jacobian manually
+    n_batch = output.shape[0]
+    batched_jacobian = []
+    for b in range(n_batch):
+        jacobian = []
+        for i in range(output.shape[1]):  # Loop over output dimensions
+            grad_output = torch.zeros_like(output[b])
+            grad_output[i] = 1.0
+            grad_input = torch.autograd.grad(
+                outputs=output[b],
+                inputs=input,
+                grad_outputs=grad_output,
+                retain_graph=True,  # Keep computation graph for multiple calls
+            )[0]
+            jacobian.append(grad_input[b].flatten())
+        jacobian = torch.stack(jacobian)
+        batched_jacobian.append(jacobian)
+    batched_jacobian = torch.stack(batched_jacobian)  # Stack into a matrix
+    # Pick batch elements
+
+    return batched_jacobian
 
 
 def compute_cost(srcs, trgs, weights, Es_est):
