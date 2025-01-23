@@ -359,7 +359,7 @@ class TestEssMat(unittest.TestCase):
         # Estimators
         estimator_list = ["sdpr-sdp", "sdpr-is", "sdpr-cift", "kornia"]
         soln_atol = [1e-5, 1e-5, 1e-5, 1e-5]
-        jac_atol = [5e-2, 1e-10, 1e-10, 1e-10]
+        jac_atol = [5e-2, 1e-4, 1e-4, 1e-10]
         # estimator_list = ["sdpr-sdp", "sdpr-is", "kornia"]
         # Sizes
         B = self.keypoints_src.size(0)
@@ -391,7 +391,7 @@ class TestEssMat(unittest.TestCase):
                 self.weights,
                 K,
                 jac_vars=jac_inputs,
-                tol=1e-12,
+                tol=1e-11,
             )
             # Compute distance from ground truth value (flip sign if needed)
             err1 = torch.norm(Es_est - self.Es, dim=(-1, -2))

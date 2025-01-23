@@ -610,7 +610,7 @@ def _QCQPDiffFn(
                 # Solve Differential KKT System
                 if M.shape[0] == M.shape[1]:
                     # Symmetric case, use Minimum Residual Solver (since matrix is symmetric but may be indefinite)
-                    sol, info = sp.linalg.minres(M.T, dz_bar, rtol=ctx.lsqr_tol**2)
+                    sol, info = sp.linalg.minres(M.T, dz_bar, rtol=ctx.lsqr_tol)
                     sol = sol[:, None]
                     res = np.linalg.norm(M.T @ sol - dz_bar)
                 else:
