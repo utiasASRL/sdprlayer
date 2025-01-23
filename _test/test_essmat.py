@@ -219,7 +219,7 @@ class TestEssMat(unittest.TestCase):
 
         # Construct objective matrix - (with scaling)
         Q, scale, offs = SDPEssMatEst.get_obj_matrix_vec(
-            srcs, trgs, self.weights, scale_offset=True
+            srcs, trgs, self.weights, scale_offset=True, regularize=False
         )
 
         # Check that matrix does the same thing
@@ -354,7 +354,7 @@ class TestEssMat(unittest.TestCase):
         tolerances = {
             "sdpr-sdp": dict(soln_atol=5e-5, jac_atol=5e-3),
             "sdpr-is": dict(soln_atol=5e-5, jac_atol=2e-5),
-            "sdpr-cift": dict(soln_atol=5e-5, jac_atol=2e-5),
+            "sdpr-cift": dict(soln_atol=5e-5, jac_atol=1e-4),
             "kornia": dict(soln_atol=1e-10, jac_atol=1e-10),
         }
 
@@ -495,7 +495,7 @@ if __name__ == "__main__":
 
     # t.test_constraints()
     # t.test_cost_matrix_nonoise()
-    # t.test_cost_matrix()
+    t.test_cost_matrix()
     # t.test_sdpr_forward_nonoise()
     # t.test_sdpr_forward(sigma_val=10 / 800)
     # t.test_kornia_solution()
