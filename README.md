@@ -2,7 +2,7 @@
 # SDPRLayers
 
 
-The SDPRLayer is an PyTorch-based optimization layer for semidefinite program relaxations (SDPR) of non-convex polynomial problems designed for certifiable optimization. The forward pass of the layer solves the SDP relaxation, while the backward pass uses implicit differentiation to compute gradients of the solution with respect to input parameters. When the SDP relaxation is *tight* to the original problem, the output of the layer and the gradients produced during backpropagation are *guaranteed* to be correct.
+The SDPRLayer is an PyTorch-based optimization layer for semidefinite program relaxations (SDPR) of non-convex polynomial problems designed for certifiable optimization. The forward pass of the layer solves the SDP relaxation, while the backward pass uses implicit differentiation to compute gradients of the solution with respect to input parameters. When the SDP relaxation is *tight* to the original problem, the output of the layer and the gradients produced during backpropagation are *guaranteed* to be correct. Backpropagation can be computed using either the SDP relaxation itself or the QCQP formulation of the polynomial problem.
 
 Please see our [paper](https://arxiv.org/abs/2405.19309) for more details.
 
@@ -97,9 +97,13 @@ Note that in this case, the solution and its gradients are not certified to be o
 
 ## Examples
 
-The test scripts in [[Testing Functionality]] are a good source of example usages. The `_scripts` directory also has the experiments used in the paper. An example of how to use the *tightening* tools is given [here](_scripts/tighten_example.ipynb).
+Two differentiable layers have been built and tested that make use of SDPRLayers:
+- **Pose Estimation**: Estimate relative pose between two clouds of 3D keypoints. The SDP formulation allows to find global solutions when matrix-weights of the errors are used, which is important for aligning point clouds built from stereo images. Problem formulation 
+- **Essential Matrix Estimation**: Global estimation of the essential matrix between two clouds of 2D point correspondences. This formulation finds the globally optimal essential matrix that minimizes the "algebraic error" associated with a set of point correspondences. We follow the setup shown in [this paper](https://arxiv.org/pdf/1903.09067v3).
 
-To see an example usage of the SDPRLayer in a full robotics pipeline, see [our robot localization example](https://github.com/utiasASRL/deep_learned_visual_features/tree/mat-weight-sdp-version) (note that this is not on the main branch of the repo).
+The test scripts in [the test section](#testing-functionality) are a good source of example usages of the pre-built layers, while the layers themselves demonstrate how to make use of SDPRLayers 
+
+The `_scripts` directory also has the experiments used in the paper. An example of how to use the *tightening* tools is given [here](_scripts/tighten_example.ipynb). To see an example usage of the SDPRLayer in a full robotics pipeline, see [our robot localization example](https://github.com/utiasASRL/deep_learned_visual_features/tree/mat-weight-sdp-version) (note that this is not on the main branch of the repo).
 
 # Installation
 
@@ -130,6 +134,7 @@ The following test functions can be used to verify the installation:
 pytest _test/test_sdpr_poly6.py
 pytest _test/test_sdpr_poly4.py
 pytest _test/test_pose_est.py
+pytest _test/test_essmat.py
 ```
 
 Make sure to source the `.env` file in the root directory prior to running tests:

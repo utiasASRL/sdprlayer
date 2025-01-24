@@ -281,15 +281,24 @@ class SDPRLayer(CvxpyLayer):
             assert isinstance(ext_vars_list[0], dict), ValueError(
                 "ext_vars_list must be a list of dictionaries"
             )
-            assert "x" in ext_vars_list[0], ValueError(
-                "ext_vars_list dictionaries must contain keys: x, y, s"
-            )
             assert "y" in ext_vars_list[0], ValueError(
                 "ext_vars_list dictionaries must contain keys: x, y, s"
             )
-            assert "s" in ext_vars_list[0], ValueError(
-                "ext_vars_list dictionaries must contain keys: x, y, s"
-            )
+            # Check if multipliers are being computed later
+            if self.compute_multipliers:
+                # Overwrite dual vars with zeros if not defined
+                for b in range(len(ext_vars_list)):
+                    if "x" not in ext_vars_list[b]:
+                        ext_vars_list[b]["x"] = np.zeros(len(self.constr_list) + 1)
+                    if "s" not in ext_vars_list[b]:
+                        ext_vars_list[b]["s"] = np.zeros(len(ext_vars_list[b]["y"]))
+            else:
+                assert "x" in ext_vars_list[0], ValueError(
+                    "ext_vars_list dictionaries must contain keys: x, y, s"
+                )
+                assert "s" in ext_vars_list[0], ValueError(
+                    "ext_vars_list dictionaries must contain keys: x, y, s"
+                )
 
             # Modify solver_args dictionary in keywords passed to CvxpyLayers
             # NOTE: This dictionary determines the behaviour of diffcp
@@ -557,10 +566,14 @@ def _QCQPDiffFn(
                         Q = ctx.objective
                     q_bar = Q @ x
 
-                    # Solve for Lagrange Multipliers (for all constraints)
-                    res = np.linalg.lstsq(G_r.T, -q_bar, rcond=ctx.licq_tol)
+                    # Solve for Lagrange Multipliers using first order KKT condition
+                    res = la.lstsq(G_r.T, -q_bar, cond=ctx.licq_tol)
                     mults = res[0]
                     rank = res[2]
+                    residual = G_r.T @ mults + q_bar
+                    assert np.linalg.norm(residual) < ctx.kkt_tol, ValueError(
+                        "Failed to find adequate Lagrange multipliers"
+                    )
 
                     # Construct Certificate matrix and set redundant Lagrange multipliers to zero
                     H_list = [sp.csc_array(Q)]
@@ -597,7 +610,7 @@ def _QCQPDiffFn(
                 # Solve Differential KKT System
                 if M.shape[0] == M.shape[1]:
                     # Symmetric case, use Minimum Residual Solver (since matrix is symmetric but may be indefinite)
-                    sol, info = sp.linalg.minres(M.T, dz_bar,rtol=ctx.lsqr_tol)
+                    sol, info = sp.linalg.minres(M.T, dz_bar, rtol=ctx.lsqr_tol)
                     sol = sol[:, None]
                     res = np.linalg.norm(M.T @ sol - dz_bar)
                 else:
