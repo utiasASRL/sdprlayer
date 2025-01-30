@@ -89,6 +89,8 @@ def plot_map(r_l, ax=None, **kwargs):
     ax.set_ylabel("y")
     ax.set_zlabel("z")
 
+    return ax
+
 
 def savefig(fig, name, dpi=200, verbose=True):
     name = os.path.join(fig_dir, name)

@@ -22,12 +22,15 @@ mosek_params_dflt = {
 
 # When recomputing the lagrange multipliers, tolerance is the smallest singular value of the
 # constraint gradient matrix that is treated as non-zero.
-LICQ_TOL = 1e-7
+LICQ_TOL = 1e-8
 # Tolerance for norm of residuals of the KKT conditions.
 KKT_TOL = 1e-5
 # Tolerance for residuals in LSQR solve
 # (see https://docs.scipy.org/doc/scipy/reference/generated/scipy.sparse.linalg.lsqr.html#lsqr)
-LSQR_TOL = 1e-10
+LSQR_TOL = 1e-12
+# Relative Tolerance for residuals in MINRES solve.
+MINRES_TOL = 1e-20
+
 # Minimum Eigenvalue Ratio for Tightness Check.
 ER_MIN = 1e5
 
@@ -51,6 +54,7 @@ class SDPRLayer(CvxpyLayer):
         compute_multipliers=False,
         licq_tol=LICQ_TOL,
         lsqr_tol=LSQR_TOL,
+        minres_tol=MINRES_TOL,
         kkt_tol=KKT_TOL,
         redun_list=[],
     ):
@@ -92,6 +96,7 @@ class SDPRLayer(CvxpyLayer):
         self.licq_tol = licq_tol
         self.lsqr_tol = lsqr_tol
         self.kkt_tol = kkt_tol
+        self.minres_tol = minres_tol
         # Add homogenization variable
         if homogenize:
             n_vars = n_vars + 1
@@ -350,6 +355,7 @@ class SDPRLayer(CvxpyLayer):
                     self.licq_tol,
                     self.compute_multipliers,
                     self.lsqr_tol,
+                    self.minres_tol,
                     self.kkt_tol,
                 )
                 xs = qcqp_func(*param_vals_h)
@@ -482,6 +488,7 @@ def _QCQPDiffFn(
     licq_tol,
     compute_multipliers,
     lsqr_tol,
+    minres_tol,
     kkt_tol,
 ):
     class DiffQCQP(torch.autograd.Function):
@@ -529,6 +536,7 @@ def _QCQPDiffFn(
             ctx.compute_multipliers = compute_multipliers  # Flag to recompute lagrange multipliers of non-redundant constraints.
             ctx.lsqr_tol = lsqr_tol  # Tolerance for LSQR residual
             ctx.kkt_tol = kkt_tol  # Tolerance for KKT conditions
+            ctx.minres_tol = minres_tol  # relative tolerance for MINRES solver
             return xs
 
         @staticmethod
@@ -609,10 +617,16 @@ def _QCQPDiffFn(
                 )
                 # Solve Differential KKT System
                 if M.shape[0] == M.shape[1]:
-                    # Symmetric case, use Minimum Residual Solver (since matrix is symmetric but may be indefinite)
-                    sol, info = sp.linalg.minres(M.T, dz_bar, rtol=ctx.lsqr_tol)
-                    sol = sol[:, None]
-                    res = np.linalg.norm(M.T @ sol - dz_bar)
+                    # Symmetric case
+                    if M.shape[0] < 300:
+                        # Small problem, use standard solver
+                        sol = np.linalg.solve(M.T @ np.eye(M.shape[0]), dz_bar)
+                        res = np.linalg.norm(M.T @ sol - dz_bar)
+                    else:
+                        # Large problem, use Minimum Residual Solver (since matrix is symmetric but may be indefinite)
+                        sol, info = sp.linalg.minres(M.T, dz_bar, rtol=ctx.minres_tol)
+                        sol = sol[:, None]
+
                 else:
                     # Assymmetric case, use LSQR
                     ls_sol = sp.linalg.lsqr(

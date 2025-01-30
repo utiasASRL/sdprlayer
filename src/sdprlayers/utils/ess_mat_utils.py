@@ -20,47 +20,34 @@ def get_gt_setup(
     traj_type="clusters",  # Trajectory format [clusters,circle]
     N_batch=1,  # Number of poses
     N_map=10,  # number of landmarks
-    offs=np.array([[0, 0, 2]]).T,  # offset between poses and landmarks
-    n_turns=0.1,  # (circle) number of turns around the cluster
+    offs=2,  # offset between poses and landmarks
     lm_bound=1.0,  # Bounding box of uniform landmark distribution.
+    max_angle=0.1,  # Maximum angle of random rotation (rad)
 ):
     """Used to generate a trajectory of ground truth pose data"""
 
     # Ground Truth Map Points
+    offs_vec = np.array([[0, 0, offs]]).T
     # Cluster at the origin
-    r_l = lm_bound * 2 * (np.random.rand(3, N_map) - 0.5)
+    r_l = lm_bound * (2 * np.random.rand(3, N_map) - 1)
+    # Checks
+    assert offs > lm_bound / np.sqrt(2), ValueError(
+        "Offset is too small for bounding box"
+    )
+    assert max_angle < np.pi / 4, ValueError("Angle is too large")
     # Ground Truth Poses
     r_p0s = []
     C_p0s = []
-    if traj_type == "clusters":
-        # Ground Truth Poses
-        for i in range(N_batch):
-            r_p0s += [0.2 * np.random.randn(3, 1)]
-            aaxis = np.zeros((3, 1))
-            aaxis[1, 0] = 0.5 * np.random.randn(1)[0]
-            C_p0s.append(vec2rot(aaxis_ba=aaxis))
-        # Offset from the origin
-        r_l = r_l + offs
-    elif traj_type == "circle":
-        # GT poses equally spaced along n turns of a circle
-        radius = np.linalg.norm(offs)
-        assert radius > 0.2, "Radius of trajectory circle should be larger"
-        if N_batch > 1:
-            delta_phi = n_turns * 2 * np.pi / (N_batch - 1)
-        else:
-            delta_phi = n_turns * 2 * np.pi
-        phi = delta_phi
-        for i in range(N_batch):
-            # Location
-            r = radius * np.array([[np.cos(phi), np.sin(phi), 0]]).T
-            r_p0s += [r]
-            # Z Axis points at origin
-            z = -r / np.linalg.norm(r)
-            x = np.array([[0.0, 0.0, 1.0]]).T
-            y = skew(z) @ x
-            C_p0s += [np.hstack([x, y, z]).T]
-            # Update angle
-            phi = (phi + delta_phi) % (2 * np.pi)
+    # Ground Truth Poses
+    for i in range(N_batch):
+        r_p0s += [0.3 * offs * (2 * np.random.rand(3, 1) - 1)]
+        # random y axis rotation
+        aaxis = np.zeros((3, 1))
+        aaxis[1, 0] = max_angle * (2 * np.random.rand(1) - 1)
+        C_p0s.append(vec2rot(aaxis_ba=aaxis))
+    # Offset from the origin
+    r_l = r_l + offs_vec
+
     r_p0s = np.stack(r_p0s)
     C_p0s = np.stack(C_p0s)
 
@@ -224,7 +211,7 @@ def get_soln_and_jac(
 
 
 def tensor_jacobian(output, input):
-    """Compute Jacobian between batched input and output tensors. """
+    """Compute Jacobian between batched input and output tensors."""
     # Compute Jacobian manually
     n_batch = output.shape[0]
     batched_jacobian = []

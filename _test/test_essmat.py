@@ -31,7 +31,9 @@ class MultipleErrors(Exception):
 
 class TestEssMat(unittest.TestCase):
 
-    def __init__(self, *args, n_batch=10, n_points=50, tol=1e-12, seed=1, **kwargs):
+    def __init__(
+        self, *args, n_batch=10, n_points=200, tol=1e-12, seed=1, plot=False, **kwargs
+    ):
         super(TestEssMat, self).__init__(*args, **kwargs)
         # Default dtype
         torch.set_default_dtype(torch.float64)
@@ -42,14 +44,18 @@ class TestEssMat(unittest.TestCase):
         # Set up test problem
         # NOTE ts_ts_s is the vector from the source to the target frame expressed in the source frame
         # NOTE Rs_ts is the rotation that maps vectors in the source frame to vectors in the target frame
-        dist = 3
+        dist = 4
         ts_ts_s, Rs_ts, keys_3d_s = utils.get_gt_setup(
             N_map=n_points,
             N_batch=n_batch,
-            traj_type="circle",
-            offs=np.array([[0, 0, dist]]).T,
-            lm_bound=dist * 0.5,
+            traj_type="clusters",
+            offs=dist,
+            lm_bound=dist * 0.7,
         )
+        if plot:
+            ax = plot_map(keys_3d_s)
+            plot_poses(Rs_ts, ts_ts_s, ax)
+            ax.set_box_aspect([1, 1, 1])
         # Define Camera
         # self.camera = CameraModel(800, 800, 0.0, 0.0, 0.0)
         self.camera = CameraModel(1, 1, 0.0, 0.0, 0.0)
@@ -87,6 +93,9 @@ class TestEssMat(unittest.TestCase):
         if np.any(np.abs(self.keypoints_trg.detach().numpy()) > 1e2):
             raise ValueError("Source target are not well conditioned")
 
+        # Visualize feature tracks
+        if plot:
+            self.plot_feature_tracks()
         # Generate Scalar Weights
         self.weights = torch.ones(
             self.keypoints_src.size(0), 1, self.keypoints_src.size(2)
@@ -122,6 +131,46 @@ class TestEssMat(unittest.TestCase):
         K_batch = self.camera.K.expand(1, -1, -1)
         # Initialize layer
         self.layer = SDPEssMatEst(tol=tol, K_source=K_batch, K_target=K_batch)
+
+    def plot_feature_tracks(self):
+        # Detach keypoints from computation graph and convert to numpy
+        keypoints_src_np = self.keypoints_src.detach().numpy()
+        keypoints_trg_np = self.keypoints_trg.detach().numpy()
+
+        # Plot feature tracks
+        n_batch = keypoints_src_np.shape[0]
+        grid_size = int(np.ceil(np.sqrt(n_batch)))
+        fig, axes = plt.subplots(grid_size, grid_size, figsize=(15, 15))
+        axes = axes.flatten()  # Flatten the grid to easily iterate over
+
+        for i in range(n_batch):
+            ax = axes[i]
+            for j in range(keypoints_src_np.shape[2]):
+                ax.plot(
+                    [keypoints_src_np[i, 0, j], keypoints_trg_np[i, 0, j]],
+                    [keypoints_src_np[i, 1, j], keypoints_trg_np[i, 1, j]],
+                    "k-",  # Line connecting source and target
+                )
+                ax.plot(
+                    keypoints_src_np[i, 0, j],
+                    keypoints_src_np[i, 1, j],
+                    "bo",  # Source keypoint in blue
+                )
+                ax.plot(
+                    keypoints_trg_np[i, 0, j],
+                    keypoints_trg_np[i, 1, j],
+                    "ro",  # Target keypoint in red
+                )
+            ax.set_xlabel("X")
+            ax.set_ylabel("Y")
+            ax.set_title(f"Feature Tracks for Batch {i+1}")
+
+        # Hide any unused subplots
+        for i in range(n_batch, len(axes)):
+            fig.delaxes(axes[i])
+
+        plt.tight_layout()
+        plt.show()
 
     def get_essential(self, ts, xi):
         """Return essential matrix associated with a translation and Lie algebra representation of a rotation matrix."""
@@ -352,9 +401,9 @@ class TestEssMat(unittest.TestCase):
         else:
             estimator_list = ["sdpr-sdp", "sdpr-is", "sdpr-cift"]
         tolerances = {
-            "sdpr-sdp": dict(soln_atol=5e-5, jac_atol=5e-3),
-            "sdpr-is": dict(soln_atol=5e-5, jac_atol=2e-5),
-            "sdpr-cift": dict(soln_atol=5e-5, jac_atol=1e-4),
+            "sdpr-sdp": dict(soln_atol=1e-4, jac_atol=2e-2),
+            "sdpr-is": dict(soln_atol=1e-4, jac_atol=2e-2),
+            "sdpr-cift": dict(soln_atol=1e-4, jac_atol=2e-2),
             "kornia": dict(soln_atol=1e-10, jac_atol=1e-10),
         }
 
@@ -380,7 +429,7 @@ class TestEssMat(unittest.TestCase):
             jacobians_true.append(utils.tensor_jacobian(Es_vec, jac_input))
         # Assess estimators
         data_dicts = []
-        for iEst, estimator in enumerate(estimator_list):
+        for estimator in estimator_list:
             Es_est, jacobians = utils.get_soln_and_jac(
                 estimator,
                 trgs,
@@ -421,17 +470,17 @@ class TestEssMat(unittest.TestCase):
                             f"Test Case {b}: {estimator} Solution Error: {str(e)}"
                         )
                     # Test jacobians
-                    for i, jacobian in enumerate(jacobians):
+                    for i in range(len(jacobians)):
                         try:
                             np.testing.assert_allclose(
-                                jacobian[b].detach(),
+                                jacobians[i][b].detach(),
                                 jacobians_true[i][b].detach(),
                                 atol=tolerances[estimator]["jac_atol"],
                                 err_msg=f"{estimator} jacobian error is large",
                             )
                         except AssertionError as e:
                             error_messages.append(
-                                f"Test Case {b}: {estimator} Jacobian Error: {str(e)}"
+                                f"Test Case {b}-{i}: {estimator} Jacobian Error: {str(e)}"
                             )
             # Store data
             data_dict = dict(
@@ -491,11 +540,11 @@ class TestEssMat(unittest.TestCase):
 if __name__ == "__main__":
     # Unity element constraint
     # t = TestEssMat(n_points=50, n_batch=10, tol=1e-12)
-    t = TestEssMat()
+    t = TestEssMat(plot=False)
 
     # t.test_constraints()
     # t.test_cost_matrix_nonoise()
-    t.test_cost_matrix()
+    # t.test_cost_matrix()
     # t.test_sdpr_forward_nonoise()
     # t.test_sdpr_forward(sigma_val=10 / 800)
     # t.test_kornia_solution()

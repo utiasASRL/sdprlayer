@@ -53,7 +53,8 @@ use_dual | True | Specifies whether the internal disciplined convex program (DCP
 diff_qcqp | True | Specifies whether to differentiate via the QCQP KKT conditions or the SDP KKT conditions. This option can also be used to differentiate a local solution to the QCQP, without certifying global optimality.
 compute_multipliers | False | Only used if `diff_qcqp` is set to True. Specifies whether to recompute the Lagrange multipliers and certificate for original QCQP system. If used with This option can be used to compute multipliers for an existing local solution (if certification not required).
 licq_tol| 1e-7 | Tolerance used when computing the Lagrange multipliers via least-squares 
-lsqr_tol| 1e-10 | Tolerance used when computing the solution to the (adjoint) differential KKT equation via LSQR (or using `minres` when the system is symmetric). 
+lsqr_tol| 1e-10 | Tolerance used when computing the solution to the (adjoint) differential KKT equation via LSQR (when system is not symmetric). 
+minres_tol | 1e-20 | Tolerance used when computing the solution to the (adjoint) differential KKT equation via MINRES (system is symmetric and size is >300)
 kkt_tol | 1e-5 |  Tolerance used when checking that the KKT conditions are satisfied. Violation of this check usually indicates that the certificate matrix is incorrect or too many redundant constraints have been removed
 redun_list| [] | List of indicies corresponding to constraints that should be labelled as 'redundant' when computing Lagrange multipliers or solving the differential KKT system. **Note: Failure to properly identify the redundant constraints can lead to incorrect gradients!**
 
