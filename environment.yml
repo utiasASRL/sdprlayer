@@ -1,5 +1,6 @@
 name: sdprlayers
 channels:
+    - conda-forge
     - nvidia
     - pytorch
     - defaults
@@ -8,7 +9,7 @@ channels:
     - mosek
 
 dependencies:
-    - python>=3.10
+    - python=3.11
     - pip>=22.3
     # Packages
     - matplotlib>=3.6
@@ -24,6 +25,9 @@ dependencies:
     - torchvision
     - torchaudio
     - pytorch-cuda=11.8
+    #Sparse matrix libraries
+    - suitesparse      
+    - scikit-sparse 
     # Testing & linting
     - pytest>=7.1
     - pytest-cov=4.0
