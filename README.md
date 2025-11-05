@@ -9,6 +9,7 @@ Please see our [paper](https://arxiv.org/abs/2405.19309) for more details.
 # Usage
 
 The user is responsible for converting a given polynomial problem to a *Quadratically Constrained Quadratic Problem* (QCQP) of the following form:
+
 $$
 \begin{equation}
 	\begin{array}{rl}
@@ -18,6 +19,7 @@ $$
 	\end{array}
 \end{equation}
 $$
+
 with *Semidefinite Problem (SDP)* Relaxation given by:
 
 $$
