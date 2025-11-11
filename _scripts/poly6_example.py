@@ -68,7 +68,7 @@ class Poly6Example:
     ):
         # Create SDPR Layer
         optlayer = SDPRLayer(
-            n_vars=4, constraints=self.constraints, use_dual=False, diff_qcqp=diff_qcqp
+            n_vars=4, constraints=self.constraints, use_dual=False, diff_qcqp=diff_qcqp ,redun_list=[2]
         )
 
         # Set up polynomial parameter tensor
